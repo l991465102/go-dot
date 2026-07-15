@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 
 	v1 "github.com/lzw7758/go-dot/api/tracking/v1"
 	"github.com/lzw7758/go-dot/internal/project"
@@ -17,38 +16,48 @@ func NewTrackingController(service *tracking.Service) TrackingController {
 	return TrackingController{service: service}
 }
 func (c TrackingController) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/v1/tracking/categories", c.createCategory)
-	mux.HandleFunc("POST /api/v1/tracking/points", c.saveDraft)
-	mux.HandleFunc("GET /api/v1/tracking/points/{id}", c.getPoint)
-	mux.HandleFunc("PATCH /api/v1/tracking/points/{id}", c.updateDraft)
-	mux.HandleFunc("DELETE /api/v1/tracking/points/{id}", c.deleteDraft)
-	mux.HandleFunc("POST /api/v1/tracking/points/{id}/publish", c.publish)
-	mux.HandleFunc("POST /api/v1/tracking/points/{id}/copy", c.copyPoint)
-	mux.HandleFunc("POST /api/v1/tracking/points/{id}/deprecate", c.deprecate)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/categories", c.createCategory)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/points", c.saveDraft)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/points/{id}", c.getPoint)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/points/{id}", c.updateDraft)
+	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/points/{id}", c.deleteDraft)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/publish", c.publish)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/copy", c.copyPoint)
+	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/deprecate", c.deprecate)
 }
-func principalAndID(w http.ResponseWriter, r *http.Request) (uint64, uint64, bool) {
+func principalAndID(w http.ResponseWriter, r *http.Request) (uint64, uint64, uint64, bool) {
 	p, ok := PrincipalFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return 0, 0, false
+		return 0, 0, 0, false
+	}
+	projectID, err := strconv.ParseUint(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return 0, 0, 0, false
 	}
 	id, err := strconv.ParseUint(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid point id")
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return p.UserID, id, true
+	return p.UserID, projectID, id, true
 }
-func principalID(w http.ResponseWriter, r *http.Request) (uint64, bool) {
+func principalID(w http.ResponseWriter, r *http.Request) (uint64, uint64, bool) {
 	p, ok := PrincipalFromContext(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return 0, false
+		return 0, 0, false
 	}
-	return p.UserID, true
+	projectID, err := strconv.ParseUint(r.PathValue("projectID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid project id")
+		return 0, 0, false
+	}
+	return p.UserID, projectID, true
 }
 func (c TrackingController) createCategory(w http.ResponseWriter, r *http.Request) {
-	actor, ok := principalID(w, r)
+	actor, projectID, ok := principalID(w, r)
 	if !ok {
 		return
 	}
@@ -56,6 +65,7 @@ func (c TrackingController) createCategory(w http.ResponseWriter, r *http.Reques
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.ProjectID = projectID
 	result, err := c.service.CreateCategory(r.Context(), actor, req)
 	if err != nil {
 		trackingError(w, err)
@@ -64,7 +74,7 @@ func (c TrackingController) createCategory(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, result)
 }
 func (c TrackingController) saveDraft(w http.ResponseWriter, r *http.Request) {
-	actor, ok := principalID(w, r)
+	actor, projectID, ok := principalID(w, r)
 	if !ok {
 		return
 	}
@@ -72,6 +82,7 @@ func (c TrackingController) saveDraft(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	req.ProjectID = projectID
 	result, err := c.service.SaveDraft(r.Context(), actor, req)
 	if err != nil {
 		trackingError(w, err)
@@ -80,11 +91,11 @@ func (c TrackingController) saveDraft(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 func (c TrackingController) getPoint(w http.ResponseWriter, r *http.Request) {
-	actor, id, ok := principalAndID(w, r)
+	actor, projectID, id, ok := principalAndID(w, r)
 	if !ok {
 		return
 	}
-	result, err := c.service.Get(r.Context(), actor, id)
+	result, err := c.service.GetInProject(r.Context(), actor, projectID, id)
 	if err != nil {
 		trackingError(w, err)
 		return
@@ -92,7 +103,7 @@ func (c TrackingController) getPoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 func (c TrackingController) updateDraft(w http.ResponseWriter, r *http.Request) {
-	actor, id, ok := principalAndID(w, r)
+	actor, projectID, id, ok := principalAndID(w, r)
 	if !ok {
 		return
 	}
@@ -100,7 +111,7 @@ func (c TrackingController) updateDraft(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	result, err := c.service.UpdateDraft(r.Context(), actor, id, req)
+	result, err := c.service.UpdateDraftInProject(r.Context(), actor, projectID, id, req)
 	if err != nil {
 		trackingError(w, err)
 		return
@@ -108,22 +119,22 @@ func (c TrackingController) updateDraft(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, result)
 }
 func (c TrackingController) deleteDraft(w http.ResponseWriter, r *http.Request) {
-	actor, id, ok := principalAndID(w, r)
+	actor, projectID, id, ok := principalAndID(w, r)
 	if !ok {
 		return
 	}
-	if err := c.service.DeleteDraft(r.Context(), actor, id); err != nil {
+	if err := c.service.DeleteDraftInProject(r.Context(), actor, projectID, id); err != nil {
 		trackingError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 func (c TrackingController) publish(w http.ResponseWriter, r *http.Request) {
-	actor, id, ok := principalAndID(w, r)
+	actor, projectID, id, ok := principalAndID(w, r)
 	if !ok {
 		return
 	}
-	result, err := c.service.Publish(r.Context(), actor, id)
+	result, err := c.service.PublishInProject(r.Context(), actor, projectID, id)
 	if err != nil {
 		trackingError(w, err)
 		return
@@ -131,7 +142,7 @@ func (c TrackingController) publish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 func (c TrackingController) copyPoint(w http.ResponseWriter, r *http.Request) {
-	actor, id, ok := principalAndID(w, r)
+	actor, projectID, id, ok := principalAndID(w, r)
 	if !ok {
 		return
 	}
@@ -139,7 +150,7 @@ func (c TrackingController) copyPoint(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	result, err := c.service.Copy(r.Context(), actor, id, req.Code)
+	result, err := c.service.CopyInProject(r.Context(), actor, projectID, id, req.Code)
 	if err != nil {
 		trackingError(w, err)
 		return
@@ -147,7 +158,7 @@ func (c TrackingController) copyPoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 func (c TrackingController) deprecate(w http.ResponseWriter, r *http.Request) {
-	actor, id, ok := principalAndID(w, r)
+	actor, projectID, id, ok := principalAndID(w, r)
 	if !ok {
 		return
 	}
@@ -155,7 +166,7 @@ func (c TrackingController) deprecate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := c.service.Deprecate(r.Context(), actor, id, req.Reason, req.ReplacementID); err != nil {
+	if err := c.service.DeprecateInProject(r.Context(), actor, projectID, id, req.Reason, req.ReplacementID); err != nil {
 		trackingError(w, err)
 		return
 	}
@@ -163,17 +174,25 @@ func (c TrackingController) deprecate(w http.ResponseWriter, r *http.Request) {
 }
 func trackingError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
+	message := "tracking service unavailable"
 	switch {
 	case errors.Is(err, project.ErrForbidden):
 		status = http.StatusForbidden
-	case errors.Is(err, tracking.ErrPointNotFound), errors.Is(err, tracking.ErrCategoryNotFound):
+		message = "forbidden"
+	case errors.Is(err, tracking.ErrPointNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, tracking.ErrImmutable), errors.Is(err, tracking.ErrPointNotPublished):
+		message = "POINT_NOT_FOUND"
+	case errors.Is(err, tracking.ErrCategoryNotFound):
+		status = http.StatusNotFound
+		message = "CATEGORY_NOT_FOUND"
+	case errors.Is(err, tracking.ErrImmutable), errors.Is(err, tracking.ErrPointNotPublished), errors.Is(err, tracking.ErrConflict):
 		status = http.StatusConflict
-	case strings.Contains(err.Error(), "duplicate"):
-		status = http.StatusConflict
-	case strings.Contains(err.Error(), "_INVALID"), strings.Contains(err.Error(), "_REQUIRED"):
-		status = http.StatusBadRequest
+		message = err.Error()
+	default:
+		if code, ok := tracking.ErrorCode(err); ok {
+			status = http.StatusBadRequest
+			message = code
+		}
 	}
-	writeError(w, status, err.Error())
+	writeError(w, status, message)
 }

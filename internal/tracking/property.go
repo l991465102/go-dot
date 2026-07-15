@@ -1,7 +1,7 @@
 package tracking
 
 import (
-	"fmt"
+	"encoding/json"
 	"math"
 	"reflect"
 	"time"
@@ -12,9 +12,10 @@ type PropertyType string
 const (
 	String   PropertyType = "STRING"
 	Integer  PropertyType = "INTEGER"
-	Number   PropertyType = "NUMBER"
+	Decimal  PropertyType = "DECIMAL"
 	Boolean  PropertyType = "BOOLEAN"
 	Datetime PropertyType = "DATETIME"
+	Enum     PropertyType = "ENUM"
 	Array    PropertyType = "ARRAY"
 )
 
@@ -36,27 +37,47 @@ func validatePropertySchema(properties []Property) error {
 	seen := map[string]struct{}{}
 	for _, p := range properties {
 		if p.Code == "" || p.Name == "" {
-			return fmt.Errorf("PROPERTY_SCHEMA_INVALID: property code and name are required")
+			return coded("PROPERTY_SCHEMA_INVALID", "property code and name are required")
 		}
 		if _, ok := seen[p.Code]; ok {
-			return fmt.Errorf("PROPERTY_SCHEMA_INVALID: duplicate property %s", p.Code)
+			return coded("PROPERTY_SCHEMA_INVALID", "duplicate property %s", p.Code)
 		}
 		seen[p.Code] = struct{}{}
-		if !validScalarType(p.Type) && p.Type != Array {
-			return fmt.Errorf("PROPERTY_SCHEMA_INVALID: invalid type for %s", p.Code)
+		if !validPropertyType(p.Type) {
+			return coded("PROPERTY_SCHEMA_INVALID", "invalid type for %s", p.Code)
 		}
-		if p.Type == Array && !validScalarType(p.ArrayItemType) {
-			return fmt.Errorf("PROPERTY_SCHEMA_INVALID: array item type is required for %s", p.Code)
+		if p.Type == Enum {
+			if len(p.EnumValues) == 0 {
+				return coded("PROPERTY_SCHEMA_INVALID", "enum values required for %s", p.Code)
+			}
+			values := map[string]struct{}{}
+			for _, value := range p.EnumValues {
+				if value == "" {
+					return coded("PROPERTY_SCHEMA_INVALID", "enum values cannot be empty")
+				}
+				if _, ok := values[value]; ok {
+					return coded("PROPERTY_SCHEMA_INVALID", "enum values must be unique")
+				}
+				values[value] = struct{}{}
+			}
+		} else if len(p.EnumValues) != 0 {
+			return coded("PROPERTY_SCHEMA_INVALID", "enum values only apply to ENUM")
+		}
+		if p.Type == Array && !validArrayItemType(p.ArrayItemType) {
+			return coded("PROPERTY_SCHEMA_INVALID", "array item type is required for %s", p.Code)
 		}
 		if p.Type != Array && p.ArrayItemType != "" {
-			return fmt.Errorf("PROPERTY_SCHEMA_INVALID: array item type is only valid for arrays")
+			return coded("PROPERTY_SCHEMA_INVALID", "array item type is only valid for arrays")
 		}
 	}
 	return nil
 }
 
-func validScalarType(t PropertyType) bool {
-	return t == String || t == Integer || t == Number || t == Boolean || t == Datetime
+func validPropertyType(t PropertyType) bool {
+	return t == String || t == Integer || t == Decimal || t == Boolean || t == Datetime || t == Enum || t == Array
+}
+func validArrayItemType(t PropertyType) bool {
+	return t == String || t == Integer || t == Decimal || t == Boolean || t == Datetime
 }
 
 func validateValue(code string, typ PropertyType, enums []string, value any) error {
@@ -66,16 +87,24 @@ func validateValue(code string, typ PropertyType, enums []string, value any) err
 		_, valid = value.(string)
 	case Integer:
 		switch n := value.(type) {
+		case json.Number:
+			_, err := n.Int64()
+			valid = err == nil
 		case float64:
-			valid = math.Trunc(n) == n
+			valid = math.Trunc(n) == n && math.Abs(n) <= 9007199254740991
 		case float32:
 			valid = math.Trunc(float64(n)) == float64(n)
 		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 			valid = true
 		}
-	case Number:
-		switch value.(type) {
-		case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+	case Decimal:
+		switch n := value.(type) {
+		case json.Number:
+			_, err := n.Float64()
+			valid = err == nil
+		case float64:
+			valid = !math.IsNaN(n) && !math.IsInf(n, 0)
+		case float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 			valid = true
 		}
 	case Boolean:
@@ -86,21 +115,23 @@ func validateValue(code string, typ PropertyType, enums []string, value any) err
 			_, err := time.Parse(time.RFC3339, v)
 			valid = err == nil
 		}
+	case Enum:
+		_, valid = value.(string)
 	}
 	if !valid {
-		return fmt.Errorf("PROPERTY_TYPE_ERROR: property %s must be %s", code, typ)
+		return coded("PROPERTY_TYPE_ERROR", "property %s must be %s", code, typ)
 	}
-	if len(enums) > 0 {
+	if typ == Enum {
 		v, ok := value.(string)
 		if !ok {
-			return fmt.Errorf("PROPERTY_TYPE_ERROR: enum property %s must be STRING", code)
+			return coded("PROPERTY_TYPE_ERROR", "enum property %s must be STRING", code)
 		}
 		for _, allowed := range enums {
 			if v == allowed {
 				return nil
 			}
 		}
-		return fmt.Errorf("PROPERTY_ENUM_INVALID: property %s", code)
+		return coded("PROPERTY_ENUM_INVALID", "property %s", code)
 	}
 	return nil
 }
@@ -108,7 +139,7 @@ func validateValue(code string, typ PropertyType, enums []string, value any) err
 func validateArray(code string, itemType PropertyType, value any) error {
 	rv := reflect.ValueOf(value)
 	if !rv.IsValid() || (rv.Kind() != reflect.Array && rv.Kind() != reflect.Slice) {
-		return fmt.Errorf("PROPERTY_TYPE_ERROR: property %s must be ARRAY", code)
+		return coded("PROPERTY_TYPE_ERROR", "property %s must be ARRAY", code)
 	}
 	for i := 0; i < rv.Len(); i++ {
 		if err := validateValue(code, itemType, nil, rv.Index(i).Interface()); err != nil {

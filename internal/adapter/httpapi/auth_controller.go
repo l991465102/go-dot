@@ -118,6 +118,7 @@ func (c AuthController) setRefreshCookie(w http.ResponseWriter, token string) {
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.DisallowUnknownFields()
+	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return false

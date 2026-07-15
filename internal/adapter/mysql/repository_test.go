@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/lzw7758/go-dot/internal/auth"
 	"github.com/lzw7758/go-dot/internal/project"
+	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
 func TestProjectRepositoryRejectsRotationDuringGraceUnderRowLock(t *testing.T) {
@@ -67,19 +69,17 @@ func TestAuthRepositoryUserLookupFailureRollsBackAndOldTokenRemainsUsable(t *tes
 }
 
 func TestTrackingPublishLocksDraftAndCommitsSnapshotStateAndAuditTogether(t *testing.T) {
-	pointRow := []driver.Value{
-		uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "VIEW", "DRAFT", "PENDING",
-		nil, nil, nil, nil, true, true, "APPROXIMATE", "EVENT_TIME", []byte(`["WEB"]`), []byte(`[]`), nil, nil, nil,
-		nil, nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true,
-	}
+	pointRow := trackingPointRow("DRAFT")
 	propertyRow := []driver.Value{"product_id", "Product ID", "STRING", true, nil, nil, nil, nil, 0}
+	moduleRow := []driver.Value{uint64(2), uint64(9), "product", "Product", "MODULE", uint64(1), true}
+	domainRow := []driver.Value{uint64(1), uint64(9), "commerce", "Commerce", "DOMAIN", nil, true}
 	script, db := openScriptedDB(t, nil)
-	script.queryRows = [][]driver.Value{pointRow, propertyRow}
+	script.queryRows = [][]driver.Value{pointRow, propertyRow, moduleRow, domainRow}
 	script.execResults = []driver.Result{scriptResult{lastID: 41, affected: 1}, scriptResult{affected: 1}, scriptResult{affected: 1}}
 
-	_, err := NewTrackingRepository(db).Publish(context.Background(), 7, 1)
+	snapshot, err := NewTrackingRepository(db).Publish(context.Background(), 9, 7, 1)
 	require.NoError(t, err)
-	require.Len(t, script.queries, 2)
+	require.Len(t, script.queries, 4)
 	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
 	require.Len(t, script.execQueries, 3)
 	require.Contains(t, script.execQueries[0], "tracking_point_snapshot")
@@ -87,6 +87,95 @@ func TestTrackingPublishLocksDraftAndCommitsSnapshotStateAndAuditTogether(t *tes
 	require.Contains(t, script.execQueries[2], "audit_log")
 	require.Equal(t, 1, script.commits)
 	require.Zero(t, script.rollbacks)
+	wantJSON, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	require.JSONEq(t, string(wantJSON), string(script.execArgs[0][4].Value.([]byte)))
+}
+
+func TestTrackingDraftCreationRollsBackWhenAuditInsertFails(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.execErrors = []error{nil, errors.New("audit unavailable")}
+	script.execResults = []driver.Result{scriptResult{lastID: 7, affected: 1}}
+	p := tracking.Point{ProjectID: 9, CategoryID: 3, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: "APPROXIMATE", TimeBasis: "EVENT_TIME", SupportedPlatforms: []string{"web"}, CreatedBy: 1, UpdatedBy: 1}
+	_, err := NewTrackingRepository(db).CreateDraft(context.Background(), p)
+	require.ErrorContains(t, err, "audit unavailable")
+	require.Equal(t, 1, script.rollbacks)
+	require.Zero(t, script.commits)
+	require.Len(t, script.execQueries, 2)
+	require.Contains(t, script.execQueries[1], "audit_log")
+}
+
+func TestTrackingDeprecationLocksReplacementAndRollsBackWhenAuditFails(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("PUBLISHED"), {}, trackingReplacementRow("PUBLISHED"), {}}
+	script.execErrors = []error{nil, errors.New("audit unavailable")}
+	script.execResults = []driver.Result{scriptResult{affected: 1}}
+	replacement := uint64(8)
+	err := NewTrackingRepository(db).Deprecate(context.Background(), 9, 7, 1, "replaced", &replacement)
+	require.ErrorContains(t, err, "audit unavailable")
+	require.Len(t, script.queries, 4)
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Contains(t, strings.ToUpper(script.queries[2]), "FOR UPDATE")
+	require.Equal(t, 1, script.rollbacks)
+	require.Zero(t, script.commits)
+}
+
+func TestTrackingDeprecationRejectsSelfReplacement(t *testing.T) {
+	_, db := openScriptedDB(t, nil)
+	id := uint64(7)
+	err := NewTrackingRepository(db).Deprecate(context.Background(), 9, id, 1, "self", &id)
+	require.ErrorContains(t, err, "REPLACEMENT_INVALID")
+}
+
+func TestTrackingDeprecationRejectsNonPublishedReplacement(t *testing.T) {
+	for _, state := range []string{"DRAFT", "DEPRECATED"} {
+		t.Run(state, func(t *testing.T) {
+			script, db := openScriptedDB(t, nil)
+			script.queryRows = [][]driver.Value{trackingPointRow("PUBLISHED"), {}, trackingReplacementRow(state), {}}
+			replacement := uint64(8)
+			err := NewTrackingRepository(db).Deprecate(context.Background(), 9, 7, 1, "replaced", &replacement)
+			require.ErrorContains(t, err, "REPLACEMENT_INVALID")
+			require.Empty(t, script.execQueries)
+			require.Equal(t, 1, script.rollbacks)
+		})
+	}
+}
+func TestTrackingDeprecationHidesMissingOrCrossProjectReplacement(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("PUBLISHED"), {}, nil}
+	replacement := uint64(8)
+	err := NewTrackingRepository(db).Deprecate(context.Background(), 9, 7, 1, "replaced", &replacement)
+	require.ErrorIs(t, err, tracking.ErrPointNotFound)
+	require.Empty(t, script.execQueries)
+	require.Equal(t, 1, script.rollbacks)
+}
+func TestTrackingDeprecationDetectsConcurrentStateChange(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("PUBLISHED"), {}}
+	script.execResults = []driver.Result{scriptResult{affected: 0}}
+	err := NewTrackingRepository(db).Deprecate(context.Background(), 9, 7, 1, "old", nil)
+	require.ErrorIs(t, err, tracking.ErrPointNotPublished)
+	require.Equal(t, 1, script.rollbacks)
+}
+func TestTrackingPublicationRejectsCrossProjectCategoryUnderLock(t *testing.T) {
+	row := trackingPointRow("DRAFT")
+	row[28] = uint64(10)
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{row, {}}
+	_, err := NewTrackingRepository(db).Publish(context.Background(), 9, 7, 1)
+	require.ErrorContains(t, err, "CATEGORY_INVALID")
+	require.Empty(t, script.execQueries)
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+}
+
+func trackingPointRow(state string) []driver.Value {
+	return []driver.Value{uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "PAGE_VIEW", state, "PENDING", nil, nil, nil, nil, true, true, "APPROXIMATE", "EVENT_TIME", []byte(`["web"]`), []byte(`[]`), nil, nil, nil, uint64(1), nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true, "detail", "Detail", uint64(2)}
+}
+func trackingReplacementRow(state string) []driver.Value {
+	row := trackingPointRow(state)
+	row[0] = uint64(8)
+	row[3] = "product_detail_view_v2"
+	return row
 }
 
 var (
@@ -117,6 +206,7 @@ type dbScript struct {
 	queryErrors []error
 	queries     []string
 	execQueries []string
+	execArgs    [][]driver.NamedValue
 	commits     int
 	rollbacks   int
 }
@@ -159,10 +249,11 @@ func (c *scriptedConn) QueryContext(_ context.Context, query string, _ []driver.
 	}
 	return &scriptedRows{row: append([]driver.Value(nil), row...)}, nil
 }
-func (c *scriptedConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+func (c *scriptedConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.script.mu.Lock()
 	defer c.script.mu.Unlock()
 	c.script.execQueries = append(c.script.execQueries, query)
+	c.script.execArgs = append(c.script.execArgs, append([]driver.NamedValue(nil), args...))
 	if len(c.script.execErrors) > 0 {
 		err := c.script.execErrors[0]
 		c.script.execErrors = c.script.execErrors[1:]
@@ -212,7 +303,7 @@ func (r *scriptedRows) Columns() []string {
 }
 func (r *scriptedRows) Close() error { return nil }
 func (r *scriptedRows) Next(dest []driver.Value) error {
-	if r.read {
+	if r.read || len(r.row) == 0 {
 		return io.EOF
 	}
 	r.read = true

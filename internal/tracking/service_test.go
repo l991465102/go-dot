@@ -2,6 +2,8 @@ package tracking
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/lzw7758/go-dot/internal/project"
@@ -42,10 +44,10 @@ func TestSnapshotValidatesRequiredTypesEnumsDatesAndArrays(t *testing.T) {
 	snapshot := Snapshot{Properties: []Property{
 		{Code: "id", Type: String, Required: true},
 		{Code: "quantity", Type: Integer},
-		{Code: "price", Type: Number},
+		{Code: "price", Type: Decimal},
 		{Code: "active", Type: Boolean},
 		{Code: "at", Type: Datetime},
-		{Code: "kind", Type: String, EnumValues: []string{"A", "B"}},
+		{Code: "kind", Type: Enum, EnumValues: []string{"A", "B"}},
 		{Code: "tags", Type: Array, ArrayItemType: String},
 	}}
 	require.ErrorContains(t, snapshot.ValidateProperties(nil), "PROPERTY_REQUIRED")
@@ -56,13 +58,70 @@ func TestSnapshotValidatesRequiredTypesEnumsDatesAndArrays(t *testing.T) {
 	require.NoError(t, snapshot.ValidateProperties(map[string]any{"id": "1", "quantity": float64(2), "price": 1.5, "active": true, "at": "2026-07-15T12:00:00Z", "kind": "A", "tags": []any{"x"}}))
 }
 
+func TestSaveAndUpdateDraftRequireActiveScene(t *testing.T) {
+	svc, repo := newTrackingFixture(t)
+	for _, level := range []CategoryLevel{Domain, Module} {
+		repo.categories[3] = Category{ID: 3, ProjectID: 2, Level: level, Active: true}
+		_, err := svc.SaveDraft(context.Background(), 1, validDraftInput())
+		require.ErrorContains(t, err, "SCENE")
+	}
+	repo.categories[3] = Category{ID: 3, ProjectID: 2, Level: Scene, Active: true}
+	p := validDraft()
+	repo.points[p.ID] = p
+	repo.categories[3] = Category{ID: 3, ProjectID: 2, Level: Module, Active: true}
+	_, err := svc.UpdateDraft(context.Background(), 1, p.ID, validDraftInput())
+	require.ErrorContains(t, err, "SCENE")
+}
+
+func TestDeleteAndDeprecateReturnAuthorizationFailureWithoutMutation(t *testing.T) {
+	repo := &fakeRepository{points: map[uint64]Point{}, categories: map[uint64]Category{}}
+	p := validDraft()
+	repo.points[p.ID] = p
+	denied := errors.New("membership backend unavailable")
+	svc := NewService(repo, denyAll{err: denied})
+	require.ErrorIs(t, svc.DeleteDraft(context.Background(), 1, p.ID), denied)
+	require.Equal(t, Draft, repo.points[p.ID].State)
+	p.State = Published
+	repo.points[p.ID] = p
+	require.ErrorIs(t, svc.Deprecate(context.Background(), 1, p.ID, "old", nil), denied)
+	require.Equal(t, Published, repo.points[p.ID].State)
+}
+
+func TestPropertySchemaUsesExactGovernedTypes(t *testing.T) {
+	require.ErrorContains(t, validatePropertySchema([]Property{{Code: "kind", Name: "Kind", Type: Enum}}), "PROPERTY_SCHEMA_INVALID")
+	require.ErrorContains(t, validatePropertySchema([]Property{{Code: "kind", Name: "Kind", Type: Enum, EnumValues: []string{"a", "a"}}}), "PROPERTY_SCHEMA_INVALID")
+	require.ErrorContains(t, validatePropertySchema([]Property{{Code: "kind", Name: "Kind", Type: String, EnumValues: []string{"a"}}}), "PROPERTY_SCHEMA_INVALID")
+	require.NoError(t, validatePropertySchema([]Property{{Code: "kind", Name: "Kind", Type: Enum, EnumValues: []string{"a", "b"}}, {Code: "amount", Name: "Amount", Type: Decimal}}))
+}
+
+func TestIntegerPreservesJSONNumberPrecision(t *testing.T) {
+	s := Snapshot{PointID: 1, Version: 1, SupportedPlatforms: []string{"web"}, Properties: []Property{{Code: "id", Name: "ID", Type: Integer}}}
+	require.NoError(t, s.Validate("web", map[string]any{"id": json.Number("9007199254740993")}))
+	require.ErrorContains(t, s.Validate("web", map[string]any{"id": float64(9007199254740993)}), "PROPERTY_TYPE_ERROR")
+}
+
+func TestPointGovernanceValuesAreValidated(t *testing.T) {
+	p := validDraft()
+	p.Code = "ab"
+	require.ErrorContains(t, p.ValidateForPublication(), "POINT_INVALID")
+	p = validDraft()
+	p.BehaviorType = "VIEW"
+	require.ErrorContains(t, p.ValidateForPublication(), "BEHAVIOR_TYPE_INVALID")
+	p = validDraft()
+	p.DevelopmentState = "DONE"
+	require.ErrorContains(t, p.ValidateForPublication(), "DEVELOPMENT_STATE_INVALID")
+	p = validDraft()
+	p.SupportedPlatforms = []string{"desktop"}
+	require.ErrorContains(t, p.ValidateForPublication(), "PLATFORM_INVALID")
+}
+
 func validDraft() Point {
 	in := validDraftInput()
-	return Point{ID: 7, ProjectID: in.ProjectID, CategoryID: in.CategoryID, Category: Category{ID: in.CategoryID, ProjectID: in.ProjectID, Level: Scene, Active: true}, Code: in.Code, Name: in.Name, BehaviorType: in.BehaviorType, State: Draft, SupportedPlatforms: in.SupportedPlatforms, Properties: in.Properties}
+	return Point{ID: 7, ProjectID: in.ProjectID, CategoryID: in.CategoryID, Category: Category{ID: in.CategoryID, ProjectID: in.ProjectID, Level: Scene, Active: true}, Code: in.Code, Name: in.Name, BehaviorType: in.BehaviorType, DevelopmentState: Pending, State: Draft, SupportedPlatforms: in.SupportedPlatforms, Properties: in.Properties}
 }
 
 func validDraftInput() DraftInput {
-	return DraftInput{ProjectID: 2, CategoryID: 3, Code: "product_detail_view", Name: "Product detail view", BehaviorType: "VIEW", SupportedPlatforms: []string{"WEB"}, Properties: []PropertyInput{{Code: "product_id", Name: "Product ID", Type: String, Required: true}}}
+	return DraftInput{ProjectID: 2, CategoryID: 3, Code: "product_detail_view", Name: "Product detail view", BehaviorType: "PAGE_VIEW", SupportedPlatforms: []string{"web"}, Properties: []PropertyInput{{Code: "product_id", Name: "Product ID", Type: String, Required: true}}}
 }
 
 func publishedProductViewSnapshot() Snapshot {
@@ -72,6 +131,10 @@ func publishedProductViewSnapshot() Snapshot {
 type allowAll struct{}
 
 func (allowAll) RequireRole(context.Context, uint64, uint64, ...project.Role) error { return nil }
+
+type denyAll struct{ err error }
+
+func (d denyAll) RequireRole(context.Context, uint64, uint64, ...project.Role) error { return d.err }
 
 type fakeRepository struct {
 	nextID     uint64
@@ -111,6 +174,16 @@ func (r *fakeRepository) FindPoint(_ context.Context, id uint64) (Point, error) 
 	}
 	return p, nil
 }
+func (r *fakeRepository) FindPointInProject(ctx context.Context, projectID, id uint64) (Point, error) {
+	p, err := r.FindPoint(ctx, id)
+	if err != nil {
+		return Point{}, err
+	}
+	if p.ProjectID != projectID {
+		return Point{}, ErrPointNotFound
+	}
+	return p, nil
+}
 func (r *fakeRepository) UpdateDraft(_ context.Context, p Point) (Point, error) {
 	old, ok := r.points[p.ID]
 	if !ok {
@@ -122,7 +195,7 @@ func (r *fakeRepository) UpdateDraft(_ context.Context, p Point) (Point, error) 
 	r.points[p.ID] = p
 	return p, nil
 }
-func (r *fakeRepository) DeleteDraft(_ context.Context, id uint64) error {
+func (r *fakeRepository) DeleteDraft(_ context.Context, projectID, id, actor uint64) error {
 	p, ok := r.points[id]
 	if !ok {
 		return ErrPointNotFound
@@ -133,7 +206,7 @@ func (r *fakeRepository) DeleteDraft(_ context.Context, id uint64) error {
 	delete(r.points, id)
 	return nil
 }
-func (r *fakeRepository) Publish(_ context.Context, id, actorID uint64) (Snapshot, error) {
+func (r *fakeRepository) Publish(_ context.Context, projectID, id, actorID uint64) (Snapshot, error) {
 	p := r.points[id]
 	if err := p.ValidateForPublication(); err != nil {
 		return Snapshot{}, err
@@ -143,7 +216,7 @@ func (r *fakeRepository) Publish(_ context.Context, id, actorID uint64) (Snapsho
 	r.points[id] = p
 	return p.Snapshot(actorID, 1), nil
 }
-func (r *fakeRepository) Deprecate(_ context.Context, id, actorID uint64, reason string, replacementID *uint64) error {
+func (r *fakeRepository) Deprecate(_ context.Context, projectID, id, actorID uint64, reason string, replacementID *uint64) error {
 	p := r.points[id]
 	if p.State != Published {
 		return ErrPointNotPublished

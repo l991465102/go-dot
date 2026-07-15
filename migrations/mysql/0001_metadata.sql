@@ -1,0 +1,180 @@
+CREATE TABLE user_account (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    username VARCHAR(128) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    display_name VARCHAR(128) NOT NULL DEFAULT '',
+    must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    last_login_at DATETIME(6) NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_user_account_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE refresh_token (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    user_id BIGINT UNSIGNED NOT NULL,
+    token_hash CHAR(64) NOT NULL,
+    expires_at DATETIME(6) NOT NULL,
+    revoked_at DATETIME(6) NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_refresh_token_hash (token_hash),
+    KEY idx_refresh_token_user (user_id, expires_at),
+    CONSTRAINT fk_refresh_token_user FOREIGN KEY (user_id) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE project (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    code VARCHAR(128) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    write_key_hash CHAR(64) NOT NULL,
+    previous_write_key_hash CHAR(64) NULL,
+    previous_write_key_expires_at DATETIME(6) NULL,
+    allowed_origins JSON NOT NULL,
+    timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai',
+    visitor_salt VARBINARY(64) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_project_code (code),
+    UNIQUE KEY uk_project_write_key_hash (write_key_hash),
+    KEY idx_project_previous_write_key (previous_write_key_hash),
+    CONSTRAINT fk_project_created_by FOREIGN KEY (created_by) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE project_member (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    project_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    role VARCHAR(32) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_project_member_project_user (project_id, user_id),
+    KEY idx_project_member_user (user_id, is_active),
+    CONSTRAINT fk_project_member_project FOREIGN KEY (project_id) REFERENCES project (id),
+    CONSTRAINT fk_project_member_user FOREIGN KEY (user_id) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE tracking_category (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    project_id BIGINT UNSIGNED NOT NULL,
+    parent_id BIGINT UNSIGNED NULL,
+    code VARCHAR(128) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    level VARCHAR(32) NOT NULL,
+    description TEXT NULL,
+    sort_order INT NOT NULL DEFAULT 0,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_tracking_category_project_code (project_id, code),
+    KEY idx_tracking_category_parent (project_id, parent_id, sort_order),
+    CONSTRAINT fk_tracking_category_project FOREIGN KEY (project_id) REFERENCES project (id),
+    CONSTRAINT fk_tracking_category_parent FOREIGN KEY (parent_id) REFERENCES tracking_category (id),
+    CONSTRAINT fk_tracking_category_created_by FOREIGN KEY (created_by) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE tracking_point (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    project_id BIGINT UNSIGNED NOT NULL,
+    category_id BIGINT UNSIGNED NOT NULL,
+    code VARCHAR(128) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    description TEXT NULL,
+    behavior_type VARCHAR(32) NOT NULL,
+    definition_state VARCHAR(32) NOT NULL DEFAULT 'DRAFT',
+    development_state VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    trigger_page VARCHAR(512) NULL,
+    trigger_timing VARCHAR(255) NULL,
+    trigger_count_rule VARCHAR(255) NULL,
+    abnormal_trigger_rule TEXT NULL,
+    count_pv BOOLEAN NOT NULL DEFAULT TRUE,
+    count_uv BOOLEAN NOT NULL DEFAULT TRUE,
+    uv_mode VARCHAR(32) NOT NULL DEFAULT 'APPROXIMATE',
+    time_basis VARCHAR(32) NOT NULL DEFAULT 'EVENT_TIME',
+    supported_platforms JSON NOT NULL,
+    supported_channels JSON NOT NULL,
+    product_owner VARCHAR(128) NULL,
+    developer_owner VARCHAR(128) NULL,
+    requirement_url VARCHAR(1024) NULL,
+    published_version INT UNSIGNED NULL,
+    published_at DATETIME(6) NULL,
+    deprecated_at DATETIME(6) NULL,
+    deprecation_reason TEXT NULL,
+    replacement_point_id BIGINT UNSIGNED NULL,
+    created_by BIGINT UNSIGNED NOT NULL,
+    updated_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_tracking_point_project_code (project_id, code),
+    KEY idx_tracking_point_category_state (project_id, category_id, definition_state),
+    CONSTRAINT fk_tracking_point_project FOREIGN KEY (project_id) REFERENCES project (id),
+    CONSTRAINT fk_tracking_point_category FOREIGN KEY (category_id) REFERENCES tracking_category (id),
+    CONSTRAINT fk_tracking_point_replacement FOREIGN KEY (replacement_point_id) REFERENCES tracking_point (id),
+    CONSTRAINT fk_tracking_point_created_by FOREIGN KEY (created_by) REFERENCES user_account (id),
+    CONSTRAINT fk_tracking_point_updated_by FOREIGN KEY (updated_by) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE tracking_point_property (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    point_id BIGINT UNSIGNED NOT NULL,
+    code VARCHAR(128) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    data_type VARCHAR(32) NOT NULL,
+    is_required BOOLEAN NOT NULL DEFAULT FALSE,
+    enum_values JSON NULL,
+    array_item_type VARCHAR(32) NULL,
+    example_value JSON NULL,
+    description TEXT NULL,
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_tracking_point_property_point_code (point_id, code),
+    CONSTRAINT fk_tracking_point_property_point FOREIGN KEY (point_id) REFERENCES tracking_point (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE tracking_point_snapshot (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    project_id BIGINT UNSIGNED NOT NULL,
+    point_id BIGINT UNSIGNED NOT NULL,
+    version INT UNSIGNED NOT NULL,
+    point_code VARCHAR(128) NOT NULL,
+    schema_snapshot JSON NOT NULL,
+    published_by BIGINT UNSIGNED NOT NULL,
+    published_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_tracking_point_snapshot_point_version (point_id, version),
+    KEY idx_tracking_point_snapshot_project_code (project_id, point_code, version),
+    CONSTRAINT fk_tracking_point_snapshot_project FOREIGN KEY (project_id) REFERENCES project (id),
+    CONSTRAINT fk_tracking_point_snapshot_point FOREIGN KEY (point_id) REFERENCES tracking_point (id),
+    CONSTRAINT fk_tracking_point_snapshot_publisher FOREIGN KEY (published_by) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE audit_log (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    project_id BIGINT UNSIGNED NULL,
+    actor_id BIGINT UNSIGNED NOT NULL,
+    action VARCHAR(128) NOT NULL,
+    resource_type VARCHAR(128) NOT NULL,
+    resource_id BIGINT UNSIGNED NULL,
+    request_id VARCHAR(128) NULL,
+    before_snapshot JSON NULL,
+    after_snapshot JSON NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_audit_log_request_id (request_id),
+    KEY idx_audit_log_project_created (project_id, created_at),
+    KEY idx_audit_log_resource (resource_type, resource_id, created_at),
+    CONSTRAINT fk_audit_log_project FOREIGN KEY (project_id) REFERENCES project (id),
+    CONSTRAINT fk_audit_log_actor FOREIGN KEY (actor_id) REFERENCES user_account (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

@@ -1,0 +1,116 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: go_dot
+      MYSQL_ROOT_PASSWORD: root
+      TZ: UTC
+    command: ["--default-time-zone=+00:00"]
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:8
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3
+    environment:
+      CLICKHOUSE_DB: go_dot
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      TZ: UTC
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/go-dot.xml:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    command: ["migrate"]
+    environment: &backend-environment
+      GO_DOT_MYSQL_DSN: root:root@tcp(mysql:3306)/go_dot?parseTime=true
+      GO_DOT_REDIS_ADDRESS: redis:6379
+      GO_DOT_CLICKHOUSE_DSN: clickhouse://default:@clickhouse:9000/go_dot
+      GO_DOT_JWT_SECRET: local-jwt-secret-change-before-production
+      GO_DOT_VISITOR_MASTER_KEY: local-visitor-key-change-before-production
+      TZ: UTC
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    command: ["api"]
+    environment: *backend-environment
+    ports:
+      - "8080:8080"
+    depends_on: &backend-dependencies
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    command: ["worker"]
+    environment: *backend-environment
+    depends_on: *backend-dependencies
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    command: ["scheduler"]
+    environment: *backend-environment
+    depends_on: *backend-dependencies
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    ports:
+      - "5173:5173"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  mysql_data:
+  redis_data:
+  clickhouse_data:

@@ -60,6 +60,24 @@ func TestViewerWriteRequestReturnsForbidden(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, response.Code)
 }
 
+func TestProjectSettingsViewerReadsButCannotMutate(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "viewer-settings", "initial"))
+	viewer := authRepo.byName("viewer-settings")
+	require.NoError(t, authSvc.ChangePassword(context.Background(), viewer.ID, "initial", "changed"))
+	session, err := authSvc.Login(context.Background(), "viewer-settings", "changed")
+	require.NoError(t, err)
+	repo := newProjectRepo()
+	repo.projects[9] = project.Project{ID: 9, Code: "mall", Name: "Mall", Active: true, Timezone: "Asia/Shanghai"}
+	repo.members[[2]uint64{viewer.ID, 9}] = project.Member{UserID: viewer.ID, ProjectID: 9, Username: "viewer-settings", Role: project.Viewer, Active: true}
+	handler := httpapi.NewHandler(authSvc, project.NewService(repo), false)
+	read := performJSON(t, handler, http.MethodGet, "/api/v1/projects/9/members", nil, session.AccessToken)
+	require.Equal(t, http.StatusOK, read.Code)
+	write := performJSON(t, handler, http.MethodPatch, "/api/v1/projects/9/settings", map[string]any{"timezone": "UTC", "allowed_origins": []string{}}, session.AccessToken)
+	require.Equal(t, http.StatusForbidden, write.Code)
+}
+
 func TestProjectListReturnsAuthenticatedMembershipRoleAndOnlyOwnedProjects(t *testing.T) {
 	authRepo := newAuthRepo()
 	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
@@ -407,4 +425,35 @@ func (r *testProjectRepo) ListProjects(_ context.Context, u uint64) ([]project.P
 		}
 	}
 	return out, nil
+}
+func (r *testProjectRepo) UpdateProjectSettings(_ context.Context, id, actor uint64, in project.SettingsInput) (project.Project, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.projects[id]
+	p.Timezone = in.Timezone
+	p.AllowedOrigins = in.AllowedOrigins
+	r.projects[id] = p
+	return p, nil
+}
+func (r *testProjectRepo) ListProjectMembers(_ context.Context, id uint64) ([]project.Member, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []project.Member{}
+	for key, m := range r.members {
+		if key[1] == id && m.Active {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+func (r *testProjectRepo) AddProjectMember(context.Context, uint64, uint64, project.MemberInput) (project.Member, error) {
+	return project.Member{}, nil
+}
+func (r *testProjectRepo) RemoveProjectMember(context.Context, uint64, uint64, uint64) error {
+	return nil
+}
+func (r *testProjectRepo) WriteKeyStatus(_ context.Context, id uint64) (project.WriteKeyStatus, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return project.WriteKeyStatus{PreviousKeyExpiresAt: r.projects[id].PreviousWriteKeyExpiresAt}, nil
 }

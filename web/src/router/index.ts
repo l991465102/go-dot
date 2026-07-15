@@ -4,14 +4,11 @@ import { useProjectStore } from '@/stores/project'
 import AppLayout from '@/layouts/AppLayout.vue'
 import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
-import ProjectOverviewView from '@/views/ProjectOverviewView.vue'
 import PointWorkbenchView from '@/views/PointWorkbenchView.vue'
 import PointDetailView from '@/views/PointDetailView.vue'
 import CategoryManagementView from '@/views/CategoryManagementView.vue'
 import ProjectOnboardingView from '@/views/ProjectOnboardingView.vue'
 import ProjectBootstrapErrorView from '@/views/ProjectBootstrapErrorView.vue'
-
-const EmptyView = { template: '<div />' }
 
 export function createAppRouter(): Router {
   const router = createRouter({
@@ -25,13 +22,13 @@ export function createAppRouter(): Router {
         path: '/projects/:projectId',
         component: AppLayout,
         children: [
-          { path: 'overview', name: 'project-overview', component: ProjectOverviewView },
+          { path: 'overview', name: 'project-overview', component: () => import('@/views/ProjectOverviewView.vue') },
           { path: 'points', name: 'points', component: PointWorkbenchView },
           { path: 'points/:pointId', name: 'point-detail', component: PointDetailView, props: (route) => ({ projectId: Number(route.params.projectId), pointId: Number(route.params.pointId), canMutate: useProjectStore().canMutate }) },
           { path: 'categories', name: 'categories', component: CategoryManagementView },
-          { path: 'statistics', name: 'statistics', component: EmptyView },
-          { path: 'diagnostics', name: 'diagnostics', component: EmptyView },
-          { path: 'settings', name: 'project-settings', component: EmptyView },
+          { path: 'statistics', name: 'statistics', component: () => import('@/views/StatisticsView.vue') },
+          { path: 'diagnostics', name: 'diagnostics', component: () => import('@/views/DiagnosticsView.vue') },
+          { path: 'settings', name: 'project-settings', component: () => import('@/views/ProjectSettingsView.vue') },
         ],
       },
       { path: '/:pathMatch(.*)*', redirect: '/login' },

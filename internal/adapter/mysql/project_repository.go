@@ -81,6 +81,12 @@ func (r *ProjectRepository) FindProjectByWriteKeyHash(ctx context.Context, hash 
 	return p, nil
 }
 func (r *ProjectRepository) RotateWriteKey(ctx context.Context, projectID uint64, hash string, now, expires time.Time) (err error) {
+	return r.rotateWriteKey(ctx, projectID, 0, hash, now, expires, false)
+}
+func (r *ProjectRepository) RotateWriteKeyAudited(ctx context.Context, projectID, actor uint64, hash string, now, expires time.Time) error {
+	return r.rotateWriteKey(ctx, projectID, actor, hash, now, expires, true)
+}
+func (r *ProjectRepository) rotateWriteKey(ctx context.Context, projectID, actor uint64, hash string, now, expires time.Time, audited bool) (err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -104,6 +110,11 @@ func (r *ProjectRepository) RotateWriteKey(ctx context.Context, projectID uint64
 	_, err = tx.ExecContext(ctx, `UPDATE project SET previous_write_key_hash=write_key_hash,previous_write_key_expires_at=?,write_key_hash=? WHERE id=?`, expires, hash, projectID)
 	if err != nil {
 		return err
+	}
+	if audited {
+		if err = insertProjectAudit(ctx, tx, projectID, actor, "ROTATE_WRITE_KEY", "PROJECT", projectID, map[string]any{"previous_key_expires_at": previousExpiry.Time}, map[string]any{"previous_key_expires_at": expires}); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -161,6 +172,171 @@ func (r *ProjectRepository) ExpirePreviousWriteKeys(ctx context.Context, now tim
 		return 0, err
 	}
 	return affected, nil
+}
+func (r *ProjectRepository) UpdateProjectSettings(ctx context.Context, projectID, actor uint64, in project.SettingsInput) (out project.Project, err error) {
+	origins, err := json.Marshal(nonNilStrings(in.AllowedOrigins))
+	if err != nil {
+		return out, err
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var beforeOrigins []byte
+	if err = tx.QueryRowContext(ctx, `SELECT id,code,name,allowed_origins,timezone,is_active,created_by FROM project WHERE id=? AND is_active=TRUE FOR UPDATE`, projectID).Scan(&out.ID, &out.Code, &out.Name, &beforeOrigins, &out.Timezone, &out.Active, &out.CreatedBy); errors.Is(err, sql.ErrNoRows) {
+		return out, project.ErrProjectNotFound
+	} else if err != nil {
+		return out, err
+	}
+	before := map[string]any{"timezone": out.Timezone, "allowed_origins": json.RawMessage(beforeOrigins)}
+	if _, err = tx.ExecContext(ctx, `UPDATE project SET allowed_origins=?,timezone=? WHERE id=?`, origins, in.Timezone, projectID); err != nil {
+		return out, err
+	}
+	after := map[string]any{"timezone": in.Timezone, "allowed_origins": json.RawMessage(origins)}
+	if err = insertProjectAudit(ctx, tx, projectID, actor, "UPDATE_SETTINGS", "PROJECT", projectID, before, after); err != nil {
+		return out, err
+	}
+	if err = tx.Commit(); err != nil {
+		return out, err
+	}
+	out.Timezone = in.Timezone
+	out.AllowedOrigins = nonNilStrings(in.AllowedOrigins)
+	return out, nil
+}
+func (r *ProjectRepository) ListProjectMembers(ctx context.Context, projectID uint64) ([]project.Member, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT m.user_id,m.project_id,u.username,u.display_name,m.role,m.is_active FROM project_member m JOIN user_account u ON u.id=m.user_id WHERE m.project_id=? AND m.is_active=TRUE ORDER BY u.username`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []project.Member{}
+	for rows.Next() {
+		var m project.Member
+		if err := rows.Scan(&m.UserID, &m.ProjectID, &m.Username, &m.DisplayName, &m.Role, &m.Active); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+func (r *ProjectRepository) AddProjectMember(ctx context.Context, projectID, actor uint64, in project.MemberInput) (out project.Member, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return out, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if err = tx.QueryRowContext(ctx, `SELECT id,username,display_name FROM user_account WHERE username=? AND status='ACTIVE' LIMIT 1 FOR UPDATE`, in.Username).Scan(&out.UserID, &out.Username, &out.DisplayName); errors.Is(err, sql.ErrNoRows) {
+		return out, project.ErrProjectNotFound
+	} else if err != nil {
+		return out, err
+	}
+	var oldRole sql.NullString
+	var oldActive sql.NullBool
+	err = tx.QueryRowContext(ctx, `SELECT role,is_active FROM project_member WHERE project_id=? AND user_id=? FOR UPDATE`, projectID, out.UserID).Scan(&oldRole, &oldActive)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return out, err
+	}
+	if oldRole.Valid && project.Role(oldRole.String) == project.Admin && oldActive.Bool && in.Role == project.Viewer {
+		var admins int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM project_member WHERE project_id=? AND role='ADMIN' AND is_active=TRUE FOR UPDATE`, projectID).Scan(&admins); err != nil {
+			return out, err
+		}
+		if admins <= 1 {
+			return out, project.ErrInvalidProject
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `INSERT INTO project_member(project_id,user_id,role,is_active) VALUES(?,?,?,TRUE)`, projectID, out.UserID, in.Role)
+	} else {
+		_, err = tx.ExecContext(ctx, `UPDATE project_member SET role=?,is_active=TRUE WHERE project_id=? AND user_id=?`, in.Role, projectID, out.UserID)
+	}
+	if err != nil {
+		return out, err
+	}
+	before := any(nil)
+	if oldRole.Valid {
+		before = map[string]any{"role": oldRole.String, "is_active": oldActive.Bool}
+	}
+	if err = insertProjectAudit(ctx, tx, projectID, actor, "UPSERT_MEMBER", "PROJECT_MEMBER", out.UserID, before, map[string]any{"role": in.Role, "is_active": true}); err != nil {
+		return out, err
+	}
+	if err = tx.Commit(); err != nil {
+		return out, err
+	}
+	out.ProjectID = projectID
+	out.Role = in.Role
+	out.Active = true
+	return out, nil
+}
+func (r *ProjectRepository) RemoveProjectMember(ctx context.Context, projectID, actor, userID uint64) (err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var role project.Role
+	var active bool
+	if err = tx.QueryRowContext(ctx, `SELECT role,is_active FROM project_member WHERE project_id=? AND user_id=? FOR UPDATE`, projectID, userID).Scan(&role, &active); errors.Is(err, sql.ErrNoRows) {
+		return project.ErrProjectNotFound
+	} else if err != nil {
+		return err
+	}
+	if role == project.Admin && active {
+		var admins int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM project_member WHERE project_id=? AND role='ADMIN' AND is_active=TRUE FOR UPDATE`, projectID).Scan(&admins); err != nil {
+			return err
+		}
+		if admins <= 1 {
+			return project.ErrInvalidProject
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE project_member SET is_active=FALSE WHERE project_id=? AND user_id=?`, projectID, userID); err != nil {
+		return err
+	}
+	if err = insertProjectAudit(ctx, tx, projectID, actor, "REMOVE_MEMBER", "PROJECT_MEMBER", userID, map[string]any{"role": role, "is_active": active}, map[string]any{"role": role, "is_active": false}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (r *ProjectRepository) WriteKeyStatus(ctx context.Context, projectID uint64) (project.WriteKeyStatus, error) {
+	var expiry sql.NullTime
+	err := r.db.QueryRowContext(ctx, `SELECT previous_write_key_expires_at FROM project WHERE id=? AND is_active=TRUE`, projectID).Scan(&expiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return project.WriteKeyStatus{}, project.ErrProjectNotFound
+	}
+	if err != nil {
+		return project.WriteKeyStatus{}, err
+	}
+	out := project.WriteKeyStatus{}
+	if expiry.Valid {
+		out.PreviousKeyExpiresAt = &expiry.Time
+	}
+	return out, nil
+}
+func insertProjectAudit(ctx context.Context, tx *sql.Tx, projectID, actor uint64, action, resource string, resourceID uint64, before, after any) error {
+	beforeJSON, err := json.Marshal(before)
+	if err != nil {
+		return err
+	}
+	afterJSON, err := json.Marshal(after)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO audit_log(project_id,actor_id,action,resource_type,resource_id,before_snapshot,after_snapshot) VALUES(?,?,?,?,?,?,?)`, projectID, actor, action, resource, resourceID, beforeJSON, afterJSON)
+	return err
 }
 func nonNilStrings(values []string) []string {
 	if values == nil {

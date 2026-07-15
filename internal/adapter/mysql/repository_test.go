@@ -61,6 +61,37 @@ func TestProjectRepositoryExpiresPreviousWriteKeysTransactionally(t *testing.T) 
 	require.Equal(t, 1, script.commits)
 }
 
+func TestProjectSettingsUpdateAndAuditCommitTogether(t *testing.T) {
+	row := []driver.Value{uint64(9), "mall", "Mall", []byte(`["https://old.example"]`), "Asia/Shanghai", true, uint64(1)}
+	script, db := openScriptedDB(t, row)
+	script.execResults = []driver.Result{scriptResult{affected: 1}, scriptResult{affected: 1}}
+	updated, err := NewProjectRepository(db).UpdateProjectSettings(context.Background(), 9, 1, project.SettingsInput{Timezone: "UTC", AllowedOrigins: []string{"https://new.example"}})
+	require.NoError(t, err)
+	require.Equal(t, "UTC", updated.Timezone)
+	require.Len(t, script.execQueries, 2)
+	require.Contains(t, script.execQueries[1], "audit_log")
+	require.Equal(t, 1, script.commits)
+}
+
+func TestProjectSettingsAuditFailureRollsBackMutation(t *testing.T) {
+	row := []driver.Value{uint64(9), "mall", "Mall", []byte(`[]`), "Asia/Shanghai", true, uint64(1)}
+	script, db := openScriptedDB(t, row)
+	script.execErrors = []error{nil, errors.New("audit unavailable")}
+	_, err := NewProjectRepository(db).UpdateProjectSettings(context.Background(), 9, 1, project.SettingsInput{Timezone: "UTC"})
+	require.ErrorContains(t, err, "audit unavailable")
+	require.Zero(t, script.commits)
+	require.Equal(t, 1, script.rollbacks)
+}
+
+func TestProjectMemberCannotDemoteLastAdmin(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{{uint64(2), "owner", "Owner"}, {"ADMIN", true}, {int64(1)}}
+	_, err := NewProjectRepository(db).AddProjectMember(context.Background(), 9, 1, project.MemberInput{Username: "owner", Role: project.Viewer})
+	require.ErrorIs(t, err, project.ErrInvalidProject)
+	require.Empty(t, script.execQueries)
+	require.Equal(t, 1, script.rollbacks)
+}
+
 func TestTrackingRepositoryLoadsOnlyPublishedImmutableSnapshot(t *testing.T) {
 	snapshot := tracking.Snapshot{ProjectID: 9, PointID: 7, PointCode: "product_detail_view", Version: 1}
 	raw, err := json.Marshal(snapshot)

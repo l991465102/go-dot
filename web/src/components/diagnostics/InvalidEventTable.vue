@@ -1,0 +1,2 @@
+<script setup lang="ts">import type { InvalidEvent } from '@/api/diagnostics'; defineProps<{ items: InvalidEvent[] }>()</script>
+<template><el-table :data="items" empty-text="暂无无效事件"><el-table-column prop="received_at" label="接收时间" min-width="180"/><el-table-column prop="point_code" label="点位"/><el-table-column prop="platform" label="平台"/><el-table-column prop="error_code" label="错误码" min-width="180"/><el-table-column prop="error_message" label="说明" min-width="240" show-overflow-tooltip/></el-table></template>

@@ -1,0 +1,2 @@
+<script setup lang="ts">import type { DeadLetter } from '@/api/diagnostics'; defineProps<{ items: DeadLetter[] }>()</script>
+<template><el-table :data="items" empty-text="暂无死信"><el-table-column prop="id" label="消息 ID"/><el-table-column prop="batch_id" label="批次 ID"/><el-table-column prop="deliveries" label="投递次数"/><el-table-column prop="first_seen" label="首次失败" min-width="180"/><el-table-column prop="last_error" label="最后错误" min-width="260" show-overflow-tooltip/></el-table></template>

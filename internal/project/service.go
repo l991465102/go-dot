@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,17 @@ type Repository interface {
 	FindMember(context.Context, uint64, uint64) (Member, error)
 	RotateWriteKey(context.Context, uint64, string, time.Time, time.Time) error
 	ListProjects(context.Context, uint64) ([]Project, error)
+}
+
+type SettingsRepository interface {
+	UpdateProjectSettings(context.Context, uint64, uint64, SettingsInput) (Project, error)
+	ListProjectMembers(context.Context, uint64) ([]Member, error)
+	AddProjectMember(context.Context, uint64, uint64, MemberInput) (Member, error)
+	RemoveProjectMember(context.Context, uint64, uint64, uint64) error
+	WriteKeyStatus(context.Context, uint64) (WriteKeyStatus, error)
+}
+type AuditedWriteKeyRepository interface {
+	RotateWriteKeyAudited(context.Context, uint64, uint64, string, time.Time, time.Time) error
 }
 
 type Service struct {
@@ -77,8 +89,14 @@ func (s *Service) RotateWriteKey(ctx context.Context, actorID, projectID uint64)
 	}
 	now := s.now().UTC()
 	expires := now.Add(24 * time.Hour)
-	if err := s.repo.RotateWriteKey(ctx, projectID, hash, now, expires); err != nil {
-		return WriteKeyRotation{}, err
+	var rotateErr error
+	if audited, ok := s.repo.(AuditedWriteKeyRepository); ok {
+		rotateErr = audited.RotateWriteKeyAudited(ctx, projectID, actorID, hash, now, expires)
+	} else {
+		rotateErr = s.repo.RotateWriteKey(ctx, projectID, hash, now, expires)
+	}
+	if rotateErr != nil {
+		return WriteKeyRotation{}, rotateErr
 	}
 	return WriteKeyRotation{WriteKey: key, PreviousKeyExpiresAt: expires}, nil
 }
@@ -98,6 +116,74 @@ func (s *Service) ProjectTimezone(ctx context.Context, userID, projectID uint64)
 		}
 	}
 	return "", ErrForbidden
+}
+
+func (s *Service) settingsRepository() (SettingsRepository, error) {
+	repo, ok := s.repo.(SettingsRepository)
+	if !ok {
+		return nil, errors.New("project settings repository unavailable")
+	}
+	return repo, nil
+}
+func (s *Service) UpdateSettings(ctx context.Context, actor, projectID uint64, in SettingsInput) (Project, error) {
+	if err := s.RequireRole(ctx, actor, projectID, Admin); err != nil {
+		return Project{}, err
+	}
+	if err := in.Validate(); err != nil {
+		return Project{}, err
+	}
+	repo, err := s.settingsRepository()
+	if err != nil {
+		return Project{}, err
+	}
+	return repo.UpdateProjectSettings(ctx, projectID, actor, in)
+}
+func (s *Service) ListMembers(ctx context.Context, actor, projectID uint64) ([]Member, error) {
+	if err := s.RequireRole(ctx, actor, projectID, Admin, Viewer); err != nil {
+		return nil, err
+	}
+	repo, err := s.settingsRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repo.ListProjectMembers(ctx, projectID)
+}
+func (s *Service) AddMember(ctx context.Context, actor, projectID uint64, in MemberInput) error {
+	if err := s.RequireRole(ctx, actor, projectID, Admin); err != nil {
+		return err
+	}
+	if in.Username == "" || in.Username != strings.TrimSpace(in.Username) || len(in.Username) > 128 || (in.Role != Admin && in.Role != Viewer) {
+		return ErrInvalidProject
+	}
+	repo, err := s.settingsRepository()
+	if err != nil {
+		return err
+	}
+	_, err = repo.AddProjectMember(ctx, projectID, actor, in)
+	return err
+}
+func (s *Service) RemoveMember(ctx context.Context, actor, projectID, userID uint64) error {
+	if err := s.RequireRole(ctx, actor, projectID, Admin); err != nil {
+		return err
+	}
+	if actor == userID {
+		return ErrInvalidProject
+	}
+	repo, err := s.settingsRepository()
+	if err != nil {
+		return err
+	}
+	return repo.RemoveProjectMember(ctx, projectID, actor, userID)
+}
+func (s *Service) GetWriteKeyStatus(ctx context.Context, actor, projectID uint64) (WriteKeyStatus, error) {
+	if err := s.RequireRole(ctx, actor, projectID, Admin); err != nil {
+		return WriteKeyStatus{}, err
+	}
+	repo, err := s.settingsRepository()
+	if err != nil {
+		return WriteKeyStatus{}, err
+	}
+	return repo.WriteKeyStatus(ctx, projectID)
 }
 
 func newSecret() (string, string, error) {

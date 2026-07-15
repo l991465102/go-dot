@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -47,7 +48,11 @@ func (c ProjectController) create(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := c.service.Create(r.Context(), p.UserID, req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, project.ErrInvalidProject) {
+			writeError(w, http.StatusBadRequest, "invalid project")
+		} else {
+			writeError(w, http.StatusInternalServerError, "project service unavailable")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
@@ -65,8 +70,16 @@ func (c ProjectController) rotateWriteKey(w http.ResponseWriter, r *http.Request
 	}
 	rotation, err := c.service.RotateWriteKey(r.Context(), p.UserID, id)
 	if err != nil {
-		if err == project.ErrForbidden {
+		if errors.Is(err, project.ErrForbidden) {
 			writeError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		if errors.Is(err, project.ErrWriteKeyRotationInProgress) {
+			writeError(w, http.StatusConflict, "write key rotation already in progress")
+			return
+		}
+		if errors.Is(err, project.ErrProjectNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "rotate write key failed")

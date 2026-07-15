@@ -68,7 +68,7 @@ func (r *AuthRepository) StoreRefreshToken(ctx context.Context, t auth.RefreshTo
 	_, err := r.db.ExecContext(ctx, `INSERT INTO refresh_token(user_id,token_hash,expires_at) VALUES(?,?,?)`, t.UserID, t.Hash, t.ExpiresAt)
 	return err
 }
-func (r *AuthRepository) ConsumeRefreshToken(ctx context.Context, hash string, now time.Time) (token auth.RefreshToken, err error) {
+func (r *AuthRepository) RotateRefreshToken(ctx context.Context, hash string, successor auth.RefreshToken, now time.Time) (token auth.RefreshToken, err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return token, err
@@ -90,6 +90,10 @@ func (r *AuthRepository) ConsumeRefreshToken(ctx context.Context, hash string, n
 		return token, auth.ErrInvalidToken
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE refresh_token SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`, now, hash); err != nil {
+		return token, err
+	}
+	successor.UserID = token.UserID
+	if _, err = tx.ExecContext(ctx, `INSERT INTO refresh_token(user_id,token_hash,expires_at) VALUES(?,?,?)`, successor.UserID, successor.Hash, successor.ExpiresAt); err != nil {
 		return token, err
 	}
 	if err = tx.Commit(); err != nil {

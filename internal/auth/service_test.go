@@ -2,7 +2,9 @@ package auth_test
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,6 +52,45 @@ func TestRefreshRotatesStoredTokenAndLogoutRevokesIt(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrInvalidToken)
 }
 
+func TestRefreshSuccessorInsertFailureLeavesOldTokenUsable(t *testing.T) {
+	svc, repo := newAuthFixture(t)
+	require.NoError(t, svc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	session, err := svc.Login(context.Background(), "admin", "admin")
+	require.NoError(t, err)
+	repo.failNextRotation = errors.New("insert successor: connection lost")
+
+	_, err = svc.Refresh(context.Background(), session.RefreshToken)
+	require.ErrorContains(t, err, "connection lost")
+	_, err = svc.Refresh(context.Background(), session.RefreshToken)
+	require.NoError(t, err)
+}
+
+func TestConcurrentRefreshCreatesOnlyOneSuccessor(t *testing.T) {
+	svc, _ := newAuthFixture(t)
+	require.NoError(t, svc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	session, err := svc.Login(context.Background(), "admin", "admin")
+	require.NoError(t, err)
+
+	var successes atomic.Int32
+	var invalid atomic.Int32
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := svc.Refresh(context.Background(), session.RefreshToken)
+			if err == nil {
+				successes.Add(1)
+			} else if errors.Is(err, auth.ErrInvalidToken) {
+				invalid.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	require.EqualValues(t, 1, successes.Load())
+	require.EqualValues(t, 7, invalid.Load())
+}
+
 func TestPasswordEncodingContainsExplicitArgon2idParameters(t *testing.T) {
 	encoded, err := auth.HashPassword("secret")
 	require.NoError(t, err)
@@ -66,11 +107,12 @@ func newAuthFixture(t *testing.T) (*auth.Service, *authMemoryRepository) {
 }
 
 type authMemoryRepository struct {
-	mu     sync.Mutex
-	nextID uint64
-	users  map[uint64]auth.User
-	names  map[string]uint64
-	tokens map[string]auth.RefreshToken
+	mu               sync.Mutex
+	nextID           uint64
+	users            map[uint64]auth.User
+	names            map[string]uint64
+	tokens           map[string]auth.RefreshToken
+	failNextRotation error
 }
 
 func (r *authMemoryRepository) CreateInitialUser(_ context.Context, user auth.User) (auth.User, error) {
@@ -117,16 +159,23 @@ func (r *authMemoryRepository) StoreRefreshToken(_ context.Context, token auth.R
 	r.tokens[token.Hash] = token
 	return nil
 }
-func (r *authMemoryRepository) ConsumeRefreshToken(_ context.Context, hash string, now time.Time) (auth.RefreshToken, error) {
+func (r *authMemoryRepository) RotateRefreshToken(_ context.Context, hash string, successor auth.RefreshToken, now time.Time) (auth.RefreshToken, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t, ok := r.tokens[hash]
 	if !ok || t.RevokedAt != nil || !t.ExpiresAt.After(now) {
 		return auth.RefreshToken{}, auth.ErrInvalidToken
 	}
+	if r.failNextRotation != nil {
+		err := r.failNextRotation
+		r.failNextRotation = nil
+		return auth.RefreshToken{}, err
+	}
 	n := now
 	t.RevokedAt = &n
 	r.tokens[hash] = t
+	successor.UserID = t.UserID
+	r.tokens[successor.Hash] = successor
 	return t, nil
 }
 func (r *authMemoryRepository) RevokeRefreshToken(_ context.Context, hash string, now time.Time) error {

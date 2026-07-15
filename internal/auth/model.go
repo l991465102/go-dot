@@ -8,6 +8,7 @@ import (
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrInvalidToken       = errors.New("invalid token")
+	ErrInvalidPassword    = errors.New("invalid password")
 	ErrUserNotFound       = errors.New("user not found")
 )
 

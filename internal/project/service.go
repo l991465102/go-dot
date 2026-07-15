@@ -7,13 +7,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 )
 
 type Repository interface {
 	CreateProject(context.Context, Project, Member) (Project, error)
 	FindMember(context.Context, uint64, uint64) (Member, error)
-	RotateWriteKey(context.Context, uint64, string, time.Time) error
+	RotateWriteKey(context.Context, uint64, string, time.Time, time.Time) error
 	ListProjects(context.Context, uint64) ([]Project, error)
 }
 
@@ -26,7 +27,13 @@ func NewService(repo Repository) *Service { return &Service{repo: repo, now: tim
 
 func (s *Service) RequireRole(ctx context.Context, userID, projectID uint64, allowed ...Role) error {
 	m, err := s.repo.FindMember(ctx, userID, projectID)
-	if err != nil || !m.Active {
+	if errors.Is(err, ErrForbidden) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("find project member: %w", err)
+	}
+	if !m.Active {
 		return ErrForbidden
 	}
 	for _, role := range allowed {
@@ -39,7 +46,7 @@ func (s *Service) RequireRole(ctx context.Context, userID, projectID uint64, all
 
 func (s *Service) Create(ctx context.Context, actorID uint64, in CreateInput) (Creation, error) {
 	if in.Code == "" || in.Name == "" {
-		return Creation{}, errors.New("project code and name are required")
+		return Creation{}, fmt.Errorf("%w: project code and name are required", ErrInvalidProject)
 	}
 	if in.Timezone == "" {
 		in.Timezone = "Asia/Shanghai"
@@ -67,8 +74,9 @@ func (s *Service) RotateWriteKey(ctx context.Context, actorID, projectID uint64)
 	if err != nil {
 		return WriteKeyRotation{}, err
 	}
-	expires := s.now().UTC().Add(24 * time.Hour)
-	if err := s.repo.RotateWriteKey(ctx, projectID, hash, expires); err != nil {
+	now := s.now().UTC()
+	expires := now.Add(24 * time.Hour)
+	if err := s.repo.RotateWriteKey(ctx, projectID, hash, now, expires); err != nil {
 		return WriteKeyRotation{}, err
 	}
 	return WriteKeyRotation{WriteKey: key, PreviousKeyExpiresAt: expires}, nil

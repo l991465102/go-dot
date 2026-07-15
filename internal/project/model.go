@@ -5,7 +5,12 @@ import (
 	"time"
 )
 
-var ErrForbidden = errors.New("forbidden")
+var (
+	ErrForbidden                  = errors.New("forbidden")
+	ErrInvalidProject             = errors.New("invalid project")
+	ErrProjectNotFound            = errors.New("project not found")
+	ErrWriteKeyRotationInProgress = errors.New("write key rotation already in progress")
+)
 
 type Role string
 

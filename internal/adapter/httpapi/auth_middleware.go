@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -32,7 +33,15 @@ func (m AuthMiddleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		user, err := m.service.User(r.Context(), principal.UserID)
-		if err != nil || user.Status != "ACTIVE" {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "authentication service unavailable")
+			return
+		}
+		if user.Status != "ACTIVE" {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}

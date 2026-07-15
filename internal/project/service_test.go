@@ -40,6 +40,17 @@ func TestRotateWriteKeyKeepsPreviousHashFor24Hours(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(24*time.Hour), *stored.PreviousWriteKeyExpiresAt, 2*time.Second)
 }
 
+func TestRotateWriteKeyRejectsSecondRotationDuringGrace(t *testing.T) {
+	svc, _ := newProjectFixtureWithRepo(t)
+	created, err := svc.Create(context.Background(), 7, project.CreateInput{Code: "checkout", Name: "Checkout"})
+	require.NoError(t, err)
+	_, err = svc.RotateWriteKey(context.Background(), 7, created.Project.ID)
+	require.NoError(t, err)
+
+	_, err = svc.RotateWriteKey(context.Background(), 7, created.Project.ID)
+	require.ErrorIs(t, err, project.ErrWriteKeyRotationInProgress)
+}
+
 func newProjectFixture(t *testing.T, members ...project.Member) *project.Service {
 	t.Helper()
 	repo := newProjectMemoryRepository()
@@ -83,10 +94,13 @@ func (r *projectMemoryRepository) FindMember(_ context.Context, userID, projectI
 	}
 	return m, nil
 }
-func (r *projectMemoryRepository) RotateWriteKey(_ context.Context, projectID uint64, hash string, expires time.Time) error {
+func (r *projectMemoryRepository) RotateWriteKey(_ context.Context, projectID uint64, hash string, now, expires time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.projects[projectID]
+	if p.PreviousWriteKeyExpiresAt != nil && p.PreviousWriteKeyExpiresAt.After(now) {
+		return project.ErrWriteKeyRotationInProgress
+	}
 	p.PreviousWriteKeyHash, p.PreviousWriteKeyExpiresAt, p.WriteKeyHash = p.WriteKeyHash, &expires, hash
 	r.projects[projectID] = p
 	return nil

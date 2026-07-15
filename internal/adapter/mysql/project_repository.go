@@ -58,19 +58,32 @@ func (r *ProjectRepository) FindMember(ctx context.Context, userID, projectID ui
 	}
 	return m, err
 }
-func (r *ProjectRepository) RotateWriteKey(ctx context.Context, projectID uint64, hash string, expires time.Time) error {
-	result, err := r.db.ExecContext(ctx, `UPDATE project SET previous_write_key_hash=write_key_hash,previous_write_key_expires_at=?,write_key_hash=? WHERE id=? AND is_active=TRUE`, expires, hash, projectID)
+func (r *ProjectRepository) RotateWriteKey(ctx context.Context, projectID uint64, hash string, now, expires time.Time) (err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	var previousExpiry sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT previous_write_key_expires_at FROM project WHERE id=? AND is_active=TRUE FOR UPDATE`, projectID).Scan(&previousExpiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return project.ErrProjectNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if n == 0 {
-		return errors.New("project not found")
+	if previousExpiry.Valid && previousExpiry.Time.After(now) {
+		return project.ErrWriteKeyRotationInProgress
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `UPDATE project SET previous_write_key_hash=write_key_hash,previous_write_key_expires_at=?,write_key_hash=? WHERE id=?`, expires, hash, projectID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (r *ProjectRepository) ListProjects(ctx context.Context, userID uint64) ([]project.Project, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT p.id,p.code,p.name,p.allowed_origins,p.timezone,p.is_active,p.created_by FROM project p JOIN project_member m ON m.project_id=p.id WHERE m.user_id=? AND m.is_active=TRUE ORDER BY p.id`, userID)

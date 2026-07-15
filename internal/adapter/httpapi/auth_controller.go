@@ -33,7 +33,11 @@ func (c AuthController) login(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := c.service.Login(r.Context(), req.Username, req.Password)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, "invalid credentials")
+		} else {
+			writeError(w, http.StatusInternalServerError, "authentication service unavailable")
+		}
 		return
 	}
 	c.setRefreshCookie(w, session.RefreshToken)
@@ -47,7 +51,11 @@ func (c AuthController) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := c.service.Refresh(r.Context(), cookie.Value)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		if errors.Is(err, auth.ErrInvalidToken) {
+			writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		} else {
+			writeError(w, http.StatusInternalServerError, "authentication service unavailable")
+		}
 		return
 	}
 	c.setRefreshCookie(w, session.RefreshToken)
@@ -68,7 +76,11 @@ func (c AuthController) me(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := c.service.User(r.Context(), p.UserID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		if errors.Is(err, auth.ErrUserNotFound) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+		} else {
+			writeError(w, http.StatusInternalServerError, "authentication service unavailable")
+		}
 		return
 	}
 	u.PasswordHash = ""
@@ -85,11 +97,14 @@ func (c AuthController) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.service.ChangePassword(r.Context(), p.UserID, req.CurrentPassword, req.NewPassword); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, auth.ErrInvalidCredentials) {
-			status = http.StatusUnauthorized
+		switch {
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			writeError(w, http.StatusUnauthorized, "invalid credentials")
+		case errors.Is(err, auth.ErrInvalidPassword):
+			writeError(w, http.StatusBadRequest, "invalid new password")
+		default:
+			writeError(w, http.StatusInternalServerError, "authentication service unavailable")
 		}
-		writeError(w, status, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

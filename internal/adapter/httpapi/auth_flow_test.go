@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -59,6 +60,103 @@ func TestViewerWriteRequestReturnsForbidden(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, response.Code)
 }
 
+func TestLoginInfrastructureFailureReturnsGeneric500(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	authRepo.findByNameErr = errors.New("driver: connection refused secret-host")
+	handler := httpapi.NewHandler(authSvc, project.NewService(newProjectRepo()), false)
+
+	response := performJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "admin", "password": "admin"}, "")
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"authentication service unavailable"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret-host")
+}
+
+func TestPasswordStorageFailureReturnsGeneric500(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	session, err := authSvc.Login(context.Background(), "admin", "admin")
+	require.NoError(t, err)
+	authRepo.updatePasswordErr = errors.New("driver: disk full secret-path")
+	handler := httpapi.NewHandler(authSvc, project.NewService(newProjectRepo()), false)
+
+	response := performJSON(t, handler, http.MethodPost, "/api/v1/auth/change-password", map[string]string{"current_password": "admin", "new_password": "changed"}, session.AccessToken)
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"authentication service unavailable"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret-path")
+}
+
+func TestProjectInfrastructureFailureReturnsGeneric500(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	require.NoError(t, authSvc.ChangePassword(context.Background(), authRepo.byName("admin").ID, "admin", "changed"))
+	session, err := authSvc.Login(context.Background(), "admin", "changed")
+	require.NoError(t, err)
+	projectRepo := newProjectRepo()
+	projectRepo.createErr = errors.New("mysql: duplicate details secret-table")
+	handler := httpapi.NewHandler(authSvc, project.NewService(projectRepo), false)
+
+	response := performJSON(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"code": "checkout", "name": "Checkout"}, session.AccessToken)
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"project service unavailable"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret-table")
+}
+
+func TestAuthenticationLookupFailureReturnsGeneric500(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	session, err := authSvc.Login(context.Background(), "admin", "admin")
+	require.NoError(t, err)
+	authRepo.findByIDErr = errors.New("driver secret authentication lookup")
+	handler := httpapi.NewHandler(authSvc, project.NewService(newProjectRepo()), false)
+
+	response := performJSON(t, handler, http.MethodGet, "/api/v1/auth/me", nil, session.AccessToken)
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"authentication service unavailable"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret")
+}
+
+func TestRefreshUserLookupFailureReturnsGeneric500(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	handler := httpapi.NewHandler(authSvc, project.NewService(newProjectRepo()), false)
+	login := performJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "admin", "password": "admin"}, "")
+	require.Equal(t, http.StatusOK, login.Code)
+	cookies := login.Result().Cookies()
+	require.Len(t, cookies, 1)
+	authRepo.findByIDErr = errors.New("driver secret refresh lookup")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+	req.AddCookie(cookies[0])
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"authentication service unavailable"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret")
+}
+
+func TestProjectAuthorizationInfrastructureFailureReturnsGeneric500(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	require.NoError(t, authSvc.ChangePassword(context.Background(), authRepo.byName("admin").ID, "admin", "changed"))
+	session, err := authSvc.Login(context.Background(), "admin", "changed")
+	require.NoError(t, err)
+	projectRepo := newProjectRepo()
+	projectRepo.findMemberErr = errors.New("driver secret membership lookup")
+	handler := httpapi.NewHandler(authSvc, project.NewService(projectRepo), false)
+
+	response := performJSON(t, handler, http.MethodPost, "/api/v1/projects/9/rotate-write-key", nil, session.AccessToken)
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.JSONEq(t, `{"error":"rotate write key failed"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret")
+}
+
 func performJSON(t *testing.T, handler http.Handler, method, path string, body any, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
@@ -76,11 +174,14 @@ func performJSON(t *testing.T, handler http.Handler, method, path string, body a
 }
 
 type testAuthRepo struct {
-	mu     sync.Mutex
-	next   uint64
-	users  map[uint64]auth.User
-	names  map[string]uint64
-	tokens map[string]auth.RefreshToken
+	mu                sync.Mutex
+	next              uint64
+	users             map[uint64]auth.User
+	names             map[string]uint64
+	tokens            map[string]auth.RefreshToken
+	findByNameErr     error
+	findByIDErr       error
+	updatePasswordErr error
 }
 
 func newAuthRepo() *testAuthRepo {
@@ -101,6 +202,9 @@ func (r *testAuthRepo) CreateInitialUser(_ context.Context, u auth.User) (auth.U
 func (r *testAuthRepo) FindUserByUsername(_ context.Context, n string) (auth.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.findByNameErr != nil {
+		return auth.User{}, r.findByNameErr
+	}
 	id, ok := r.names[n]
 	if !ok {
 		return auth.User{}, auth.ErrUserNotFound
@@ -110,6 +214,9 @@ func (r *testAuthRepo) FindUserByUsername(_ context.Context, n string) (auth.Use
 func (r *testAuthRepo) FindUserByID(_ context.Context, id uint64) (auth.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.findByIDErr != nil {
+		return auth.User{}, r.findByIDErr
+	}
 	u, ok := r.users[id]
 	if !ok {
 		return auth.User{}, auth.ErrUserNotFound
@@ -119,6 +226,9 @@ func (r *testAuthRepo) FindUserByID(_ context.Context, id uint64) (auth.User, er
 func (r *testAuthRepo) UpdatePassword(_ context.Context, id uint64, h string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.updatePasswordErr != nil {
+		return r.updatePasswordErr
+	}
 	u := r.users[id]
 	u.PasswordHash = h
 	u.MustChangePassword = false
@@ -132,7 +242,7 @@ func (r *testAuthRepo) StoreRefreshToken(_ context.Context, t auth.RefreshToken)
 	r.tokens[t.Hash] = t
 	return nil
 }
-func (r *testAuthRepo) ConsumeRefreshToken(_ context.Context, h string, n time.Time) (auth.RefreshToken, error) {
+func (r *testAuthRepo) RotateRefreshToken(_ context.Context, h string, successor auth.RefreshToken, n time.Time) (auth.RefreshToken, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t, ok := r.tokens[h]
@@ -141,6 +251,8 @@ func (r *testAuthRepo) ConsumeRefreshToken(_ context.Context, h string, n time.T
 	}
 	t.RevokedAt = &n
 	r.tokens[h] = t
+	successor.UserID = t.UserID
+	r.tokens[successor.Hash] = successor
 	return t, nil
 }
 func (r *testAuthRepo) RevokeRefreshToken(_ context.Context, h string, n time.Time) error {
@@ -161,10 +273,12 @@ func (r *testAuthRepo) byName(n string) auth.User {
 }
 
 type testProjectRepo struct {
-	mu       sync.Mutex
-	next     uint64
-	projects map[uint64]project.Project
-	members  map[[2]uint64]project.Member
+	mu            sync.Mutex
+	next          uint64
+	projects      map[uint64]project.Project
+	members       map[[2]uint64]project.Member
+	createErr     error
+	findMemberErr error
 }
 
 func newProjectRepo() *testProjectRepo {
@@ -173,6 +287,9 @@ func newProjectRepo() *testProjectRepo {
 func (r *testProjectRepo) CreateProject(_ context.Context, p project.Project, m project.Member) (project.Project, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.createErr != nil {
+		return project.Project{}, r.createErr
+	}
 	r.next++
 	p.ID = r.next
 	m.ProjectID = p.ID
@@ -183,16 +300,22 @@ func (r *testProjectRepo) CreateProject(_ context.Context, p project.Project, m 
 func (r *testProjectRepo) FindMember(_ context.Context, u, p uint64) (project.Member, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.findMemberErr != nil {
+		return project.Member{}, r.findMemberErr
+	}
 	m, ok := r.members[[2]uint64{u, p}]
 	if !ok {
 		return project.Member{}, project.ErrForbidden
 	}
 	return m, nil
 }
-func (r *testProjectRepo) RotateWriteKey(_ context.Context, id uint64, h string, e time.Time) error {
+func (r *testProjectRepo) RotateWriteKey(_ context.Context, id uint64, h string, now, e time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.projects[id]
+	if p.PreviousWriteKeyExpiresAt != nil && p.PreviousWriteKeyExpiresAt.After(now) {
+		return project.ErrWriteKeyRotationInProgress
+	}
 	p.PreviousWriteKeyHash = p.WriteKeyHash
 	p.PreviousWriteKeyExpiresAt = &e
 	p.WriteKeyHash = h

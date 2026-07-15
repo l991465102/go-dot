@@ -198,6 +198,30 @@ func TestTrackingDevelopmentStateTransitionAuditsPublishedPoint(t *testing.T) {
 	require.Equal(t, 1, script.commits)
 }
 
+func TestTrackingDraftUpdateAllowsZeroChangedScalarRowsForPropertyEdit(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}}
+	script.execResults = []driver.Result{scriptResult{affected: 0}, scriptResult{affected: 1}, scriptResult{affected: 1}, scriptResult{affected: 1}}
+	p := tracking.Point{ID: 7, ProjectID: 9, CategoryID: 3, Category: tracking.Category{ID: 3, ProjectID: 9, Level: tracking.Scene, Active: true}, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, Properties: []tracking.Property{{Code: "product_id", Name: "Product ID", Type: tracking.String}}, UpdatedBy: 1}
+	_, err := NewTrackingRepository(db).UpdateDraft(context.Background(), p)
+	require.NoError(t, err)
+	require.Len(t, script.execQueries, 4)
+	require.Contains(t, script.execQueries[1], "DELETE FROM tracking_point_property")
+	require.Contains(t, script.execQueries[2], "INSERT INTO tracking_point_property")
+	require.Contains(t, script.execQueries[3], "audit_log")
+	require.Equal(t, 1, script.commits)
+}
+
+func TestTrackingDevelopmentStateSameValueIsIdempotentWithoutAudit(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("PUBLISHED"), {}}
+	p, err := NewTrackingRepository(db).UpdateDevelopmentState(context.Background(), 9, 7, 1, tracking.Pending)
+	require.NoError(t, err)
+	require.Equal(t, tracking.Pending, p.DevelopmentState)
+	require.Empty(t, script.execQueries)
+	require.Equal(t, 1, script.commits)
+}
+
 func trackingPointRow(state string) []driver.Value {
 	return []driver.Value{uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "PAGE_VIEW", state, "PENDING", nil, nil, nil, nil, true, true, "APPROXIMATE", "CLIENT", []byte(`["web"]`), []byte(`[]`), nil, nil, nil, uint64(1), nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true, "detail", "Detail", uint64(2)}
 }

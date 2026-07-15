@@ -117,17 +117,33 @@ func TestPointGovernanceValuesAreValidated(t *testing.T) {
 
 func TestEarlyStepDraftCanBeSavedButCannotBePublished(t *testing.T) {
 	svc, repo := newTrackingFixture(t)
-	draft, err := svc.SaveDraft(context.Background(), 1, DraftInput{ProjectID: 2, CategoryID: 3})
+	draft, err := svc.SaveDraft(context.Background(), 1, DraftInput{ProjectID: 2, CategoryID: 3, Code: "product_view", Name: "Product view"})
 	require.NoError(t, err)
-	require.Empty(t, draft.Code)
+	require.Equal(t, "product_view", draft.Code)
 	_, err = svc.Publish(context.Background(), 1, draft.ID)
 	require.ErrorContains(t, err, "POINT_INVALID")
 	require.Equal(t, Draft, repo.points[draft.ID].State)
 }
 
+func TestDraftRejectsEmptyPointAndPropertyCodesBeforePersistence(t *testing.T) {
+	svc, repo := newTrackingFixture(t)
+	_, err := svc.SaveDraft(context.Background(), 1, DraftInput{ProjectID: 2, CategoryID: 3, Name: "Name"})
+	require.ErrorContains(t, err, "POINT_INVALID")
+	require.Empty(t, repo.points)
+	base := DraftInput{ProjectID: 2, CategoryID: 3, Code: "product_view", Name: "Name"}
+	base.Properties = []PropertyInput{{Name: "Blank"}}
+	_, err = svc.SaveDraft(context.Background(), 1, base)
+	require.ErrorContains(t, err, "PROPERTY_SCHEMA_INVALID")
+	require.Empty(t, repo.points)
+	base.Properties = []PropertyInput{{Code: "product_id"}, {Code: "product_id"}}
+	_, err = svc.SaveDraft(context.Background(), 1, base)
+	require.ErrorContains(t, err, "PROPERTY_SCHEMA_INVALID")
+	require.Empty(t, repo.points)
+}
+
 func TestDraftRejectsGovernanceTyposWhenPresent(t *testing.T) {
 	svc, _ := newTrackingFixture(t)
-	in := DraftInput{ProjectID: 2, CategoryID: 3, UVMode: "APPROXIMAT", TimeBasis: Client}
+	in := DraftInput{ProjectID: 2, CategoryID: 3, Code: "product_view", Name: "Product view", UVMode: "APPROXIMAT", TimeBasis: Client}
 	_, err := svc.SaveDraft(context.Background(), 1, in)
 	require.ErrorContains(t, err, "UV_MODE_INVALID")
 	in.UVMode = Approximate

@@ -162,8 +162,8 @@ func (p Point) ValidateDraft() error {
 	if p.Category.Level != Scene || !p.Category.Active || p.Category.ProjectID != p.ProjectID {
 		return coded("CATEGORY_INVALID", "point requires an active same-project SCENE category")
 	}
-	if p.Code != "" && !pointCodePattern.MatchString(p.Code) {
-		return coded("POINT_INVALID", "invalid point code")
+	if !pointCodePattern.MatchString(p.Code) || p.Name == "" {
+		return coded("POINT_INVALID", "point code and name are required")
 	}
 	if p.BehaviorType != "" && !validBehaviorType(p.BehaviorType) {
 		return coded("BEHAVIOR_TYPE_INVALID", "unsupported behavior type")

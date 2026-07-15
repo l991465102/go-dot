@@ -231,10 +231,7 @@ func (r *TrackingRepository) UpdateDraft(ctx context.Context, p tracking.Point) 
 	if err != nil {
 		return updated, translateConflict(err)
 	}
-	affected, _ := result.RowsAffected()
-	if affected != 1 {
-		return updated, tracking.ErrImmutable
-	}
+	_ = result
 	if _, err = tx.ExecContext(ctx, `DELETE FROM tracking_point_property WHERE point_id=?`, p.ID); err != nil {
 		return updated, err
 	}
@@ -264,6 +261,12 @@ func (r *TrackingRepository) UpdateDevelopmentState(ctx context.Context, project
 	}
 	if p.State != tracking.Draft && p.State != tracking.Published {
 		return updated, tracking.NewCodedError("POINT_STATE_INVALID", "development state can only change for draft or published points")
+	}
+	if p.DevelopmentState == state {
+		if err = tx.Commit(); err != nil {
+			return updated, err
+		}
+		return p, nil
 	}
 	before, _ := json.Marshal(p)
 	result, e := tx.ExecContext(ctx, `UPDATE tracking_point SET development_state=?,updated_by=? WHERE project_id=? AND id=? AND definition_state IN ('DRAFT','PUBLISHED')`, state, actorID, projectID, id)

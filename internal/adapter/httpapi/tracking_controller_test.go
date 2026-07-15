@@ -29,6 +29,8 @@ func TestTrackingHTTPFullLifecycle(t *testing.T) {
 	draft := requestJSON[tracking.Point](t, mux, http.MethodPost, "/api/v1/projects/9/points", in, http.StatusCreated)
 	require.Equal(t, uint64(9), draft.ProjectID)
 	requestJSON[tracking.Snapshot](t, mux, http.MethodPost, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10)+"/publish", nil, http.StatusOK)
+	idempotent := requestJSON[tracking.Point](t, mux, http.MethodPatch, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10)+"/development-state", map[string]any{"state": "PENDING"}, http.StatusOK)
+	require.Equal(t, tracking.Pending, idempotent.DevelopmentState)
 	transitioned := requestJSON[tracking.Point](t, mux, http.MethodPatch, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10)+"/development-state", map[string]any{"state": "ONLINE"}, http.StatusOK)
 	require.Equal(t, tracking.Online, transitioned.DevelopmentState)
 	requestJSON[map[string]string](t, mux, http.MethodPatch, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10), in, http.StatusConflict)

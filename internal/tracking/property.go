@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"regexp"
 	"time"
 )
 
 type PropertyType string
+
+var propertyCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 
 const (
 	String   PropertyType = "STRING"
@@ -36,7 +39,7 @@ type PropertyInput = Property
 func validatePropertySchema(properties []Property) error {
 	seen := map[string]struct{}{}
 	for _, p := range properties {
-		if p.Code == "" || p.Name == "" {
+		if !propertyCodePattern.MatchString(p.Code) || p.Name == "" {
 			return coded("PROPERTY_SCHEMA_INVALID", "property code and name are required")
 		}
 		if _, ok := seen[p.Code]; ok {
@@ -80,12 +83,13 @@ func validPropertyType(t PropertyType) bool {
 func validateDraftPropertySchema(properties []Property) error {
 	seen := map[string]struct{}{}
 	for _, p := range properties {
-		if p.Code != "" {
-			if _, ok := seen[p.Code]; ok {
-				return coded("PROPERTY_SCHEMA_INVALID", "duplicate property %s", p.Code)
-			}
-			seen[p.Code] = struct{}{}
+		if !propertyCodePattern.MatchString(p.Code) {
+			return coded("PROPERTY_SCHEMA_INVALID", "property code is required and must be valid")
 		}
+		if _, ok := seen[p.Code]; ok {
+			return coded("PROPERTY_SCHEMA_INVALID", "duplicate property %s", p.Code)
+		}
+		seen[p.Code] = struct{}{}
 		if p.Type != "" && !validPropertyType(p.Type) {
 			return coded("PROPERTY_SCHEMA_INVALID", "invalid type for %s", p.Code)
 		}

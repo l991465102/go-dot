@@ -45,7 +45,7 @@ func runWorker(ctx context.Context) error {
 		return fmt.Errorf("read worker hostname: %w", err)
 	}
 	consumer := fmt.Sprintf("%s-%d", hostname, os.Getpid())
-	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL))
+	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
 	worker := ingestion.NewWorker(queue, clickhouseadapter.New(db), rediscounter.New(redisClient), ingestion.WorkerConfig{
 		EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup,
 		Consumer: consumer, VisitorMasterKey: []byte(cfg.Auth.VisitorMasterKey), Concurrency: cfg.Worker.Concurrency,

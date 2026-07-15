@@ -21,6 +21,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/auth"
 	"github.com/lzw7758/go-dot/internal/config"
 	"github.com/lzw7758/go-dot/internal/ingestion"
+	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
@@ -64,17 +65,18 @@ func runAPI(ctx context.Context) error {
 	trackingService := tracking.NewService(trackingRepo, projectService, snapshotCache)
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Address})
 	defer redisClient.Close()
-	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL))
+	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
 	statisticsStore := clickhouseadapter.NewStatisticsStore(chDB)
 	statisticsService := statistics.NewService(projectService, rediscounter.New(redisClient), statisticsStore, snapshotCache,
 		statistics.CompositeDiagnostics{Events: statisticsStore, DeadLetters: queue}, time.Now)
 	collector := ingestion.NewCollector(snapshotCache, queue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
+	overviewService := overview.NewService(projectService, statisticsStore, queue, trackingRepo, time.Now)
 	collectHandler := httpapi.NewCollectHandler(
 		httpapi.NewCollectController(collector, cfg.Tracking.MaxBodyBytes),
 		httpapi.NewWriteKeyMiddleware(projectRepo, time.Now),
 		httpapi.NewRateLimitMiddleware(httpapi.NewRedisTokenBucket(redisClient, 200, 100)),
 	)
-	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService)
+	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService, overviewService)
 	handler := http.NewServeMux()
 	handler.Handle("/api/v1/collect/events", collectHandler)
 	handler.Handle("/", managementHandler)

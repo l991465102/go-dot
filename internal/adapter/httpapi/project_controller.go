@@ -7,6 +7,7 @@ import (
 
 	v1 "github.com/lzw7758/go-dot/api/projects/v1"
 	"github.com/lzw7758/go-dot/internal/auth"
+	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
@@ -104,6 +105,10 @@ func NewHandler(authService *auth.Service, projectService *project.Service, secu
 			if typed != nil {
 				NewStatisticsController(typed).Register(mux)
 				NewDiagnosticsController(typed).Register(mux)
+			}
+		case *overview.Service:
+			if typed != nil {
+				NewOverviewController(typed).Register(mux)
 			}
 		}
 	}

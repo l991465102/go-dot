@@ -52,7 +52,7 @@ func runScheduler(ctx context.Context) error {
 	}
 	projectRepo := mysqladapter.NewProjectRepository(mysqlDB)
 	aggregate := statistics.NewAggregator(clickhouseadapter.NewStatisticsStore(chDB), projectRepo, nil)
-	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL))
+	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
 	monitor := redisqueue.NewQueueMonitor(redisClient, []string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup, cfg.Queue.DeadStream, redisqueue.NoopQueueSnapshotSink{})
 	host, _ := os.Hostname()
 	jobs := ingestion.SchedulerRuntimeJobs{Statistics: aggregate, Queue: queue, Observer: monitor, Keys: projectRepo}

@@ -36,6 +36,15 @@ local new_id = redis.call('XADD', KEYS[1], '*',
   'deliveries', ARGV[5],
   'first_seen', ARGV[6],
   'last_error', ARGV[7])
+if ARGV[8] ~= '' then
+  redis.call('HINCRBY', KEYS[3], ARGV[8], 1)
+  local mapping = redis.call('HGET', KEYS[4], ARGV[9])
+  if mapping == ARGV[8] .. '|' .. ARGV[10] then
+    redis.call('HDEL', KEYS[4], ARGV[9])
+    redis.call('HINCRBY', KEYS[5], ARGV[8], -1)
+    redis.call('ZREM', KEYS[6], ARGV[10])
+  end
+end
 redis.call('XACK', KEYS[2], ARGV[1], ARGV[2])
 return new_id
 `)
@@ -52,7 +61,23 @@ local id = redis.call('XADD', KEYS[1], '*',
   'first_seen', ARGV[4],
   'last_error', ARGV[5])
 redis.call('SET', KEYS[2], id, 'EX', ARGV[6])
+if ARGV[7] ~= '' then
+  redis.call('HSET', KEYS[3], ARGV[9] .. '|' .. id, ARGV[7] .. '|' .. ARGV[9] .. '|' .. ARGV[1])
+  redis.call('HINCRBY', KEYS[4], ARGV[7], 1)
+  redis.call('ZADD', KEYS[5], ARGV[8], ARGV[9] .. '|' .. ARGV[1])
+end
 return id
+`)
+
+var ackIndexedScript = redis.NewScript(`
+local mapping = redis.call('HGET', KEYS[2], ARGV[3])
+local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+if acked > 0 and mapping == ARGV[4] then
+  redis.call('HDEL', KEYS[2], ARGV[3])
+  redis.call('HINCRBY', KEYS[3], ARGV[5], -1)
+  redis.call('ZREM', KEYS[4], ARGV[6])
+end
+return 1
 `)
 
 var scheduleRetryScript = redis.NewScript(`
@@ -62,8 +87,9 @@ if #pending == 0 then
 end
 local record = cjson.encode({
   batch_id=ARGV[4], payload=ARGV[5], deliveries=ARGV[6],
-  first_seen=ARGV[7], last_error=ARGV[8]
+  first_seen=ARGV[7], last_error=ARGV[8], pending_mapping=redis.call('HGET', KEYS[4], ARGV[10])
 })
+redis.call('HDEL', KEYS[4], ARGV[10])
 redis.call('HSET', KEYS[3], ARGV[3], record)
 redis.call('ZADD', KEYS[2], ARGV[9], ARGV[3])
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
@@ -77,10 +103,13 @@ for _, member in ipairs(members) do
   local raw = redis.call('HGET', KEYS[3], member)
   if raw then
     local record = cjson.decode(raw)
-    redis.call('XADD', KEYS[1], '*',
+    local new_id = redis.call('XADD', KEYS[1], '*',
       'batch_id', record.batch_id, 'payload', record.payload,
       'deliveries', record.deliveries, 'first_seen', record.first_seen,
       'last_error', record.last_error)
+    if record.pending_mapping then
+      redis.call('HSET', KEYS[4], ARGV[3] .. '|' .. new_id, record.pending_mapping)
+    end
     promoted = promoted + 1
   end
   redis.call('HDEL', KEYS[3], member)
@@ -94,6 +123,8 @@ type Queue struct {
 	deadStream          string
 	publishDedupTTL     time.Duration
 	deadLetterScanLimit int
+	overviewStreams     []string
+	overviewGroup       string
 }
 
 func WithPublishDedupTTL(ttl time.Duration) Option {
@@ -120,6 +151,9 @@ func WithDeadLetterScanLimit(limit int) Option {
 		}
 	}
 }
+func WithOverviewStreams(streams []string, group string) Option {
+	return func(q *Queue) { q.overviewStreams = append([]string(nil), streams...); q.overviewGroup = group }
+}
 
 func New(client redis.UniversalClient, options ...Option) *Queue {
 	queue := &Queue{client: client, deadStream: ports.DeadLetterStream, publishDedupTTL: 72 * time.Hour, deadLetterScanLimit: 1000}
@@ -145,7 +179,8 @@ func (q *Queue) PublishBatch(ctx context.Context, stream string, batch ports.Bat
 		dedupTTLSeconds = 1
 	}
 	values := messageValues(batch.BatchID, batch.Payload, 1, createdAt, "")
-	id, err := publishScript.Run(ctx, q.client, []string{stream, publishDedupKey(stream, batch.BatchID)}, values[fieldBatchID], values[fieldPayload], values[fieldDeliveries], values[fieldFirstSeen], values[fieldLastError], dedupTTLSeconds).Text()
+	projectID := payloadProjectID(batch.Payload)
+	id, err := publishScript.Run(ctx, q.client, []string{stream, publishDedupKey(stream, batch.BatchID), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID)}, values[fieldBatchID], values[fieldPayload], values[fieldDeliveries], values[fieldFirstSeen], values[fieldLastError], dedupTTLSeconds, projectID, createdAt.UnixMilli(), stream).Text()
 	if err != nil {
 		return "", fmt.Errorf("publish Redis Stream %q: %w", stream, err)
 	}
@@ -191,8 +226,25 @@ func (q *Queue) Ack(ctx context.Context, stream, group string, ids ...string) er
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := q.client.XAck(ctx, stream, group, ids...).Err(); err != nil {
-		return fmt.Errorf("ack Redis Stream %q: %w", stream, err)
+	for _, id := range ids {
+		field := stream + "|" + id
+		mapping, err := q.client.HGet(ctx, q.pendingIndexKey(), field).Result()
+		if err == redis.Nil {
+			if err := q.client.XAck(ctx, stream, group, id).Err(); err != nil {
+				return fmt.Errorf("ack Redis Stream %q: %w", stream, err)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		parts := strings.SplitN(mapping, "|", 2)
+		if len(parts) != 2 {
+			return errors.New("invalid Redis pending index")
+		}
+		if _, err := ackIndexedScript.Run(ctx, q.client, []string{stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(parts[0])}, group, id, field, mapping, parts[0], parts[1]).Result(); err != nil {
+			return fmt.Errorf("ack indexed Redis Stream %q: %w", stream, err)
+		}
 	}
 	return nil
 }
@@ -217,8 +269,8 @@ func (q *Queue) Retry(ctx context.Context, stream, group string, msg ports.Messa
 	batchID, payload := messageBody(msg)
 	member := group + ":" + msg.ID
 	due := time.Now().Add(delay).UnixMilli()
-	_, err = scheduleRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream)},
-		group, msg.ID, member, batchID, string(payload), max(msg.Deliveries+1, 2), firstSeen, errorText(cause), due).Result()
+	_, err = scheduleRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()},
+		group, msg.ID, member, batchID, string(payload), max(msg.Deliveries+1, 2), firstSeen, errorText(cause), due, stream+"|"+msg.ID).Result()
 	if err != nil {
 		return fmt.Errorf("schedule Redis Stream message %q retry: %w", msg.ID, err)
 	}
@@ -232,7 +284,7 @@ func (q *Queue) PromoteDue(ctx context.Context, stream string, count int) (int, 
 	if _, err := requireRedisHashTag(stream); err != nil {
 		return 0, err
 	}
-	result, err := promoteRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream)}, time.Now().UnixMilli(), count).Int()
+	result, err := promoteRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()}, time.Now().UnixMilli(), count, stream).Int()
 	if err != nil {
 		return 0, fmt.Errorf("promote due Redis Stream retries for %q: %w", stream, err)
 	}
@@ -254,13 +306,40 @@ func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg p
 		return err
 	}
 	batchID, payload := messageBody(msg)
-	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream},
-		group, msg.ID, batchID, string(payload), max(msg.Deliveries, 1), firstSeen, errorText(cause),
+	projectID := payloadProjectID(payload)
+	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID)},
+		group, msg.ID, batchID, string(payload), max(msg.Deliveries, 1), firstSeen, errorText(cause), projectID, sourceStream+"|"+msg.ID, sourceStream+"|"+batchID,
 	).Result()
 	if err != nil {
 		return fmt.Errorf("move Redis Stream message %q to DLQ: %w", msg.ID, err)
 	}
 	return nil
+}
+
+func payloadProjectID(payload []byte) string {
+	var envelope struct {
+		ProjectID uint64 `json:"project_id"`
+	}
+	if json.Unmarshal(payload, &envelope) != nil || envelope.ProjectID == 0 {
+		return ""
+	}
+	return strconv.FormatUint(envelope.ProjectID, 10)
+}
+func (q *Queue) deadLetterCountKey() string {
+	tag, _ := redisHashTag(q.deadStream)
+	return "queue:{" + tag + "}:dead:project-counts"
+}
+func (q *Queue) pendingIndexKey() string {
+	tag, _ := redisHashTag(q.deadStream)
+	return "queue:{" + tag + "}:pending:index"
+}
+func (q *Queue) pendingCountKey() string {
+	tag, _ := redisHashTag(q.deadStream)
+	return "queue:{" + tag + "}:pending:counts"
+}
+func (q *Queue) pendingAgeKey(projectID string) string {
+	tag, _ := redisHashTag(q.deadStream)
+	return "queue:{" + tag + "}:pending:age:" + projectID
 }
 
 var redisStreamIDPattern = regexp.MustCompile(`^[0-9]+-[0-9]+$`)

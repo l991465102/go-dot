@@ -6,6 +6,7 @@ import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ProjectOverviewView from '@/views/ProjectOverviewView.vue'
 import ProjectOnboardingView from '@/views/ProjectOnboardingView.vue'
+import ProjectBootstrapErrorView from '@/views/ProjectBootstrapErrorView.vue'
 
 const EmptyView = { template: '<div />' }
 
@@ -16,6 +17,7 @@ export function createAppRouter(): Router {
       { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
       { path: '/change-password', name: 'change-password', component: ChangePasswordView },
       { path: '/onboarding', name: 'project-onboarding', component: ProjectOnboardingView },
+      { path: '/project-bootstrap-error', name: 'project-bootstrap-error', component: ProjectBootstrapErrorView },
       {
         path: '/projects/:projectId',
         component: AppLayout,
@@ -39,11 +41,10 @@ export function createAppRouter(): Router {
       if (auth.authenticated && auth.mustChangePassword) return { name: 'change-password' }
       if (auth.authenticated) {
         const projectStore = useProjectStore()
-        try {
-          if (!projectStore.projects.length) await projectStore.load()
-        } catch {
-          return { name: 'project-onboarding' }
+        if (projectStore.loadState === 'idle') {
+          try { await projectStore.load() } catch { return { name: 'project-bootstrap-error' } }
         }
+        if (projectStore.loadState === 'error') return { name: 'project-bootstrap-error' }
         return projectStore.currentProjectId
           ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
           : { name: 'project-onboarding' }
@@ -54,36 +55,45 @@ export function createAppRouter(): Router {
     if (auth.mustChangePassword && to.name !== 'change-password') return { name: 'change-password' }
     if (!auth.mustChangePassword && to.name === 'change-password') {
       const projectStore = useProjectStore()
-      try {
-        if (!projectStore.projects.length) await projectStore.load()
-      } catch {
-        return { name: 'project-onboarding' }
+      if (projectStore.loadState === 'idle') {
+        try { await projectStore.load() } catch { return { name: 'project-bootstrap-error' } }
       }
+      if (projectStore.loadState === 'error') return { name: 'project-bootstrap-error' }
       return projectStore.currentProjectId
         ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
         : { name: 'project-onboarding' }
     }
     if (to.name === 'project-onboarding') {
       const projectStore = useProjectStore()
-      try {
-        if (!projectStore.projects.length) await projectStore.load()
-      } catch {
-        return true
+      if (projectStore.loadState === 'idle') {
+        try { await projectStore.load() } catch { return { name: 'project-bootstrap-error' } }
       }
+      if (projectStore.loadState === 'error') return { name: 'project-bootstrap-error' }
       return projectStore.currentProjectId
         ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
         : true
     }
+    if (to.name === 'project-bootstrap-error') {
+      const projectStore = useProjectStore()
+      if (projectStore.loadState === 'idle') {
+        try { await projectStore.load() } catch { return true }
+      }
+      if (projectStore.loadState === 'error') return true
+      return projectStore.currentProjectId
+        ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
+        : { name: 'project-onboarding' }
+    }
     if (to.path.startsWith('/projects/')) {
       const projectStore = useProjectStore()
       const requestedId = Number(to.params.projectId)
-      if (!projectStore.projects.length) {
+      if (projectStore.loadState === 'idle') {
         try {
           await projectStore.load(requestedId)
         } catch {
-          return true
+          return { name: 'project-bootstrap-error' }
         }
       }
+      if (projectStore.loadState === 'error') return { name: 'project-bootstrap-error' }
       if (!projectStore.select(requestedId)) {
         if (projectStore.currentProjectId) {
           return { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }

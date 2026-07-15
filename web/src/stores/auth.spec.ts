@@ -85,4 +85,16 @@ describe('authentication routing', () => {
     expect(router.currentRoute.value.name).toBe('project-overview')
     expect(router.currentRoute.value.params.projectId).toBe('9')
   })
+
+  it('routes a project membership lookup failure to authenticated bootstrap error', async () => {
+    vi.spyOn(projectsApi, 'listProjects').mockRejectedValue(new Error('membership denied'))
+    const auth = useAuthStore()
+    auth.setSession({ accessToken: 'token', mustChangePassword: false, user: { ...adminUser, id: 2, username: 'viewer', mustChangePassword: false } })
+    const router = createAppRouter()
+
+    await router.push('/projects/9/overview')
+
+    expect(auth.authenticated).toBe(true)
+    expect(router.currentRoute.value.name).toBe('project-bootstrap-error')
+  })
 })

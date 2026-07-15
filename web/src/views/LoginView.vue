@@ -18,20 +18,28 @@ async function submit() {
   error.value = ''
   try {
     await auth.signIn(form.username, form.password)
-    if (auth.mustChangePassword) {
-      await router.replace({ name: 'change-password' })
-      return
-    }
-    await projects.load()
-    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : null
-    if (redirect) await router.replace(redirect)
-    else if (projects.currentProjectId) await router.replace({ name: 'project-overview', params: { projectId: projects.currentProjectId } })
-    else await router.replace({ name: 'project-onboarding' })
   } catch {
     error.value = '账号或密码错误，请重新输入。'
-  } finally {
     loading.value = false
+    return
   }
+  if (auth.mustChangePassword) {
+    loading.value = false
+    await router.replace({ name: 'change-password' })
+    return
+  }
+  try {
+    await projects.load()
+  } catch {
+    loading.value = false
+    await router.replace({ name: 'project-bootstrap-error' })
+    return
+  }
+  const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : null
+  if (redirect) await router.replace(redirect)
+  else if (projects.currentProjectId) await router.replace({ name: 'project-overview', params: { projectId: projects.currentProjectId } })
+  else await router.replace({ name: 'project-onboarding' })
+  loading.value = false
 }
 </script>
 

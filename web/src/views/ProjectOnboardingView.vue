@@ -14,7 +14,7 @@ const codeValid = computed(() => /^[a-z][a-z0-9_-]{1,63}$/.test(form.code))
 const valid = computed(() => codeValid.value && form.name.trim().length > 0)
 
 async function create() {
-  if (!valid.value || projects.loading) return
+  if (!valid.value || projects.loading || !projects.canCreateInitialProject) return
   error.value = ''
   try {
     const created = await projects.create({

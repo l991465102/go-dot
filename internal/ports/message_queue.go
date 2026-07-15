@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const DeadLetterStream = "tracking:dead"
+const DeadLetterStream = "tracking:{queue}:dead"
 
 type Message struct {
 	ID         string

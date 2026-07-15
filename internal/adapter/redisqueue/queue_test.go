@@ -20,6 +20,28 @@ func TestMessageQueueContract(t *testing.T) {
 	runContract(t, client)
 }
 
+func TestPublishRejectsMissingHashTagBeforeMutation(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	_, err := redisqueue.New(client).PublishBatch(context.Background(), "tracking:events", ports.BatchEnvelope{BatchID: "bad", Payload: []byte(`{}`)})
+	require.ErrorContains(t, err, "Redis hash tag")
+	require.Equal(t, int64(0), client.DBSize(context.Background()).Val())
+}
+
+func TestMoveToDLQRejectsMismatchedHashTagsBeforeMutation(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	ctx := context.Background()
+	queue := redisqueue.New(client, redisqueue.WithDeadStream("tracking:{dead}:dead"))
+	_, err := queue.PublishBatch(ctx, "tracking:{source}:events", ports.BatchEnvelope{BatchID: "b", Payload: []byte(`{}`)})
+	require.NoError(t, err)
+	messages, err := queue.Consume(ctx, "tracking:{source}:events", "workers", "c", 1, time.Millisecond)
+	require.NoError(t, err)
+	err = queue.MoveToDLQ(ctx, "tracking:{source}:events", "workers", messages[0], errors.New("bad"))
+	require.ErrorContains(t, err, "same Redis hash tag")
+	pending, pendingErr := client.XPending(ctx, "tracking:{source}:events", "workers").Result()
+	require.NoError(t, pendingErr)
+	require.Equal(t, int64(1), pending.Count)
+}
+
 func TestMessageQueueContractAgainstComposeRedis(t *testing.T) {
 	address := os.Getenv("GO_DOT_REDIS_TEST_ADDRESS")
 	if address == "" {
@@ -50,7 +72,7 @@ func TestMoveToDLQIsAtomic(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)
 	ctx := context.Background()
-	stream := "contract:atomic-dlq"
+	stream := "contract:{queue}:atomic-dlq"
 	_, err := queue.PublishBatch(ctx, stream, ports.BatchEnvelope{
 		BatchID: "batch", Payload: []byte(`{"ok":true}`), CreatedAt: time.Now(),
 	})
@@ -73,15 +95,15 @@ func TestMoveToDLQIsIdempotentAfterLostResponse(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)
 	ctx := context.Background()
-	_, err := queue.PublishBatch(ctx, "tracking:events", ports.BatchEnvelope{
+	_, err := queue.PublishBatch(ctx, "tracking:{queue}:events", ports.BatchEnvelope{
 		BatchID: "batch-1", Payload: []byte(`{"ok":true}`), CreatedAt: time.Now(),
 	})
 	require.NoError(t, err)
-	messages, err := queue.Consume(ctx, "tracking:events", "workers", "consumer", 1, time.Millisecond)
+	messages, err := queue.Consume(ctx, "tracking:{queue}:events", "workers", "consumer", 1, time.Millisecond)
 	require.NoError(t, err)
 	require.Len(t, messages, 1)
-	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:events", "workers", messages[0], context.DeadlineExceeded))
-	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:events", "workers", messages[0], context.DeadlineExceeded))
+	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:{queue}:events", "workers", messages[0], context.DeadlineExceeded))
+	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:{queue}:events", "workers", messages[0], context.DeadlineExceeded))
 
 	dlq, err := client.XLen(ctx, ports.DeadLetterStream).Result()
 	require.NoError(t, err)
@@ -90,17 +112,17 @@ func TestMoveToDLQIsIdempotentAfterLostResponse(t *testing.T) {
 
 func TestMoveToDLQUsesConfiguredStream(t *testing.T) {
 	client := inMemoryRedisClient(t)
-	queue := redisqueue.New(client, redisqueue.WithDeadStream("custom:dead"))
+	queue := redisqueue.New(client, redisqueue.WithDeadStream("custom:{queue}:dead"))
 	ctx := context.Background()
-	_, err := queue.PublishBatch(ctx, "tracking:events", ports.BatchEnvelope{
+	_, err := queue.PublishBatch(ctx, "tracking:{queue}:events", ports.BatchEnvelope{
 		BatchID: "batch-1", Payload: []byte(`{"ok":true}`), CreatedAt: time.Now(),
 	})
 	require.NoError(t, err)
-	messages, err := queue.Consume(ctx, "tracking:events", "workers", "consumer", 1, time.Millisecond)
+	messages, err := queue.Consume(ctx, "tracking:{queue}:events", "workers", "consumer", 1, time.Millisecond)
 	require.NoError(t, err)
-	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:events", "workers", messages[0], context.DeadlineExceeded))
+	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:{queue}:events", "workers", messages[0], context.DeadlineExceeded))
 
-	require.Equal(t, int64(1), client.XLen(ctx, "custom:dead").Val())
+	require.Equal(t, int64(1), client.XLen(ctx, "custom:{queue}:dead").Val())
 	require.Equal(t, int64(0), client.XLen(ctx, ports.DeadLetterStream).Val())
 }
 
@@ -108,11 +130,11 @@ func TestRejectsPositiveSubMillisecondDurations(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)
 	ctx := context.Background()
-	_, err := queue.Consume(ctx, "tracking:events", "workers", "consumer", 1, 500*time.Microsecond)
+	_, err := queue.Consume(ctx, "tracking:{queue}:events", "workers", "consumer", 1, 500*time.Microsecond)
 	require.ErrorContains(t, err, "block duration")
-	_, err = queue.ReclaimStale(ctx, "tracking:events", "workers", "consumer", 500*time.Microsecond, 1)
+	_, err = queue.ReclaimStale(ctx, "tracking:{queue}:events", "workers", "consumer", 500*time.Microsecond, 1)
 	require.ErrorContains(t, err, "idle duration")
-	err = queue.Retry(ctx, "tracking:events", "workers", ports.Message{ID: "1-0", BatchID: "b", Payload: []byte(`{}`)}, errors.New("temporary"), time.Microsecond)
+	err = queue.Retry(ctx, "tracking:{queue}:events", "workers", ports.Message{ID: "1-0", BatchID: "b", Payload: []byte(`{}`)}, errors.New("temporary"), time.Microsecond)
 	require.ErrorContains(t, err, "retry delay")
 }
 
@@ -120,12 +142,12 @@ func TestPublishStoresRequiredEnvelopeFields(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)
 	createdAt := time.Unix(1_700_000_000, 123_000_000).UTC()
-	id, err := queue.PublishBatch(context.Background(), "tracking:events", ports.BatchEnvelope{
+	id, err := queue.PublishBatch(context.Background(), "tracking:{queue}:events", ports.BatchEnvelope{
 		BatchID: "batch-1", Payload: []byte(`{"ok":true}`), CreatedAt: createdAt,
 	})
 	require.NoError(t, err)
 
-	messages, err := client.XRangeN(context.Background(), "tracking:events", id, id, 1).Result()
+	messages, err := client.XRangeN(context.Background(), "tracking:{queue}:events", id, id, 1).Result()
 	require.NoError(t, err)
 	require.Len(t, messages, 1)
 	require.Equal(t, "batch-1", messages[0].Values["batch_id"])
@@ -138,9 +160,9 @@ func TestPublishStoresRequiredEnvelopeFields(t *testing.T) {
 func TestPublishDeduplicationTTLIsConfigurable(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client, redisqueue.WithPublishDedupTTL(5*time.Minute))
-	_, err := queue.PublishBatch(context.Background(), "tracking:events", ports.BatchEnvelope{BatchID: "batch-ttl", Payload: []byte(`{"ok":true}`)})
+	_, err := queue.PublishBatch(context.Background(), "tracking:{queue}:events", ports.BatchEnvelope{BatchID: "batch-ttl", Payload: []byte(`{"ok":true}`)})
 	require.NoError(t, err)
-	keys, err := client.Keys(context.Background(), "queue:publish:*").Result()
+	keys, err := client.Keys(context.Background(), "queue:{queue}:publish:*").Result()
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
 	ttl, err := client.TTL(context.Background(), keys[0]).Result()
@@ -152,11 +174,11 @@ func TestPublishDeduplicationTTLIsConfigurable(t *testing.T) {
 func TestConsumeCreatesGroupAndStreamWhenAbsent(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)
-	messages, err := queue.Consume(context.Background(), "tracking:events", "workers", "consumer", 1, time.Millisecond)
+	messages, err := queue.Consume(context.Background(), "tracking:{queue}:events", "workers", "consumer", 1, time.Millisecond)
 	require.NoError(t, err)
 	require.Empty(t, messages)
 
-	groups, err := client.XInfoGroups(context.Background(), "tracking:events").Result()
+	groups, err := client.XInfoGroups(context.Background(), "tracking:{queue}:events").Result()
 	require.NoError(t, err)
 	require.Len(t, groups, 1)
 	require.Equal(t, "workers", groups[0].Name)
@@ -165,7 +187,7 @@ func TestConsumeCreatesGroupAndStreamWhenAbsent(t *testing.T) {
 func TestConsumeReturnsMalformedEntryBesideValidSibling(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	ctx := context.Background()
-	stream := "tracking:events"
+	stream := "tracking:{queue}:events"
 	_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"payload": `{"missing_batch":true}`, "deliveries": "1"}}).Result()
 	require.NoError(t, err)
 	_, err = client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "missing-payload", "deliveries": "1"}}).Result()
@@ -192,7 +214,7 @@ func TestConsumeReturnsMalformedEntryBesideValidSibling(t *testing.T) {
 func TestReclaimReturnsMalformedPendingEntry(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	ctx := context.Background()
-	stream := "tracking:events"
+	stream := "tracking:{queue}:events"
 	_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "bad", "payload": `{"bad":true}`, "deliveries": "zero"}}).Result()
 	require.NoError(t, err)
 	queue := redisqueue.New(client)
@@ -211,7 +233,7 @@ func TestReclaimReturnsMalformedPendingEntry(t *testing.T) {
 func TestDelayedRetrySurvivesQueueRestartAndIncrementsDelivery(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	ctx := context.Background()
-	stream := "tracking:events"
+	stream := "tracking:{queue}:events"
 	first := redisqueue.New(client)
 	_, err := first.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "restart", Payload: []byte(`{"ok":true}`)})
 	require.NoError(t, err)
@@ -233,7 +255,7 @@ func TestDelayedRetrySurvivesQueueRestartAndIncrementsDelivery(t *testing.T) {
 func TestScheduleRetryIsAtomicWhenDurableScheduleWriteFails(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	ctx := context.Background()
-	stream := "tracking:events"
+	stream := "tracking:{queue}:events"
 	queue := redisqueue.New(client)
 	_, err := queue.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "atomic", Payload: []byte(`{"ok":true}`)})
 	require.NoError(t, err)

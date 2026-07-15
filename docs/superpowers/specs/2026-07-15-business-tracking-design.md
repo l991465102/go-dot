@@ -251,10 +251,12 @@ API 按以下顺序处理：
 
 一期使用：
 
-- 有效事件流：`tracking:events`
-- 无效事件流：`tracking:invalid`
-- 死信流：`tracking:dead`
+- 有效事件流：`tracking:{queue}:events`
+- 无效事件流：`tracking:{queue}:invalid`
+- 死信流：`tracking:{queue}:dead`
 - 消费者组：`tracking-workers`
+
+三个流必须使用同一个非空 Redis Cluster hash tag（默认 `{queue}`）。发布去重键、延迟重试 ZSET/HASH 也从源流提取该 tag，确保发布、重试调度、到期提升和 DLQ 转移的多键 Lua 脚本始终位于同一 hash slot；缺失或不一致的 tag 在启动配置校验和适配器调用前置校验中直接拒绝。
 
 一次客户端请求形成一个稳定 `batch_id` 的 Stream 消息，包含最多 100 条事件。API 使用 Pipeline 写入，成功后才返回 accepted。流按时间和长度策略裁剪，但未确认的 Pending 消息不得因裁剪丢失。
 

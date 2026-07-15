@@ -538,8 +538,8 @@ func TestCollectSeparatesValidAndInvalidEvents(t *testing.T) {
     require.NoError(t, err)
     require.Equal(t, 1, result.Accepted)
     require.Equal(t, 2, result.Rejected)
-    require.Len(t, queue.Published("tracking:events"), 1)
-    require.Len(t, queue.Published("tracking:invalid"), 1)
+    require.Len(t, queue.Published("tracking:{queue}:events"), 1)
+    require.Len(t, queue.Published("tracking:{queue}:invalid"), 1)
 }
 ```
 
@@ -1021,7 +1021,7 @@ Test first-password redirect, project creation, category tree, point wizard, pub
 
 - [ ] **Step 5: Add deterministic fault scripts**
 
-`clickhouse_recovery.sh` stops ClickHouse, submits a known batch, verifies a Pending entry exists, restarts ClickHouse, waits up to 90 seconds, and verifies one logical event plus one PV increment. `dlq.sh` points Worker at an unreachable ClickHouse address, waits for five deliveries, and verifies the message appears in `tracking:dead` with its original payload and failure stage.
+`clickhouse_recovery.sh` stops ClickHouse, submits a known batch, verifies a Pending entry exists, restarts ClickHouse, waits up to 90 seconds, and verifies one logical event plus one PV increment. `dlq.sh` points Worker at an unreachable ClickHouse address, waits for five deliveries, and verifies the message appears in `tracking:{queue}:dead` with its original payload and failure stage.
 
 - [ ] **Step 6: Add the k6 workload and operations documentation**
 

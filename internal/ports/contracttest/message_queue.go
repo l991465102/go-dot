@@ -157,5 +157,5 @@ func mustPending(t *testing.T, pending func(context.Context, string, string) (in
 }
 
 func unique(prefix string) string {
-	return fmt.Sprintf("%s:%d", prefix, time.Now().UnixNano())
+	return fmt.Sprintf("contract:{queue}:%s:%d", prefix, time.Now().UnixNano())
 }

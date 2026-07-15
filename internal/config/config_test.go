@@ -26,9 +26,9 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 
 	cfg, err := Load(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, "tracking:events", cfg.Queue.EventStream)
-	require.Equal(t, "tracking:invalid", cfg.Queue.InvalidStream)
-	require.Equal(t, "tracking:dead", cfg.Queue.DeadStream)
+	require.Equal(t, "tracking:{queue}:events", cfg.Queue.EventStream)
+	require.Equal(t, "tracking:{queue}:invalid", cfg.Queue.InvalidStream)
+	require.Equal(t, "tracking:{queue}:dead", cfg.Queue.DeadStream)
 	require.Equal(t, "tracking-workers", cfg.Queue.ConsumerGroup)
 	require.Equal(t, 72*time.Hour, cfg.Queue.PublishDedupTTL)
 	require.Equal(t, 8, cfg.Worker.Concurrency)
@@ -37,6 +37,23 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 	require.Equal(t, 30*time.Second, cfg.Worker.DrainTimeout)
 	require.Equal(t, time.Second, cfg.Worker.RetryBase)
 	require.Equal(t, time.Minute, cfg.Worker.RetryMax)
+}
+
+func TestLoadRejectsQueueStreamsWithoutOneCommonRedisHashTag(t *testing.T) {
+	for name, values := range map[string][3]string{
+		"missing":  {"tracking:events", "tracking:{queue}:invalid", "tracking:{queue}:dead"},
+		"mismatch": {"tracking:{events}:events", "tracking:{invalid}:invalid", "tracking:{events}:dead"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+			t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+			t.Setenv("GO_DOT_QUEUE_EVENT_STREAM", values[0])
+			t.Setenv("GO_DOT_QUEUE_INVALID_STREAM", values[1])
+			t.Setenv("GO_DOT_QUEUE_DEAD_STREAM", values[2])
+			_, err := Load(context.Background())
+			require.ErrorContains(t, err, "Redis hash tag")
+		})
+	}
 }
 
 func TestLoadRejectsInvalidWorkerConcurrency(t *testing.T) {

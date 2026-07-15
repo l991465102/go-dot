@@ -1,8 +1,8 @@
 package ingestion
 
 const (
-	EventStream        = "tracking:events"
-	InvalidEventStream = "tracking:invalid"
-	DeadLetterStream   = "tracking:dead"
+	EventStream        = "tracking:{queue}:events"
+	InvalidEventStream = "tracking:{queue}:invalid"
+	DeadLetterStream   = "tracking:{queue}:dead"
 	WorkerGroup        = "tracking-workers"
 )

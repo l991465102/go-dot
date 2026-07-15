@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -80,9 +81,9 @@ func Load(ctx context.Context) (Config, error) {
 		},
 		Tracking: TrackingConfig{MaxBatchEvents: 100, MaxBodyBytes: 256 << 10},
 		Queue: QueueConfig{
-			EventStream:     envOr("GO_DOT_QUEUE_EVENT_STREAM", "tracking:events"),
-			InvalidStream:   envOr("GO_DOT_QUEUE_INVALID_STREAM", "tracking:invalid"),
-			DeadStream:      envOr("GO_DOT_QUEUE_DEAD_STREAM", "tracking:dead"),
+			EventStream:     envOr("GO_DOT_QUEUE_EVENT_STREAM", "tracking:{queue}:events"),
+			InvalidStream:   envOr("GO_DOT_QUEUE_INVALID_STREAM", "tracking:{queue}:invalid"),
+			DeadStream:      envOr("GO_DOT_QUEUE_DEAD_STREAM", "tracking:{queue}:dead"),
 			ConsumerGroup:   envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
 			PublishDedupTTL: 72 * time.Hour,
 		},
@@ -122,6 +123,9 @@ func Load(ctx context.Context) (Config, error) {
 	if cfg.Worker.RetryMax < cfg.Worker.RetryBase {
 		return Config{}, errors.New("GO_DOT_WORKER_RETRY_MAX must be greater than or equal to GO_DOT_WORKER_RETRY_BASE")
 	}
+	if err := validateQueueHashTags(cfg.Queue.EventStream, cfg.Queue.InvalidStream, cfg.Queue.DeadStream); err != nil {
+		return Config{}, err
+	}
 	if cfg.Auth.JWTSecret == "" {
 		return Config{}, errors.New("GO_DOT_JWT_SECRET is required")
 	}
@@ -129,6 +133,34 @@ func Load(ctx context.Context) (Config, error) {
 		return Config{}, errors.New("GO_DOT_VISITOR_MASTER_KEY is required")
 	}
 	return cfg, nil
+}
+
+func validateQueueHashTags(streams ...string) error {
+	var common string
+	for _, stream := range streams {
+		tag, ok := configRedisHashTag(stream)
+		if !ok {
+			return errors.New("queue streams must contain a nonempty Redis hash tag")
+		}
+		if common == "" {
+			common = tag
+		} else if tag != common {
+			return errors.New("queue streams must use the same Redis hash tag")
+		}
+	}
+	return nil
+}
+
+func configRedisHashTag(key string) (string, bool) {
+	start := strings.IndexByte(key, '{')
+	if start < 0 {
+		return "", false
+	}
+	end := strings.IndexByte(key[start+1:], '}')
+	if end <= 0 {
+		return "", false
+	}
+	return key[start+1 : start+1+end], true
 }
 
 func loadPositiveInt(name string, target *int) error {

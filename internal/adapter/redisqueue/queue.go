@@ -123,6 +123,9 @@ func (q *Queue) PublishBatch(ctx context.Context, stream string, batch ports.Bat
 	if err := validatePublish(stream, batch); err != nil {
 		return "", err
 	}
+	if _, err := requireRedisHashTag(stream); err != nil {
+		return "", err
+	}
 	createdAt := batch.CreatedAt
 	if createdAt.IsZero() {
 		createdAt = time.Now().UTC()
@@ -141,7 +144,8 @@ func (q *Queue) PublishBatch(ctx context.Context, stream string, batch ports.Bat
 
 func publishDedupKey(stream, batchID string) string {
 	sum := sha256.Sum256([]byte(stream + "\x00" + batchID))
-	return "queue:publish:" + hex.EncodeToString(sum[:])
+	tag, _ := redisHashTag(stream)
+	return "queue:{" + tag + "}:publish:" + hex.EncodeToString(sum[:])
 }
 
 func (q *Queue) Consume(ctx context.Context, stream, group, consumer string, count int, block time.Duration) ([]ports.Message, error) {
@@ -193,6 +197,9 @@ func (q *Queue) Retry(ctx context.Context, stream, group string, msg ports.Messa
 	if err := validateRedisDuration("retry delay", delay); err != nil {
 		return err
 	}
+	if _, err := requireRedisHashTag(stream); err != nil {
+		return err
+	}
 	firstSeen, err := q.messageFirstSeen(ctx, stream, msg.ID, false)
 	if err != nil {
 		return err
@@ -212,6 +219,9 @@ func (q *Queue) PromoteDue(ctx context.Context, stream string, count int) (int, 
 	if stream == "" || count < 1 {
 		return 0, errors.New("stream is required and count must be positive")
 	}
+	if _, err := requireRedisHashTag(stream); err != nil {
+		return 0, err
+	}
 	result, err := promoteRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream)}, time.Now().UnixMilli(), count).Int()
 	if err != nil {
 		return 0, fmt.Errorf("promote due Redis Stream retries for %q: %w", stream, err)
@@ -224,6 +234,9 @@ func retryDataKey(stream string) string     { return stream + ":retry:data" }
 
 func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg ports.Message, cause error) error {
 	if err := validateMove(sourceStream, group, msg); err != nil {
+		return err
+	}
+	if err := validateSameRedisHashTag(sourceStream, q.deadStream); err != nil {
 		return err
 	}
 	firstSeen, err := q.messageFirstSeen(ctx, sourceStream, msg.ID, msg.Malformed != nil)
@@ -422,6 +435,42 @@ func messageBody(msg ports.Message) (string, []byte) {
 		payload = msg.Malformed.RawEnvelope
 	}
 	return batchID, payload
+}
+
+func redisHashTag(key string) (string, bool) {
+	start := strings.IndexByte(key, '{')
+	if start < 0 {
+		return "", false
+	}
+	end := strings.IndexByte(key[start+1:], '}')
+	if end <= 0 {
+		return "", false
+	}
+	return key[start+1 : start+1+end], true
+}
+
+func requireRedisHashTag(key string) (string, error) {
+	tag, ok := redisHashTag(key)
+	if !ok {
+		return "", fmt.Errorf("Redis key %q must contain a nonempty Redis hash tag", key)
+	}
+	return tag, nil
+}
+
+func validateSameRedisHashTag(keys ...string) error {
+	var common string
+	for _, key := range keys {
+		tag, err := requireRedisHashTag(key)
+		if err != nil {
+			return err
+		}
+		if common == "" {
+			common = tag
+		} else if tag != common {
+			return fmt.Errorf("Redis keys must use the same Redis hash tag: %q does not match", key)
+		}
+	}
+	return nil
 }
 
 func validateRedisDuration(name string, duration time.Duration) error {

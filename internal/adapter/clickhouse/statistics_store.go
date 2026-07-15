@@ -46,8 +46,11 @@ const deduplicatedEventsTemplate = `
 SELECT
   project_id, event_id,
   argMax(domain_category_id, version) AS domain_category_id,
+  argMax(domain_category_code, version) AS domain_category_code,
   argMax(module_category_id, version) AS module_category_id,
+  argMax(module_category_code, version) AS module_category_code,
   argMax(scene_category_id, version) AS scene_category_id,
+  argMax(scene_category_code, version) AS scene_category_code,
   argMax(point_id, version) AS point_id,
   argMax(point_code, version) AS point_code,
   argMax(platform, version) AS platform,
@@ -191,16 +194,6 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 		inner += " AND s.point_code IN " + placeholders(len(f.PointCodes))
 		for _, code := range f.PointCodes {
 			args = append(args, code)
-		}
-	}
-	for _, item := range []struct{ codeColumn, value string }{
-		{"domain_category_code", f.DomainCategoryCode},
-		{"module_category_code", f.ModuleCategoryCode},
-		{"scene_category_code", f.SceneCategoryCode},
-	} {
-		if item.value != "" {
-			inner += " AND s." + item.codeColumn + "=?"
-			args = append(args, item.value)
 		}
 	}
 	inner += ` GROUP BY s.hour,s.project_id,s.domain_category_id,s.domain_category_code,s.module_category_id,s.module_category_code,s.scene_category_id,s.scene_category_code,s.point_id,s.point_code,s.platform,s.channel,s.version`

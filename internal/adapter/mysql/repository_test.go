@@ -72,6 +72,22 @@ func TestTrackingRepositoryLoadsOnlyPublishedImmutableSnapshot(t *testing.T) {
 	require.Contains(t, script.queries[0], "definition_state='PUBLISHED'")
 }
 
+func TestTrackingRepositoryResolvesCategoryCodeInsideProjectAndLevel(t *testing.T) {
+	script, db := openScriptedDB(t, []driver.Value{uint64(41)})
+	domainID, moduleID, sceneID, err := NewTrackingRepository(db).ResolveCategoryIDs(context.Background(), 9, "mall", "", "")
+	require.NoError(t, err)
+	require.EqualValues(t, 41, domainID)
+	require.Zero(t, moduleID)
+	require.Zero(t, sceneID)
+	require.Contains(t, script.queries[0], "project_id=? AND code=? AND level=?")
+}
+
+func TestTrackingRepositoryMissingCategoryCodeIsNotFound(t *testing.T) {
+	_, db := openScriptedDB(t, nil)
+	_, _, _, err := NewTrackingRepository(db).ResolveCategoryIDs(context.Background(), 9, "missing", "", "")
+	require.ErrorIs(t, err, tracking.ErrCategoryNotFound)
+}
+
 func TestAuthRepositorySuccessorInsertFailureRollsBackOldRevocation(t *testing.T) {
 	now := time.Now().UTC()
 	script, db := openScriptedDB(t, []driver.Value{uint64(7), "old-hash", now.Add(time.Hour), nil, "admin", "password-hash", "Admin", false, "ACTIVE", nil})

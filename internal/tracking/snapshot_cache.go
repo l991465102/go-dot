@@ -2,12 +2,16 @@ package tracking
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
 
 type SnapshotStore interface {
 	FindPublishedSnapshot(context.Context, uint64, string) (Snapshot, error)
+}
+type CategoryIDStore interface {
+	ResolveCategoryIDs(context.Context, uint64, string, string, string) (uint64, uint64, uint64, error)
 }
 
 type snapshotCacheKey struct {
@@ -65,6 +69,14 @@ func (c *SnapshotCache) Get(ctx context.Context, projectID uint64, pointCode str
 		c.mu.Unlock()
 		return cloneSnapshot(owned), nil
 	}
+}
+
+func (c *SnapshotCache) ResolveCategoryIDs(ctx context.Context, projectID uint64, domain, module, scene string) (uint64, uint64, uint64, error) {
+	store, ok := c.store.(CategoryIDStore)
+	if !ok {
+		return 0, 0, 0, errors.New("category ID store unavailable")
+	}
+	return store.ResolveCategoryIDs(ctx, projectID, domain, module, scene)
 }
 
 func (c *SnapshotCache) Invalidate(projectID uint64, pointCode string) {

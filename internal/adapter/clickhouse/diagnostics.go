@@ -160,6 +160,7 @@ func encodeDiagnosticCursor(cursor diagnosticCursor) string {
 var sensitivePropertyKeys = map[string]struct{}{
 	"userid": {}, "anonymousid": {}, "visitorid": {}, "visitorhash": {}, "sessionid": {}, "sessionhash": {},
 	"password": {}, "passwd": {}, "secret": {}, "token": {}, "authorization": {}, "cookie": {}, "writekey": {}, "appsecret": {}, "accesstoken": {}, "refreshtoken": {},
+	"apikey": {}, "accesskey": {}, "credential": {}, "credentials": {}, "clientsecret": {}, "privatekey": {}, "signingkey": {},
 }
 
 func sanitizeProperties(value map[string]any) map[string]any {
@@ -220,7 +221,7 @@ func sensitiveDiagnosticKey(key string) bool {
 	if _, ok := sensitivePropertyKeys[value]; ok {
 		return true
 	}
-	for _, fragment := range []string{"password", "passwd", "secret", "token", "authorization", "cookie", "visitor", "anonymousid", "userid", "sessionid", "sessionhash"} {
+	for _, fragment := range []string{"password", "passwd", "secret", "token", "authorization", "cookie", "visitor", "anonymousid", "userid", "sessionid", "sessionhash", "apikey", "accesskey", "credential", "privatekey", "signingkey"} {
 		if strings.Contains(value, fragment) {
 			return true
 		}

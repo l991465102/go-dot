@@ -41,7 +41,7 @@ func TestSanitizePropertiesRemovesIdentityAndSecretKeysRecursively(t *testing.T)
 }
 
 func TestSanitizePropertiesHandlesArbitraryContainersAndCanonicalSensitiveKeys(t *testing.T) {
-	input := map[string]any{"safe": []map[string]any{{"userId": "u", "nested": []any{map[string]string{"Anonymous-ID": "a", "ok": "yes"}}}}, "SESSION.id": "s", "access_Token": "t"}
+	input := map[string]any{"safe": []map[string]any{{"userId": "u", "nested": []any{map[string]string{"Anonymous-ID": "a", "ok": "yes", "client_secret": "c", "API-Key": "k", "private.key": "p"}}}}, "SESSION.id": "s", "access_Token": "t", "cloud_access_key": "a", "credential": "x"}
 	got := sanitizeProperties(input)
 	require.Equal(t, map[string]any{"safe": []any{map[string]any{"nested": []any{map[string]any{"ok": "yes"}}}}}, got)
 }

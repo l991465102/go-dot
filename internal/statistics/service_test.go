@@ -16,7 +16,7 @@ func TestStatisticsRoutesRealtimeOnlyToRedisAndHistoryOnlyToClickHouse(t *testin
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	realtime := &fakeRealtime{summary: ports.Summary{PV: 7, UV: 3}}
 	history := &fakeHistory{summary: ports.Summary{PV: 11, UV: 5}}
-	svc := NewService(allowViewer{}, realtime, history, fakePoints{"view": {PointID: 1, PointCode: "view", UVMode: tracking.Approximate}}, nil, nowFn(now))
+	svc := NewService(allowViewer{}, realtime, history, newFakePoints(map[string]tracking.Snapshot{"view": {PointID: 1, PointCode: "view", UVMode: tracking.Approximate}}), nil, nowFn(now))
 	q := Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, PointCodes: []string{"view"}, Granularity: "hour", Timezone: "UTC"}
 
 	got, err := svc.Realtime(context.Background(), 4, q)
@@ -38,7 +38,7 @@ func TestStatisticsRoutesRealtimeOnlyToRedisAndHistoryOnlyToClickHouse(t *testin
 func TestStatisticsExactPointSelectsExactHistory(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	history := &fakeHistory{}
-	points := fakePoints{"exact_view": {PointID: 19, PointCode: "exact_view", UVMode: tracking.Exact}}
+	points := newFakePoints(map[string]tracking.Snapshot{"exact_view": {PointID: 19, PointCode: "exact_view", UVMode: tracking.Exact}})
 	svc := NewService(allowViewer{}, &fakeRealtime{}, history, points, nil, nowFn(now))
 	_, err := svc.Summary(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, PointCodes: []string{"exact_view"}, Timezone: "UTC"})
 	require.NoError(t, err)
@@ -49,7 +49,7 @@ func TestStatisticsExactPointSelectsExactHistory(t *testing.T) {
 func TestStatisticsResolvesEveryRequestedPointID(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	history := &fakeHistory{}
-	points := fakePoints{"first": {PointID: 10, PointCode: "first", UVMode: tracking.Approximate}, "second": {PointID: 20, PointCode: "second", UVMode: tracking.Approximate}}
+	points := newFakePoints(map[string]tracking.Snapshot{"first": {PointID: 10, PointCode: "first", UVMode: tracking.Approximate}, "second": {PointID: 20, PointCode: "second", UVMode: tracking.Approximate}})
 	svc := NewService(allowViewer{}, &fakeRealtime{}, history, points, nil, nowFn(now))
 	_, err := svc.Summary(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, PointCodes: []string{"first", "second"}, Timezone: "UTC"})
 	require.NoError(t, err)
@@ -72,7 +72,7 @@ func TestStatisticsRejectsInvalidAndOversizedRanges(t *testing.T) {
 func TestRealtimeUsesTrustedProjectTimezoneAndRejectsUnalignedOrExpiredRange(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	realtime := &fakeRealtime{}
-	svc := NewService(timezoneAuth{timezone: "Asia/Shanghai"}, realtime, &fakeHistory{}, fakePoints{"view": {PointID: 1, PointCode: "view", UVMode: tracking.Approximate}}, nil, nowFn(now))
+	svc := NewService(timezoneAuth{timezone: "Asia/Shanghai"}, realtime, &fakeHistory{}, newFakePoints(map[string]tracking.Snapshot{"view": {PointID: 1, PointCode: "view", UVMode: tracking.Approximate}}), nil, nowFn(now))
 	_, err := svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: time.Date(2026, 7, 15, 10, 0, 0, 0, time.FixedZone("CST", 8*3600)), End: time.Date(2026, 7, 15, 11, 0, 0, 0, time.FixedZone("CST", 8*3600)), PointCodes: []string{"view"}, Timezone: "America/New_York"})
 	require.NoError(t, err)
 	require.Equal(t, "Asia/Shanghai", realtime.last.StorageTimezone)
@@ -81,11 +81,26 @@ func TestRealtimeUsesTrustedProjectTimezoneAndRejectsUnalignedOrExpiredRange(t *
 	require.ErrorIs(t, err, ErrInvalidQuery)
 	_, err = svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-73 * time.Hour), End: now, PointCodes: []string{"view"}, Timezone: "UTC"})
 	require.ErrorIs(t, err, ErrInvalidQuery)
+	_, err = svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-73 * time.Hour), End: now.Add(-72 * time.Hour), PointCodes: []string{"view"}, Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInvalidQuery)
+}
+
+func TestHistoryResolvesCategoryCodesToProjectScopedDurableIDs(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	history := &fakeHistory{}
+	resolvedProject := uint64(0)
+	points := fakePoints{categoryIDs: map[string]uint64{"DOMAIN:mall": 11, "MODULE:product": 22}, resolvedProject: &resolvedProject}
+	svc := NewService(allowViewer{}, &fakeRealtime{}, history, points, nil, nowFn(now))
+	_, err := svc.Summary(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-60 * 24 * time.Hour), End: now, DomainCategoryCode: "mall", ModuleCategoryCode: "product", Timezone: "UTC"})
+	require.NoError(t, err)
+	require.EqualValues(t, 11, history.last.DomainCategoryID)
+	require.EqualValues(t, 22, history.last.ModuleCategoryID)
+	require.Equal(t, uint64(9), resolvedProject)
 }
 
 func TestRealtimeRequiresPointModesAndRejectsMixedModes(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
-	points := fakePoints{"exact": {PointID: 1, PointCode: "exact", UVMode: tracking.Exact}, "approx": {PointID: 2, PointCode: "approx", UVMode: tracking.Approximate}}
+	points := newFakePoints(map[string]tracking.Snapshot{"exact": {PointID: 1, PointCode: "exact", UVMode: tracking.Exact}, "approx": {PointID: 2, PointCode: "approx", UVMode: tracking.Approximate}})
 	svc := NewService(allowViewer{}, &fakeRealtime{}, &fakeHistory{}, points, nil, nowFn(now))
 	_, err := svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, Timezone: "UTC"})
 	require.ErrorIs(t, err, ErrInvalidQuery)
@@ -171,14 +186,28 @@ func (f *fakeHistory) QueryTrend(_ context.Context, in ports.StatisticsFilter) (
 	return []ports.TrendPoint{}, nil
 }
 
-type fakePoints map[string]tracking.Snapshot
+type fakePoints struct {
+	snapshots       map[string]tracking.Snapshot
+	categoryIDs     map[string]uint64
+	resolvedProject *uint64
+}
+
+func newFakePoints(values map[string]tracking.Snapshot) fakePoints {
+	return fakePoints{snapshots: values}
+}
 
 func (f fakePoints) Get(_ context.Context, _ uint64, code string) (tracking.Snapshot, error) {
-	point, ok := f[code]
+	point, ok := f.snapshots[code]
 	if !ok {
 		return tracking.Snapshot{}, tracking.ErrPointNotFound
 	}
 	return point, nil
+}
+func (f fakePoints) ResolveCategoryIDs(_ context.Context, projectID uint64, domain, module, scene string) (uint64, uint64, uint64, error) {
+	if f.resolvedProject != nil {
+		*f.resolvedProject = projectID
+	}
+	return f.categoryIDs["DOMAIN:"+domain], f.categoryIDs["MODULE:"+module], f.categoryIDs["SCENE:"+scene], nil
 }
 
 type fakeDiagnostics struct{ recentCalls int }

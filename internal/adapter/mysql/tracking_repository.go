@@ -49,6 +49,32 @@ func (r *TrackingRepository) FindCategory(ctx context.Context, id uint64) (track
 func (r *TrackingRepository) FindCategoryInProject(ctx context.Context, projectID, id uint64) (tracking.Category, error) {
 	return findCategory(ctx, r.db, projectID, id)
 }
+func (r *TrackingRepository) ResolveCategoryIDs(ctx context.Context, projectID uint64, domain, module, scene string) (uint64, uint64, uint64, error) {
+	resolve := func(code string, level tracking.CategoryLevel) (uint64, error) {
+		if code == "" {
+			return 0, nil
+		}
+		var id uint64
+		err := r.db.QueryRowContext(ctx, `SELECT id FROM tracking_category WHERE project_id=? AND code=? AND level=? AND is_active=TRUE LIMIT 1`, projectID, code, level).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, tracking.ErrCategoryNotFound
+		}
+		return id, err
+	}
+	domainID, err := resolve(domain, tracking.Domain)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	moduleID, err := resolve(module, tracking.Module)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	sceneID, err := resolve(scene, tracking.Scene)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return domainID, moduleID, sceneID, nil
+}
 func findCategory(ctx context.Context, q queryer, projectID, id uint64) (tracking.Category, error) {
 	var c tracking.Category
 	var parent sql.NullInt64

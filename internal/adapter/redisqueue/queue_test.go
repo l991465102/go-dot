@@ -166,6 +166,17 @@ func TestListDeadLettersBoundsSparseScanAndContinuesFromLastScanned(t *testing.T
 	require.Empty(t, next.NextCursor)
 }
 
+func TestListDeadLettersNeverReturnsArbitraryFailureCause(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	queue := redisqueue.New(client, redisqueue.WithDeadStream("tracking:{queue}:dead"))
+	require.NoError(t, client.XAdd(context.Background(), &redis.XAddArgs{Stream: "tracking:{queue}:dead", Values: map[string]any{"batch_id": "b", "payload": `{"project_id":7}`, "deliveries": "1", "first_seen": "1000", "last_error": `dial mysql://admin:p@ss@host/db {"api_key":"secret"} credential='quoted secret'`}}).Err())
+	page, err := queue.ListDeadLetters(context.Background(), statistics.DeadLetterFilter{ProjectID: 7, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, "processing failed", page.Items[0].LastError)
+}
+
 func TestRejectsPositiveSubMillisecondDurations(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)

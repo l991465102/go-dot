@@ -80,7 +80,7 @@ func statisticsError(w http.ResponseWriter, r *http.Request, err error) {
 		status, message = 400, "invalid query"
 	case errors.Is(err, project.ErrForbidden):
 		status, message = 403, "forbidden"
-	case errors.Is(err, tracking.ErrPointNotFound), errors.Is(err, tracking.ErrPointNotPublished), errors.Is(err, project.ErrProjectNotFound):
+	case errors.Is(err, tracking.ErrPointNotFound), errors.Is(err, tracking.ErrPointNotPublished), errors.Is(err, tracking.ErrCategoryNotFound), errors.Is(err, project.ErrProjectNotFound):
 		status, message = 404, "resource not found"
 	case errors.Is(err, tracking.ErrImmutable), errors.Is(err, tracking.ErrConflict):
 		status, message = 409, "conflict"

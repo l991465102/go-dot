@@ -34,6 +34,9 @@ type HistoryStore interface {
 type PointSource interface {
 	Get(context.Context, uint64, string) (tracking.Snapshot, error)
 }
+type CategoryResolver interface {
+	ResolveCategoryIDs(context.Context, uint64, string, string, string) (uint64, uint64, uint64, error)
+}
 type DiagnosticsStore interface {
 	ListRecent(context.Context, DiagnosticFilter) (EventPage, error)
 	ListInvalid(context.Context, DiagnosticFilter) (InvalidEventPage, error)
@@ -150,6 +153,9 @@ func (s *Service) Realtime(ctx context.Context, actor uint64, q Query) (ports.Su
 	if len(uniqueNonempty(q.PointCodes)) == 0 {
 		return ports.Summary{}, fmt.Errorf("%w: realtime requires point_code to determine UV mode", ErrInvalidQuery)
 	}
+	if q.Start.Before(s.now().UTC().Add(-72 * time.Hour)) {
+		return ports.Summary{}, fmt.Errorf("%w: realtime start is outside Redis retention", ErrInvalidQuery)
+	}
 	f, err := s.filter(ctx, actor, q, 72*time.Hour)
 	if err != nil {
 		return ports.Summary{}, err
@@ -222,6 +228,16 @@ func (s *Service) filter(ctx context.Context, actor uint64, q Query, maxRange ti
 	}
 	if !alignedBoundary(q.Start, q.Granularity, storageLocation) || !alignedBoundary(q.End, q.Granularity, storageLocation) {
 		return ports.StatisticsFilter{}, fmt.Errorf("%w: range must align to %s boundaries in project timezone", ErrInvalidQuery, q.Granularity)
+	}
+	if q.DomainCategoryCode != "" || q.ModuleCategoryCode != "" || q.SceneCategoryCode != "" {
+		resolver, ok := s.points.(CategoryResolver)
+		if !ok {
+			return ports.StatisticsFilter{}, errors.New("durable category resolver unavailable")
+		}
+		q.DomainCategoryID, q.ModuleCategoryID, q.SceneCategoryID, err = resolver.ResolveCategoryIDs(ctx, q.ProjectID, q.DomainCategoryCode, q.ModuleCategoryCode, q.SceneCategoryCode)
+		if err != nil {
+			return ports.StatisticsFilter{}, err
+		}
 	}
 	f := ports.StatisticsFilter{ProjectID: q.ProjectID, Start: q.Start.UTC(), End: q.End.UTC(), Granularity: q.Granularity, Timezone: q.Timezone,
 		StorageTimezone:  storageTimezone,

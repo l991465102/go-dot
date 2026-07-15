@@ -264,8 +264,6 @@ func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg p
 }
 
 var redisStreamIDPattern = regexp.MustCompile(`^[0-9]+-[0-9]+$`)
-var credentialURLPattern = regexp.MustCompile(`(?i)(://)[^/@\s:]+:[^/@\s]+@`)
-var secretAssignmentPattern = regexp.MustCompile(`(?i)(password|passwd|secret|token|authorization|cookie|write_key)\s*[=:]\s*[^\s,;]+`)
 
 // ListDeadLetters exposes operational metadata only. The queued payload is
 // decoded solely to enforce project isolation and is never returned.
@@ -326,12 +324,10 @@ func (q *Queue) ListDeadLetters(ctx context.Context, f statistics.DeadLetterFilt
 }
 
 func sanitizeQueueError(value string) string {
-	value = credentialURLPattern.ReplaceAllString(value, `${1}[redacted]@`)
-	value = secretAssignmentPattern.ReplaceAllString(value, `${1}=[redacted]`)
-	if len(value) > 500 {
-		value = value[:500]
+	if value == "" {
+		return ""
 	}
-	return value
+	return "processing failed"
 }
 
 func (q *Queue) ReclaimStale(ctx context.Context, stream, group, consumer string, idle time.Duration, count int) ([]ports.Message, error) {

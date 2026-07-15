@@ -26,6 +26,9 @@ func TestRefreshProjectHourUsesLogicalEventDedupAndVersionedAggregateStates(t *t
 	require.Contains(t, approx, "tracking_event FINAL")
 	require.Contains(t, approx, "GROUP BY project_id, event_id")
 	require.Contains(t, approx, "uniqCombined64StateIf")
+	require.Contains(t, approx, "argMax(domain_category_code, version) AS domain_category_code")
+	require.Contains(t, approx, "argMax(module_category_code, version) AS module_category_code")
+	require.Contains(t, approx, "argMax(scene_category_code, version) AS scene_category_code")
 	require.Contains(t, exact, "uniqExactStateIf")
 	require.Contains(t, exact, "uv_mode = 'EXACT'")
 	require.Contains(t, approx, "version")
@@ -95,12 +98,13 @@ func TestStatisticsPointCodeListUsesParameterizedIN(t *testing.T) {
 	require.Contains(t, db.queryArgs[0], "a' OR 1=1 --")
 }
 
-func TestCategoryCodeHistoryUsesDurableAggregateColumnsNotRawTTL(t *testing.T) {
+func TestCategoryHistoryUsesResolvedDurableIDsNotRawOrNewCodeColumns(t *testing.T) {
 	db := &statisticsRecordingDB{queryErr: errors.New("recorded")}
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
-	_, _ = NewStatisticsStore(db).QuerySummary(context.Background(), ports.StatisticsFilter{ProjectID: 9, Start: start, End: start.Add(60 * 24 * time.Hour), DomainCategoryCode: "mall"})
+	_, _ = NewStatisticsStore(db).QuerySummary(context.Background(), ports.StatisticsFilter{ProjectID: 9, Start: start, End: start.Add(60 * 24 * time.Hour), DomainCategoryID: 42})
 	query := strings.Join(strings.Fields(db.queries[0]), " ")
-	require.Contains(t, query, "s.domain_category_code=?")
+	require.Contains(t, query, "s.domain_category_id=?")
+	require.NotContains(t, query, "s.domain_category_code=?")
 	require.NotContains(t, query, "SELECT domain_category_id FROM tracking_event")
 }
 

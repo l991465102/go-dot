@@ -1,0 +1,20 @@
+.superpowers/
+.idea/
+.vscode/
+.DS_Store
+
+# Go
+/bin/
+/coverage/
+*.test
+
+# Frontend
+/web/node_modules/
+/web/dist/
+
+# Local configuration and data
+.env
+.env.*
+!.env.example
+/data/
+

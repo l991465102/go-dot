@@ -136,9 +136,10 @@ func (*recordingQueue) Consume(context.Context, string, string, string, int, tim
 	panic("unused")
 }
 func (*recordingQueue) Ack(context.Context, string, string, ...string) error { panic("unused") }
-func (*recordingQueue) Retry(context.Context, string, string, ports.Message, error) error {
+func (*recordingQueue) Retry(context.Context, string, string, ports.Message, error, time.Duration) error {
 	panic("unused")
 }
+func (*recordingQueue) PromoteDue(context.Context, string, int) (int, error) { panic("unused") }
 func (*recordingQueue) MoveToDLQ(context.Context, string, string, ports.Message, error) error {
 	panic("unused")
 }

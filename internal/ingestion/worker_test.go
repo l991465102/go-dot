@@ -32,6 +32,20 @@ func TestWorkerRetriesInfrastructureFailureWithoutAck(t *testing.T) {
 	require.Equal(t, 1, queue.retries)
 	require.Zero(t, queue.acks)
 	require.Zero(t, queue.dlqs)
+	require.Equal(t, time.Second, queue.retryDelays[0])
+}
+
+func TestRetryBackoffIsExponentialAndBounded(t *testing.T) {
+	queue := &workerQueue{}
+	worker := testWorker(queue, &workerStore{err: errors.New("outage")}, &workerCounter{})
+	worker.cfg.RetryBase = time.Second
+	worker.cfg.RetryMax = 3 * time.Second
+	for _, deliveries := range []int{1, 2, 3, 4} {
+		msg := validWorkerMessage()
+		msg.Deliveries = deliveries
+		require.Error(t, worker.Handle(context.Background(), msg))
+	}
+	require.Equal(t, []time.Duration{time.Second, 2 * time.Second, 3 * time.Second, 3 * time.Second}, queue.retryDelays)
 }
 
 func TestWorkerMovesFifthInfrastructureFailureToDLQWithoutDoubleAck(t *testing.T) {
@@ -54,6 +68,17 @@ func TestWorkerMalformedPayloadMovesDirectlyToDLQ(t *testing.T) {
 	require.NoError(t, worker.Handle(context.Background(), msg))
 	require.Equal(t, 1, queue.dlqs)
 	require.Zero(t, queue.retries)
+}
+
+func TestWorkerMovesMalformedRedisEnvelopeToDLQPreservingRawData(t *testing.T) {
+	queue := &workerQueue{}
+	worker := testWorker(queue, &workerStore{}, &workerCounter{})
+	raw := []byte(`{"payload":"{\"bad\":true}"}`)
+	msg := ports.Message{ID: "poison-1", Stream: EventStream, Deliveries: 1, Malformed: &ports.MalformedMessage{Reason: "batch_id required", RawEnvelope: raw}}
+
+	require.NoError(t, worker.Handle(context.Background(), msg))
+	require.Equal(t, 1, queue.dlqs)
+	require.Equal(t, raw, queue.lastDLQ.Malformed.RawEnvelope)
 }
 
 func TestWorkerRejectsMismatchedBatchAndIncompleteSnapshot(t *testing.T) {
@@ -177,8 +202,42 @@ func TestWorkerRunCancellationDrainsHandlerAndLeavesUnfinishedPending(t *testing
 	require.Zero(t, queue.dlqs)
 }
 
+func TestWorkerRunNeverLaunchesMessagesAfterCancellation(t *testing.T) {
+	var total int
+	for range 50 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		store := &workerStore{}
+		queue := &workerQueue{reclaimMessages: []ports.Message{validWorkerMessage()}}
+		worker := testWorker(queue, store, &workerCounter{})
+		require.NoError(t, worker.Run(ctx))
+		total += store.validCalls
+	}
+	require.Zero(t, total)
+}
+
+func TestWorkerRunDLQsPoisonAndContinuesValidSibling(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	poison := ports.Message{ID: "bad-1", Stream: EventStream, Deliveries: 1, Malformed: &ports.MalformedMessage{Reason: "payload required", RawEnvelope: []byte(`{"batch_id":"bad"}`)}}
+	queue := &workerQueue{
+		reclaimMessages:     []ports.Message{poison, validWorkerMessage()},
+		cancelAfterOutcomes: cancel,
+		consumeFn: func(ctx context.Context, _, _, _ string, _ int, _ time.Duration) ([]ports.Message, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	store := &workerStore{}
+	worker := testWorker(queue, store, &workerCounter{})
+
+	require.NoError(t, worker.Run(ctx))
+	require.Equal(t, 1, queue.dlqs)
+	require.Equal(t, 1, queue.acks)
+	require.Equal(t, 1, store.validCalls)
+}
+
 func testWorker(queue *workerQueue, store ports.EventStore, counter ports.RealtimeCounter) *Worker {
-	return NewWorker(queue, store, counter, WorkerConfig{EventStream: EventStream, InvalidStream: InvalidEventStream, Group: WorkerGroup, Consumer: "test", VisitorMasterKey: []byte("master-key"), Concurrency: 2, MaxDeliveries: 5, DrainTimeout: 50 * time.Millisecond})
+	return NewWorker(queue, store, counter, WorkerConfig{EventStream: EventStream, InvalidStream: InvalidEventStream, Group: WorkerGroup, Consumer: "test", VisitorMasterKey: []byte("master-key"), Concurrency: 2, MaxDeliveries: 5, RetryBase: time.Second, RetryMax: time.Minute, DrainTimeout: 50 * time.Millisecond})
 }
 
 func validWorkerMessage() ports.Message {
@@ -257,6 +316,10 @@ type workerQueue struct {
 	consumeErr                    error
 	consumeFn                     func(context.Context, string, string, string, int, time.Duration) ([]ports.Message, error)
 	respectCanceledRetry          bool
+	retryDelays                   []time.Duration
+	lastDLQ                       ports.Message
+	reclaimMessages               []ports.Message
+	cancelAfterOutcomes           context.CancelFunc
 }
 
 func (q *workerQueue) PublishBatch(context.Context, string, ports.BatchEnvelope) (string, error) {
@@ -272,29 +335,40 @@ func (q *workerQueue) Ack(context.Context, string, string, ...string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.acks++
+	if q.cancelAfterOutcomes != nil && q.acks+q.dlqs >= 2 {
+		q.cancelAfterOutcomes()
+	}
 	if q.log != nil {
 		q.log.add("ack")
 	}
 	return nil
 }
-func (q *workerQueue) Retry(ctx context.Context, _ string, _ string, _ ports.Message, _ error) error {
+func (q *workerQueue) Retry(ctx context.Context, _ string, _ string, _ ports.Message, _ error, delay time.Duration) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.retries++
+	q.retryDelays = append(q.retryDelays, delay)
 	if q.respectCanceledRetry {
 		return ctx.Err()
 	}
 	return nil
 }
-func (q *workerQueue) MoveToDLQ(context.Context, string, string, ports.Message, error) error {
+func (q *workerQueue) MoveToDLQ(_ context.Context, _ string, _ string, msg ports.Message, _ error) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.dlqs++
+	q.lastDLQ = msg
+	if q.cancelAfterOutcomes != nil && q.acks+q.dlqs >= 2 {
+		q.cancelAfterOutcomes()
+	}
 	return nil
 }
+func (q *workerQueue) PromoteDue(context.Context, string, int) (int, error) { return 0, nil }
 func (q *workerQueue) ReclaimStale(context.Context, string, string, string, time.Duration, int) ([]ports.Message, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.reclaims++
-	return nil, nil
+	messages := q.reclaimMessages
+	q.reclaimMessages = nil
+	return messages, nil
 }

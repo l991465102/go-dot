@@ -31,6 +31,8 @@ type WorkerConfig struct {
 	VisitorMasterKey []byte
 	Concurrency      int
 	MaxDeliveries    int
+	RetryBase        time.Duration
+	RetryMax         time.Duration
 	ReclaimIdle      time.Duration
 	DrainTimeout     time.Duration
 }
@@ -61,6 +63,12 @@ func NewWorker(queue ports.MessageQueue, store ports.EventStore, counter ports.R
 	if cfg.MaxDeliveries < 1 {
 		cfg.MaxDeliveries = 5
 	}
+	if cfg.RetryBase < 100*time.Millisecond || cfg.RetryBase > time.Hour {
+		cfg.RetryBase = time.Second
+	}
+	if cfg.RetryMax < cfg.RetryBase || cfg.RetryMax > 24*time.Hour {
+		cfg.RetryMax = time.Minute
+	}
 	if cfg.ReclaimIdle <= 0 {
 		cfg.ReclaimIdle = 30 * time.Second
 	}
@@ -73,6 +81,9 @@ func NewWorker(queue ports.MessageQueue, store ports.EventStore, counter ports.R
 func (w *Worker) Handle(ctx context.Context, msg ports.Message) error {
 	if err := w.validate(); err != nil {
 		return err
+	}
+	if msg.Malformed != nil {
+		return w.finishFailure(ctx, msg, permanent(fmt.Errorf("malformed Redis Stream entry: %s", msg.Malformed.Reason)))
 	}
 	if msg.ID == "" || msg.BatchID == "" || len(msg.Payload) == 0 {
 		return w.finishFailure(ctx, msg, permanent(errors.New("message id, batch id and payload are required")))
@@ -235,9 +246,16 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	sem := make(chan struct{}, w.cfg.Concurrency)
 	launch := func(msg ports.Message) bool {
+		if ctx.Err() != nil {
+			return false
+		}
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
+			return false
+		}
+		if ctx.Err() != nil {
+			<-sem
 			return false
 		}
 		go func() { defer func() { <-sem }(); _ = w.Handle(ctx, msg) }()
@@ -263,6 +281,14 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 	}
 	streams := []string{w.cfg.EventStream, w.cfg.InvalidStream}
+	promote := func() error {
+		for _, stream := range streams {
+			if _, err := w.queue.PromoteDue(ctx, stream, workerReadCount); err != nil {
+				return fmt.Errorf("promote due retries for %q: %w", stream, err)
+			}
+		}
+		return nil
+	}
 	reclaim := func() error {
 		for _, stream := range streams {
 			messages, err := w.queue.ReclaimStale(ctx, stream, w.cfg.Group, w.cfg.Consumer, w.cfg.ReclaimIdle, workerReadCount)
@@ -276,6 +302,13 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 		}
 		return nil
+	}
+	if err := promote(); err != nil {
+		if ctx.Err() != nil {
+			drain()
+			return nil
+		}
+		return err
 	}
 	if err := reclaim(); err != nil {
 		if ctx.Err() != nil {
@@ -294,6 +327,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	nextReclaim := time.Now().Add(reclaimEvery)
 	for {
+		if err := promote(); err != nil {
+			if ctx.Err() != nil {
+				drain()
+				return nil
+			}
+			drain()
+			return err
+		}
 		if !time.Now().Before(nextReclaim) {
 			if err := reclaim(); err != nil {
 				if ctx.Err() != nil {

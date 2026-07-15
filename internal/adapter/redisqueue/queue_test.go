@@ -2,6 +2,7 @@ package redisqueue_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -111,6 +112,8 @@ func TestRejectsPositiveSubMillisecondDurations(t *testing.T) {
 	require.ErrorContains(t, err, "block duration")
 	_, err = queue.ReclaimStale(ctx, "tracking:events", "workers", "consumer", 500*time.Microsecond, 1)
 	require.ErrorContains(t, err, "idle duration")
+	err = queue.Retry(ctx, "tracking:events", "workers", ports.Message{ID: "1-0", BatchID: "b", Payload: []byte(`{}`)}, errors.New("temporary"), time.Microsecond)
+	require.ErrorContains(t, err, "retry delay")
 }
 
 func TestPublishStoresRequiredEnvelopeFields(t *testing.T) {
@@ -157,6 +160,92 @@ func TestConsumeCreatesGroupAndStreamWhenAbsent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, groups, 1)
 	require.Equal(t, "workers", groups[0].Name)
+}
+
+func TestConsumeReturnsMalformedEntryBesideValidSibling(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	ctx := context.Background()
+	stream := "tracking:events"
+	_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"payload": `{"missing_batch":true}`, "deliveries": "1"}}).Result()
+	require.NoError(t, err)
+	_, err = client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "missing-payload", "deliveries": "1"}}).Result()
+	require.NoError(t, err)
+	_, err = client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "bad-deliveries", "payload": `{"bad":true}`, "deliveries": "oops"}}).Result()
+	require.NoError(t, err)
+	_, err = client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "good", "payload": `{"ok":true}`, "deliveries": "1", "first_seen": "1", "last_error": ""}}).Result()
+	require.NoError(t, err)
+
+	messages, err := redisqueue.New(client).Consume(ctx, stream, "workers", "consumer", 10, time.Millisecond)
+	require.NoError(t, err)
+	require.Len(t, messages, 4)
+	require.NotNil(t, messages[0].Malformed)
+	require.Contains(t, messages[0].Malformed.Reason, "batch_id")
+	require.NotNil(t, messages[1].Malformed)
+	require.Contains(t, messages[1].Malformed.Reason, "payload")
+	require.NotNil(t, messages[2].Malformed)
+	require.Contains(t, messages[2].Malformed.Reason, "deliveries")
+	require.JSONEq(t, `{"batch_id":"bad-deliveries","deliveries":"oops","payload":"{\"bad\":true}"}`, string(messages[2].Malformed.RawEnvelope))
+	require.Nil(t, messages[3].Malformed)
+	require.Equal(t, "good", messages[3].BatchID)
+}
+
+func TestReclaimReturnsMalformedPendingEntry(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	ctx := context.Background()
+	stream := "tracking:events"
+	_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "bad", "payload": `{"bad":true}`, "deliveries": "zero"}}).Result()
+	require.NoError(t, err)
+	queue := redisqueue.New(client)
+	messages, err := queue.Consume(ctx, stream, "workers", "first", 1, time.Millisecond)
+	require.NoError(t, err)
+	require.NotNil(t, messages[0].Malformed)
+	time.Sleep(2 * time.Millisecond)
+
+	reclaimed, err := queue.ReclaimStale(ctx, stream, "workers", "second", time.Millisecond, 1)
+	require.NoError(t, err)
+	require.Len(t, reclaimed, 1)
+	require.NotNil(t, reclaimed[0].Malformed)
+	require.Contains(t, reclaimed[0].Malformed.Reason, "deliveries")
+}
+
+func TestDelayedRetrySurvivesQueueRestartAndIncrementsDelivery(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	ctx := context.Background()
+	stream := "tracking:events"
+	first := redisqueue.New(client)
+	_, err := first.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "restart", Payload: []byte(`{"ok":true}`)})
+	require.NoError(t, err)
+	messages, err := first.Consume(ctx, stream, "workers", "before-restart", 1, time.Millisecond)
+	require.NoError(t, err)
+	require.NoError(t, first.Retry(ctx, stream, "workers", messages[0], context.DeadlineExceeded, time.Millisecond))
+	time.Sleep(2 * time.Millisecond)
+
+	afterRestart := redisqueue.New(client)
+	promoted, err := afterRestart.PromoteDue(ctx, stream, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, promoted)
+	retried, err := afterRestart.Consume(ctx, stream, "workers", "after-restart", 1, time.Millisecond)
+	require.NoError(t, err)
+	require.Len(t, retried, 1)
+	require.Equal(t, 2, retried[0].Deliveries)
+}
+
+func TestScheduleRetryIsAtomicWhenDurableScheduleWriteFails(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	ctx := context.Background()
+	stream := "tracking:events"
+	queue := redisqueue.New(client)
+	_, err := queue.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "atomic", Payload: []byte(`{"ok":true}`)})
+	require.NoError(t, err)
+	messages, err := queue.Consume(ctx, stream, "workers", "consumer", 1, time.Millisecond)
+	require.NoError(t, err)
+	require.NoError(t, client.Set(ctx, stream+":retry:schedule", "wrong-type", 0).Err())
+
+	err = queue.Retry(ctx, stream, "workers", messages[0], context.DeadlineExceeded, time.Second)
+	require.Error(t, err)
+	pending, pendingErr := client.XPending(ctx, stream, "workers").Result()
+	require.NoError(t, pendingErr)
+	require.Equal(t, int64(1), pending.Count, "failed schedule must not ACK the source")
 }
 
 func inMemoryRedisClient(t *testing.T) *redis.Client {

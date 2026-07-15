@@ -35,6 +35,8 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 	require.Equal(t, 5, cfg.Worker.MaxDeliveries)
 	require.Equal(t, 30*time.Second, cfg.Worker.ReclaimIdle)
 	require.Equal(t, 30*time.Second, cfg.Worker.DrainTimeout)
+	require.Equal(t, time.Second, cfg.Worker.RetryBase)
+	require.Equal(t, time.Minute, cfg.Worker.RetryMax)
 }
 
 func TestLoadRejectsInvalidWorkerConcurrency(t *testing.T) {
@@ -43,6 +45,27 @@ func TestLoadRejectsInvalidWorkerConcurrency(t *testing.T) {
 	t.Setenv("GO_DOT_WORKER_CONCURRENCY", "0")
 	_, err := Load(context.Background())
 	require.ErrorContains(t, err, "GO_DOT_WORKER_CONCURRENCY")
+}
+
+func TestLoadRejectsWorkerRetryMaximumBelowBase(t *testing.T) {
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_WORKER_RETRY_BASE", "10s")
+	t.Setenv("GO_DOT_WORKER_RETRY_MAX", "5s")
+	_, err := Load(context.Background())
+	require.ErrorContains(t, err, "GO_DOT_WORKER_RETRY_MAX")
+}
+
+func TestLoadRejectsWorkerRetryBoundsThatCanChurnOrOverflow(t *testing.T) {
+	for name, value := range map[string]string{"GO_DOT_WORKER_RETRY_BASE": "1ms", "GO_DOT_WORKER_RETRY_MAX": "25h"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+			t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+			t.Setenv(name, value)
+			_, err := Load(context.Background())
+			require.ErrorContains(t, err, name)
+		})
+	}
 }
 
 func TestLoadRejectsUnsafeQueuePublishDedupTTL(t *testing.T) {

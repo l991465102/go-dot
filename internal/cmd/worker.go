@@ -50,6 +50,7 @@ func runWorker(ctx context.Context) error {
 		EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup,
 		Consumer: consumer, VisitorMasterKey: []byte(cfg.Auth.VisitorMasterKey), Concurrency: cfg.Worker.Concurrency,
 		MaxDeliveries: cfg.Worker.MaxDeliveries, ReclaimIdle: cfg.Worker.ReclaimIdle, DrainTimeout: cfg.Worker.DrainTimeout,
+		RetryBase: cfg.Worker.RetryBase, RetryMax: cfg.Worker.RetryMax,
 	})
 	return worker.Run(ctx)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -50,6 +51,40 @@ local id = redis.call('XADD', KEYS[1], '*',
   'last_error', ARGV[5])
 redis.call('SET', KEYS[2], id, 'EX', ARGV[6])
 return id
+`)
+
+var scheduleRetryScript = redis.NewScript(`
+local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
+if #pending == 0 then
+  return 0
+end
+local record = cjson.encode({
+  batch_id=ARGV[4], payload=ARGV[5], deliveries=ARGV[6],
+  first_seen=ARGV[7], last_error=ARGV[8]
+})
+redis.call('HSET', KEYS[3], ARGV[3], record)
+redis.call('ZADD', KEYS[2], ARGV[9], ARGV[3])
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+return 1
+`)
+
+var promoteRetryScript = redis.NewScript(`
+local members = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+local promoted = 0
+for _, member in ipairs(members) do
+  local raw = redis.call('HGET', KEYS[3], member)
+  if raw then
+    local record = cjson.decode(raw)
+    redis.call('XADD', KEYS[1], '*',
+      'batch_id', record.batch_id, 'payload', record.payload,
+      'deliveries', record.deliveries, 'first_seen', record.first_seen,
+      'last_error', record.last_error)
+    promoted = promoted + 1
+  end
+  redis.call('HDEL', KEYS[3], member)
+  redis.call('ZREM', KEYS[2], member)
+end
+return promoted
 `)
 
 type Queue struct {
@@ -148,33 +183,56 @@ func (q *Queue) Ack(ctx context.Context, stream, group string, ids ...string) er
 	return nil
 }
 
-func (q *Queue) Retry(ctx context.Context, stream, group string, msg ports.Message, cause error) error {
+func (q *Queue) Retry(ctx context.Context, stream, group string, msg ports.Message, cause error, delay time.Duration) error {
 	if err := validateMove(stream, group, msg); err != nil {
 		return err
 	}
-	firstSeen, err := q.messageFirstSeen(ctx, stream, msg.ID)
+	if delay <= 0 {
+		return errors.New("retry delay must be positive")
+	}
+	if err := validateRedisDuration("retry delay", delay); err != nil {
+		return err
+	}
+	firstSeen, err := q.messageFirstSeen(ctx, stream, msg.ID, false)
 	if err != nil {
 		return err
 	}
-	_, err = moveScript.Run(ctx, q.client, []string{stream, stream},
-		group, msg.ID, msg.BatchID, string(msg.Payload), max(msg.Deliveries+1, 2), firstSeen, errorText(cause),
-	).Result()
+	batchID, payload := messageBody(msg)
+	member := group + ":" + msg.ID
+	due := time.Now().Add(delay).UnixMilli()
+	_, err = scheduleRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream)},
+		group, msg.ID, member, batchID, string(payload), max(msg.Deliveries+1, 2), firstSeen, errorText(cause), due).Result()
 	if err != nil {
-		return fmt.Errorf("retry Redis Stream message %q: %w", msg.ID, err)
+		return fmt.Errorf("schedule Redis Stream message %q retry: %w", msg.ID, err)
 	}
 	return nil
 }
+
+func (q *Queue) PromoteDue(ctx context.Context, stream string, count int) (int, error) {
+	if stream == "" || count < 1 {
+		return 0, errors.New("stream is required and count must be positive")
+	}
+	result, err := promoteRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream)}, time.Now().UnixMilli(), count).Int()
+	if err != nil {
+		return 0, fmt.Errorf("promote due Redis Stream retries for %q: %w", stream, err)
+	}
+	return result, nil
+}
+
+func retryScheduleKey(stream string) string { return stream + ":retry:schedule" }
+func retryDataKey(stream string) string     { return stream + ":retry:data" }
 
 func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg ports.Message, cause error) error {
 	if err := validateMove(sourceStream, group, msg); err != nil {
 		return err
 	}
-	firstSeen, err := q.messageFirstSeen(ctx, sourceStream, msg.ID)
+	firstSeen, err := q.messageFirstSeen(ctx, sourceStream, msg.ID, msg.Malformed != nil)
 	if err != nil {
 		return err
 	}
+	batchID, payload := messageBody(msg)
 	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream},
-		group, msg.ID, msg.BatchID, string(msg.Payload), max(msg.Deliveries, 1), firstSeen, errorText(cause),
+		group, msg.ID, batchID, string(payload), max(msg.Deliveries, 1), firstSeen, errorText(cause),
 	).Result()
 	if err != nil {
 		return fmt.Errorf("move Redis Stream message %q to DLQ: %w", msg.ID, err)
@@ -231,7 +289,7 @@ func (q *Queue) pendingDeliveries(ctx context.Context, stream, group string, mes
 	return messages, nil
 }
 
-func (q *Queue) messageFirstSeen(ctx context.Context, stream, id string) (int64, error) {
+func (q *Queue) messageFirstSeen(ctx context.Context, stream, id string, allowFallback bool) (int64, error) {
 	messages, err := q.client.XRangeN(ctx, stream, id, id, 1).Result()
 	if err != nil {
 		return 0, fmt.Errorf("read first-seen metadata for %q: %w", id, err)
@@ -242,6 +300,9 @@ func (q *Queue) messageFirstSeen(ctx context.Context, stream, id string) (int64,
 	value := valueString(messages[0].Values[fieldFirstSeen])
 	firstSeen, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
+		if allowFallback {
+			return time.Now().UTC().UnixMilli(), nil
+		}
 		return 0, fmt.Errorf("read first-seen metadata for %q: invalid value", id)
 	}
 	return firstSeen, nil
@@ -262,35 +323,40 @@ func decodeStreams(streams []redis.XStream) ([]ports.Message, error) {
 func decodeMessages(stream string, messages []redis.XMessage) ([]ports.Message, error) {
 	result := make([]ports.Message, 0, len(messages))
 	for _, raw := range messages {
-		message, err := decodeMessage(stream, raw)
-		if err != nil {
-			return nil, err
-		}
+		message := decodeMessage(stream, raw)
 		result = append(result, message)
 	}
 	return result, nil
 }
 
-func decodeMessage(stream string, raw redis.XMessage) (ports.Message, error) {
-	batchID, err := requiredString(raw.Values, fieldBatchID)
-	if err != nil {
-		return ports.Message{}, fmt.Errorf("decode message %q: %w", raw.ID, err)
+func decodeMessage(stream string, raw redis.XMessage) ports.Message {
+	batchID := valueString(raw.Values[fieldBatchID])
+	payload := valueString(raw.Values[fieldPayload])
+	issues := make([]string, 0, 3)
+	if batchID == "" {
+		issues = append(issues, `field "batch_id" is required`)
 	}
-	payload, err := requiredString(raw.Values, fieldPayload)
-	if err != nil {
-		return ports.Message{}, fmt.Errorf("decode message %q: %w", raw.ID, err)
+	if payload == "" {
+		issues = append(issues, `field "payload" is required`)
 	}
 	deliveries := 1
 	if value := valueString(raw.Values[fieldDeliveries]); value != "" {
-		deliveries, err = strconv.Atoi(value)
-		if err != nil || deliveries < 1 {
-			return ports.Message{}, fmt.Errorf("decode message %q: invalid deliveries", raw.ID)
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 {
+			issues = append(issues, "invalid deliveries")
+		} else {
+			deliveries = parsed
 		}
 	}
-	return ports.Message{
+	message := ports.Message{
 		ID: raw.ID, Stream: stream, BatchID: batchID, Payload: []byte(payload), Deliveries: deliveries,
 		LastError: valueString(raw.Values[fieldLastError]),
-	}, nil
+	}
+	if len(issues) > 0 {
+		rawEnvelope, _ := json.Marshal(raw.Values)
+		message.Malformed = &ports.MalformedMessage{Reason: strings.Join(issues, "; "), RawEnvelope: rawEnvelope}
+	}
+	return message
 }
 
 func messageValues(batchID string, payload []byte, deliveries int, firstSeen time.Time, lastError string) map[string]any {
@@ -298,14 +364,6 @@ func messageValues(batchID string, payload []byte, deliveries int, firstSeen tim
 		fieldBatchID: batchID, fieldPayload: string(payload), fieldDeliveries: deliveries,
 		fieldFirstSeen: firstSeen.UTC().UnixMilli(), fieldLastError: lastError,
 	}
-}
-
-func requiredString(values map[string]any, field string) (string, error) {
-	value := valueString(values[field])
-	if value == "" {
-		return "", fmt.Errorf("field %q is required", field)
-	}
-	return value, nil
 }
 
 func valueString(value any) string {
@@ -345,10 +403,25 @@ func validateConsumer(stream, group, consumer string, count int) error {
 }
 
 func validateMove(stream, group string, msg ports.Message) error {
-	if stream == "" || group == "" || msg.ID == "" || msg.BatchID == "" || len(msg.Payload) == 0 {
+	if stream == "" || group == "" || msg.ID == "" || (msg.Malformed == nil && (msg.BatchID == "" || len(msg.Payload) == 0)) {
 		return errors.New("stream, group, message ID, batch ID, and payload are required")
 	}
 	return nil
+}
+
+func messageBody(msg ports.Message) (string, []byte) {
+	if msg.Malformed == nil {
+		return msg.BatchID, msg.Payload
+	}
+	batchID := msg.BatchID
+	if batchID == "" {
+		batchID = "malformed:" + msg.ID
+	}
+	payload := msg.Payload
+	if len(msg.Malformed.RawEnvelope) > 0 {
+		payload = msg.Malformed.RawEnvelope
+	}
+	return batchID, payload
 }
 
 func validateRedisDuration(name string, duration time.Duration) error {

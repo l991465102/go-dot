@@ -62,6 +62,8 @@ type WorkerConfig struct {
 	MaxDeliveries int
 	ReclaimIdle   time.Duration
 	DrainTimeout  time.Duration
+	RetryBase     time.Duration
+	RetryMax      time.Duration
 }
 
 func Load(ctx context.Context) (Config, error) {
@@ -84,7 +86,7 @@ func Load(ctx context.Context) (Config, error) {
 			ConsumerGroup:   envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
 			PublishDedupTTL: 72 * time.Hour,
 		},
-		Worker: WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second},
+		Worker: WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second, RetryBase: time.Second, RetryMax: time.Minute},
 	}
 	if raw := os.Getenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL"); raw != "" {
 		ttl, err := time.ParseDuration(raw)
@@ -104,6 +106,21 @@ func Load(ctx context.Context) (Config, error) {
 	}
 	if err := loadPositiveDuration("GO_DOT_WORKER_DRAIN_TIMEOUT", &cfg.Worker.DrainTimeout); err != nil {
 		return Config{}, err
+	}
+	if err := loadPositiveDuration("GO_DOT_WORKER_RETRY_BASE", &cfg.Worker.RetryBase); err != nil {
+		return Config{}, err
+	}
+	if err := loadPositiveDuration("GO_DOT_WORKER_RETRY_MAX", &cfg.Worker.RetryMax); err != nil {
+		return Config{}, err
+	}
+	if cfg.Worker.RetryBase < 100*time.Millisecond || cfg.Worker.RetryBase > time.Hour {
+		return Config{}, errors.New("GO_DOT_WORKER_RETRY_BASE must be between 100ms and 1h")
+	}
+	if cfg.Worker.RetryMax > 24*time.Hour {
+		return Config{}, errors.New("GO_DOT_WORKER_RETRY_MAX must not exceed 24h")
+	}
+	if cfg.Worker.RetryMax < cfg.Worker.RetryBase {
+		return Config{}, errors.New("GO_DOT_WORKER_RETRY_MAX must be greater than or equal to GO_DOT_WORKER_RETRY_BASE")
 	}
 	if cfg.Auth.JWTSecret == "" {
 		return Config{}, errors.New("GO_DOT_JWT_SECRET is required")

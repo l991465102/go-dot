@@ -4,7 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -45,6 +50,37 @@ func TestRunDoesNotRecordClickHouseMigrationUntilAllStatementsSucceed(t *testing
 
 	require.ErrorContains(t, Run(context.Background(), db, ClickHouse, files), "execute migration")
 	require.Empty(t, db.AppliedNames())
+}
+
+func TestRunRetriesAfterPartiallyAppliedDDL(t *testing.T) {
+	tests := []struct {
+		name      string
+		dialect   Dialect
+		directory string
+		wantNames []string
+	}{
+		{name: "mysql", dialect: MySQL, directory: "mysql", wantNames: []string{"0001_metadata.sql"}},
+		{name: "clickhouse", dialect: ClickHouse, directory: "clickhouse", wantNames: []string{"0001_events.sql", "0002_hourly_stats.sql"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newPartialDDLExecutor()
+			db.failCreateNumber = 2
+
+			require.ErrorContains(t, Run(context.Background(), db, tt.dialect, migrationFiles(t, tt.directory)), "execute migration")
+			require.Empty(t, db.AppliedNames())
+
+			require.NoError(t, Run(context.Background(), db, tt.dialect, migrationFiles(t, tt.directory)))
+			require.Equal(t, tt.wantNames, db.AppliedNames())
+		})
+	}
+}
+
+func migrationFiles(t *testing.T, directory string) fs.FS {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	return os.DirFS(filepath.Join(filepath.Dir(filename), "../../../migrations", directory))
 }
 
 type fakeExecutor struct {
@@ -132,3 +168,84 @@ func (fakeResult) LastInsertId() (int64, error) { return 0, errors.New("not supp
 func (fakeResult) RowsAffected() (int64, error) { return 0, nil }
 
 var _ fs.FS = fstest.MapFS{}
+
+type partialDDLExecutor struct {
+	*fakeExecutor
+	created          map[string]struct{}
+	createCount      int
+	failCreateNumber int
+}
+
+func newPartialDDLExecutor() *partialDDLExecutor {
+	return &partialDDLExecutor{fakeExecutor: newFakeExecutor(), created: make(map[string]struct{})}
+}
+
+func (f *partialDDLExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return f.exec(ctx, query, args...)
+}
+
+func (f *partialDDLExecutor) BeginTx(context.Context, *sql.TxOptions) (Transaction, error) {
+	return &partialDDLTransaction{db: f}, nil
+}
+
+func (f *partialDDLExecutor) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	upper := strings.ToUpper(strings.TrimSpace(query))
+	if strings.HasPrefix(upper, "CREATE TABLE") && !strings.Contains(upper, "SCHEMA_MIGRATIONS") {
+		f.createCount++
+		if f.createCount == f.failCreateNumber {
+			f.failCreateNumber = 0
+			return nil, errors.New("forced DDL failure")
+		}
+		name, ifNotExists, err := createdTable(query)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := f.created[name]; exists && !ifNotExists {
+			return nil, fmt.Errorf("table %s already exists", name)
+		}
+		f.created[name] = struct{}{}
+	}
+	return f.fakeExecutor.ExecContext(ctx, query, args...)
+}
+
+func createdTable(query string) (string, bool, error) {
+	fields := strings.Fields(query)
+	if len(fields) < 3 {
+		return "", false, errors.New("invalid CREATE TABLE statement")
+	}
+	ifNotExists := len(fields) >= 6 && strings.EqualFold(strings.Join(fields[2:5], " "), "IF NOT EXISTS")
+	nameIndex := 2
+	if ifNotExists {
+		nameIndex = 5
+	}
+	return strings.Trim(fields[nameIndex], "`"), ifNotExists, nil
+}
+
+type partialDDLTransaction struct {
+	db       *partialDDLExecutor
+	name     string
+	checksum string
+}
+
+func (f *partialDDLTransaction) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if len(args) == 2 {
+		name, nameOK := args[0].(string)
+		checksum, checksumOK := args[1].(string)
+		if nameOK && checksumOK {
+			f.name = name
+			f.checksum = checksum
+			return fakeResult{}, nil
+		}
+	}
+	return f.db.exec(ctx, query, args...)
+}
+
+func (f *partialDDLTransaction) Commit() error {
+	if f.name != "" {
+		f.db.applied[f.name] = f.checksum
+		f.db.appliedNames = append(f.db.appliedNames, f.name)
+	}
+	return nil
+}
+
+func (f *partialDDLTransaction) Rollback() error { return nil }

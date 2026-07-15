@@ -35,8 +35,8 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
       TZ: UTC
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/go-dot.xml:ro

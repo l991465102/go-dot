@@ -1,4 +1,4 @@
-CREATE TABLE user_account (
+CREATE TABLE IF NOT EXISTS user_account (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     username VARCHAR(128) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
@@ -12,7 +12,7 @@ CREATE TABLE user_account (
     UNIQUE KEY uk_user_account_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE refresh_token (
+CREATE TABLE IF NOT EXISTS refresh_token (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     user_id BIGINT UNSIGNED NOT NULL,
     token_hash CHAR(64) NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE refresh_token (
     CONSTRAINT fk_refresh_token_user FOREIGN KEY (user_id) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE project (
+CREATE TABLE IF NOT EXISTS project (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     code VARCHAR(128) NOT NULL,
     name VARCHAR(255) NOT NULL,
@@ -46,7 +46,7 @@ CREATE TABLE project (
     CONSTRAINT fk_project_created_by FOREIGN KEY (created_by) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE project_member (
+CREATE TABLE IF NOT EXISTS project_member (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     project_id BIGINT UNSIGNED NOT NULL,
     user_id BIGINT UNSIGNED NOT NULL,
@@ -61,7 +61,7 @@ CREATE TABLE project_member (
     CONSTRAINT fk_project_member_user FOREIGN KEY (user_id) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE tracking_category (
+CREATE TABLE IF NOT EXISTS tracking_category (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     project_id BIGINT UNSIGNED NOT NULL,
     parent_id BIGINT UNSIGNED NULL,
@@ -82,7 +82,7 @@ CREATE TABLE tracking_category (
     CONSTRAINT fk_tracking_category_created_by FOREIGN KEY (created_by) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE tracking_point (
+CREATE TABLE IF NOT EXISTS tracking_point (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     project_id BIGINT UNSIGNED NOT NULL,
     category_id BIGINT UNSIGNED NOT NULL,
@@ -124,7 +124,7 @@ CREATE TABLE tracking_point (
     CONSTRAINT fk_tracking_point_updated_by FOREIGN KEY (updated_by) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE tracking_point_property (
+CREATE TABLE IF NOT EXISTS tracking_point_property (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     point_id BIGINT UNSIGNED NOT NULL,
     code VARCHAR(128) NOT NULL,
@@ -143,7 +143,7 @@ CREATE TABLE tracking_point_property (
     CONSTRAINT fk_tracking_point_property_point FOREIGN KEY (point_id) REFERENCES tracking_point (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE tracking_point_snapshot (
+CREATE TABLE IF NOT EXISTS tracking_point_snapshot (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     project_id BIGINT UNSIGNED NOT NULL,
     point_id BIGINT UNSIGNED NOT NULL,
@@ -160,7 +160,7 @@ CREATE TABLE tracking_point_snapshot (
     CONSTRAINT fk_tracking_point_snapshot_publisher FOREIGN KEY (published_by) REFERENCES user_account (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE audit_log (
+CREATE TABLE IF NOT EXISTS audit_log (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     project_id BIGINT UNSIGNED NULL,
     actor_id BIGINT UNSIGNED NOT NULL,

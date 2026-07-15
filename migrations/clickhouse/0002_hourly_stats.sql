@@ -1,4 +1,4 @@
-CREATE TABLE business_stat_hourly (
+CREATE TABLE IF NOT EXISTS business_stat_hourly (
     hour DateTime('UTC'),
     project_id UInt64,
     domain_category_id UInt64,
@@ -16,7 +16,7 @@ ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(hour)
 ORDER BY (project_id, hour, domain_category_id, module_category_id, scene_category_id, point_id, platform, channel);
 
-CREATE TABLE business_stat_exact_hourly (
+CREATE TABLE IF NOT EXISTS business_stat_exact_hourly (
     hour DateTime('UTC'),
     project_id UInt64,
     domain_category_id UInt64,

@@ -1,4 +1,4 @@
-CREATE TABLE tracking_event (
+CREATE TABLE IF NOT EXISTS tracking_event (
     event_id String,
     batch_id String,
     project_id UInt64,
@@ -29,7 +29,7 @@ PARTITION BY toYYYYMM(received_at)
 ORDER BY (project_id, point_id, statistic_date, statistic_at, event_id)
 TTL received_at + INTERVAL 30 DAY DELETE;
 
-CREATE TABLE tracking_invalid_event (
+CREATE TABLE IF NOT EXISTS tracking_invalid_event (
     project_id UInt64,
     batch_id String,
     event_id String,

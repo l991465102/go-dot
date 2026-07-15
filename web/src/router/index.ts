@@ -5,6 +5,9 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ProjectOverviewView from '@/views/ProjectOverviewView.vue'
+import PointWorkbenchView from '@/views/PointWorkbenchView.vue'
+import PointDetailView from '@/views/PointDetailView.vue'
+import CategoryManagementView from '@/views/CategoryManagementView.vue'
 import ProjectOnboardingView from '@/views/ProjectOnboardingView.vue'
 import ProjectBootstrapErrorView from '@/views/ProjectBootstrapErrorView.vue'
 
@@ -23,8 +26,9 @@ export function createAppRouter(): Router {
         component: AppLayout,
         children: [
           { path: 'overview', name: 'project-overview', component: ProjectOverviewView },
-          { path: 'points', name: 'points', component: EmptyView },
-          { path: 'categories', name: 'categories', component: EmptyView },
+          { path: 'points', name: 'points', component: PointWorkbenchView },
+          { path: 'points/:pointId', name: 'point-detail', component: PointDetailView, props: (route) => ({ projectId: Number(route.params.projectId), pointId: Number(route.params.pointId), canMutate: useProjectStore().canMutate }) },
+          { path: 'categories', name: 'categories', component: CategoryManagementView },
           { path: 'statistics', name: 'statistics', component: EmptyView },
           { path: 'diagnostics', name: 'diagnostics', component: EmptyView },
           { path: 'settings', name: 'project-settings', component: EmptyView },

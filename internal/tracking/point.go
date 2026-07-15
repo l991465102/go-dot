@@ -99,6 +99,25 @@ type DraftInput struct {
 	Properties          []PropertyInput  `json:"properties"`
 }
 
+type PointFilter struct {
+	Query            string
+	CategoryID       uint64
+	DefinitionState  DefinitionState
+	DevelopmentState DevelopmentState
+	BehaviorType     BehaviorType
+	Platform         string
+	Owner            string
+	CreatedFrom      string
+	CreatedTo        string
+	Page             int
+	PageSize         int
+}
+
+type PointList struct {
+	Items []Point `json:"items"`
+	Total int     `json:"total"`
+}
+
 type Snapshot struct {
 	ID                  uint64        `json:"snapshot_id"`
 	ProjectID           uint64        `json:"project_id"`

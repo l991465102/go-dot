@@ -2,6 +2,7 @@ package tracking
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/lzw7758/go-dot/internal/project"
@@ -19,6 +20,12 @@ type Repository interface {
 	Publish(context.Context, uint64, uint64, uint64) (Snapshot, error)
 	Deprecate(context.Context, uint64, uint64, uint64, string, *uint64) error
 	UpdateDevelopmentState(context.Context, uint64, uint64, uint64, DevelopmentState) (Point, error)
+}
+
+type CatalogRepository interface {
+	ListCategories(context.Context, uint64) ([]Category, error)
+	UpdateCategory(context.Context, uint64, uint64, uint64, UpdateCategory) (Category, error)
+	ListPoints(context.Context, uint64, PointFilter) (PointList, error)
 }
 
 type Authorizer interface {
@@ -59,6 +66,51 @@ func (s *Service) CreateCategory(ctx context.Context, actorID uint64, in CreateC
 		return Category{}, err
 	}
 	return s.repo.CreateCategory(ctx, Category{ProjectID: in.ProjectID, ParentID: in.ParentID, Code: in.Code, Name: in.Name, Level: in.Level, Description: in.Description, SortOrder: in.SortOrder, Active: true, CreatedBy: actorID})
+}
+
+func (s *Service) ListCategories(ctx context.Context, actorID, projectID uint64) ([]Category, error) {
+	if err := s.auth.RequireRole(ctx, actorID, projectID, project.Admin, project.Viewer); err != nil {
+		return nil, err
+	}
+	repo, ok := s.repo.(CatalogRepository)
+	if !ok {
+		return nil, errors.New("tracking catalog unavailable")
+	}
+	return repo.ListCategories(ctx, projectID)
+}
+
+func (s *Service) UpdateCategory(ctx context.Context, actorID, projectID, id uint64, in UpdateCategory) (Category, error) {
+	if err := s.auth.RequireRole(ctx, actorID, projectID, project.Admin); err != nil {
+		return Category{}, err
+	}
+	if strings.TrimSpace(in.Name) == "" {
+		return Category{}, coded("CATEGORY_INVALID", "name is required")
+	}
+	if _, err := s.repo.FindCategoryInProject(ctx, projectID, id); err != nil {
+		return Category{}, err
+	}
+	repo, ok := s.repo.(CatalogRepository)
+	if !ok {
+		return Category{}, errors.New("tracking catalog unavailable")
+	}
+	return repo.UpdateCategory(ctx, projectID, id, actorID, in)
+}
+
+func (s *Service) ListPoints(ctx context.Context, actorID, projectID uint64, filter PointFilter) (PointList, error) {
+	if err := s.auth.RequireRole(ctx, actorID, projectID, project.Admin, project.Viewer); err != nil {
+		return PointList{}, err
+	}
+	if filter.Page < 1 {
+		filter.Page = 1
+	}
+	if filter.PageSize < 1 || filter.PageSize > 100 {
+		filter.PageSize = 20
+	}
+	repo, ok := s.repo.(CatalogRepository)
+	if !ok {
+		return PointList{}, errors.New("tracking catalog unavailable")
+	}
+	return repo.ListPoints(ctx, projectID, filter)
 }
 
 func (s *Service) SaveDraft(ctx context.Context, actorID uint64, in DraftInput) (Point, error) {

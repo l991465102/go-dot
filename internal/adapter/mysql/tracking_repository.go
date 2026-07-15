@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -48,6 +50,82 @@ func (r *TrackingRepository) FindCategory(ctx context.Context, id uint64) (track
 }
 func (r *TrackingRepository) FindCategoryInProject(ctx context.Context, projectID, id uint64) (tracking.Category, error) {
 	return findCategory(ctx, r.db, projectID, id)
+}
+func (r *TrackingRepository) ListCategories(ctx context.Context, projectID uint64) ([]tracking.Category, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM tracking_category WHERE project_id=? ORDER BY level,sort_order,id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uint64
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	items := make([]tracking.Category, 0, len(ids))
+	for _, id := range ids {
+		item, err := findCategory(ctx, r.db, projectID, id)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (r *TrackingRepository) UpdateCategory(ctx context.Context, projectID, id, actorID uint64, in tracking.UpdateCategory) (updated tracking.Category, err error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return updated, err
+	}
+	defer rollbackOnError(tx, &err)
+	before, err := findCategory(ctx, tx, projectID, id)
+	if err != nil {
+		return updated, err
+	}
+	if !in.Active && before.Active {
+		var count int
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracking_category WHERE project_id=? AND parent_id=? AND is_active=TRUE`, projectID, id).Scan(&count); err != nil {
+			return updated, err
+		}
+		if count > 0 {
+			return updated, tracking.NewCodedError("CATEGORY_IN_USE", "active child categories exist")
+		}
+		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracking_point WHERE project_id=? AND category_id=? AND definition_state IN ('DRAFT','PUBLISHED')`, projectID, id).Scan(&count); err != nil {
+			return updated, err
+		}
+		if count > 0 {
+			return updated, tracking.NewCodedError("CATEGORY_IN_USE", "active points use this category")
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE tracking_category SET name=?,description=?,sort_order=?,is_active=? WHERE project_id=? AND id=?`, in.Name, nullable(in.Description), in.SortOrder, in.Active, projectID, id)
+	if err != nil {
+		return updated, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return updated, tracking.ErrCategoryNotFound
+	}
+	updated = before
+	updated.Name = in.Name
+	updated.Description = in.Description
+	updated.SortOrder = in.SortOrder
+	updated.Active = in.Active
+	b, _ := json.Marshal(before)
+	a, _ := json.Marshal(updated)
+	if err = insertAudit(ctx, tx, projectID, actorID, "UPDATE_CATEGORY", "TRACKING_CATEGORY", id, b, a); err != nil {
+		return updated, err
+	}
+	if err = tx.Commit(); err != nil {
+		return updated, err
+	}
+	return updated, nil
 }
 func (r *TrackingRepository) ResolveCategoryIDs(ctx context.Context, projectID uint64, domain, module, scene string) (uint64, uint64, uint64, error) {
 	return r.resolveCategoryIDs(ctx, projectID, domain, module, scene, false)
@@ -148,10 +226,101 @@ func (r *TrackingRepository) CreateDraft(ctx context.Context, p tracking.Point) 
 const insertPointSQL = `INSERT INTO tracking_point(project_id,category_id,code,name,description,behavior_type,definition_state,development_state,trigger_page,trigger_timing,trigger_count_rule,abnormal_trigger_rule,count_pv,count_uv,uv_mode,time_basis,supported_platforms,supported_channels,product_owner,developer_owner,requirement_url,created_by,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 func (r *TrackingRepository) FindPoint(ctx context.Context, id uint64) (tracking.Point, error) {
-	return findPoint(ctx, r.db, id, false)
+	p, err := findPoint(ctx, r.db, id, false)
+	if err != nil {
+		return p, err
+	}
+	p.CategoryPath, err = loadCategoryPath(ctx, r.db, p.Category)
+	return p, err
 }
 func (r *TrackingRepository) FindPointInProject(ctx context.Context, projectID, id uint64) (tracking.Point, error) {
-	return findPoint(ctx, r.db, id, false, projectID)
+	p, err := findPoint(ctx, r.db, id, false, projectID)
+	if err != nil {
+		return p, err
+	}
+	p.CategoryPath, err = loadCategoryPath(ctx, r.db, p.Category)
+	return p, err
+}
+
+func (r *TrackingRepository) ListPoints(ctx context.Context, projectID uint64, f tracking.PointFilter) (tracking.PointList, error) {
+	where := []string{"p.project_id=?"}
+	args := []any{projectID}
+	if v := strings.TrimSpace(f.Query); v != "" {
+		where = append(where, `(p.code LIKE ? OR p.name LIKE ?)`)
+		like := "%" + v + "%"
+		args = append(args, like, like)
+	}
+	if f.CategoryID != 0 {
+		where = append(where, `p.category_id=?`)
+		args = append(args, f.CategoryID)
+	}
+	if f.DefinitionState != "" {
+		where = append(where, `p.definition_state=?`)
+		args = append(args, f.DefinitionState)
+	}
+	if f.DevelopmentState != "" {
+		where = append(where, `p.development_state=?`)
+		args = append(args, f.DevelopmentState)
+	}
+	if f.BehaviorType != "" {
+		where = append(where, `p.behavior_type=?`)
+		args = append(args, f.BehaviorType)
+	}
+	if f.Platform != "" {
+		where = append(where, `JSON_CONTAINS(p.supported_platforms,JSON_QUOTE(?))`)
+		args = append(args, f.Platform)
+	}
+	if v := strings.TrimSpace(f.Owner); v != "" {
+		where = append(where, `(p.product_owner LIKE ? OR p.developer_owner LIKE ?)`)
+		like := "%" + v + "%"
+		args = append(args, like, like)
+	}
+	if f.CreatedFrom != "" {
+		where = append(where, `p.created_at>=?`)
+		args = append(args, f.CreatedFrom+" 00:00:00")
+	}
+	if f.CreatedTo != "" {
+		where = append(where, `p.created_at<?`)
+		args = append(args, f.CreatedTo+" 23:59:59.999999")
+	}
+	clause := strings.Join(where, " AND ")
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracking_point p WHERE `+clause, args...).Scan(&total); err != nil {
+		return tracking.PointList{}, err
+	}
+	offset := (f.Page - 1) * f.PageSize
+	query := fmt.Sprintf(`SELECT p.id FROM tracking_point p WHERE %s ORDER BY p.updated_at DESC,p.id DESC LIMIT ? OFFSET ?`, clause)
+	listArgs := append(append([]any{}, args...), f.PageSize, offset)
+	rows, err := r.db.QueryContext(ctx, query, listArgs...)
+	if err != nil {
+		return tracking.PointList{}, err
+	}
+	defer rows.Close()
+	var ids []uint64
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return tracking.PointList{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return tracking.PointList{}, err
+	}
+	items := make([]tracking.Point, 0, len(ids))
+	for _, id := range ids {
+		item, err := findPoint(ctx, r.db, id, false, projectID)
+		if err != nil {
+			return tracking.PointList{}, err
+		}
+		path, err := loadCategoryPath(ctx, r.db, item.Category)
+		if err != nil {
+			return tracking.PointList{}, err
+		}
+		item.CategoryPath = path
+		items = append(items, item)
+	}
+	return tracking.PointList{Items: items, Total: total}, nil
 }
 
 func (r *TrackingRepository) FindPublishedSnapshot(ctx context.Context, projectID uint64, pointCode string) (tracking.Snapshot, error) {

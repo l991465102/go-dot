@@ -60,6 +60,21 @@ func TestViewerCannotDeleteOrDeprecateAndStateIsUnchanged(t *testing.T) {
 	require.NotEqual(t, tracking.Online, repo.points[7].DevelopmentState)
 }
 
+func TestTrackingCatalogRoutesExposeListsAndGovernCategoryUpdates(t *testing.T) {
+	repo := &memoryTrackingRepo{categories: map[uint64]tracking.Category{}, points: map[uint64]tracking.Point{}}
+	svc := tracking.NewService(repo, trackingAllowAll{})
+	mux := http.NewServeMux()
+	NewTrackingController(svc).Register(mux)
+
+	domain := postCategory(t, mux, tracking.CreateCategory{ProjectID: 9, Code: "commerce", Name: "Commerce", Level: tracking.Domain})
+	requestJSON[[]tracking.Category](t, mux, http.MethodGet, "/api/v1/projects/9/categories", nil, http.StatusOK)
+	updated := requestJSON[tracking.Category](t, mux, http.MethodPatch, "/api/v1/projects/9/categories/"+strconv.FormatUint(domain.ID, 10), map[string]any{"name": "Mall", "sort_order": 5, "active": true}, http.StatusOK)
+	require.Equal(t, "Mall", updated.Name)
+	require.Equal(t, 5, updated.SortOrder)
+	points := requestJSON[tracking.PointList](t, mux, http.MethodGet, "/api/v1/projects/9/points?q=detail&definition_state=DRAFT", nil, http.StatusOK)
+	require.Empty(t, points.Items)
+}
+
 func TestProjectScopedPointLookupHidesForeignPoint(t *testing.T) {
 	repo := &memoryTrackingRepo{categories: map[uint64]tracking.Category{}, points: map[uint64]tracking.Point{7: {ID: 7, ProjectID: 9}}}
 	svc := tracking.NewService(repo, trackingAllowAll{})
@@ -162,6 +177,33 @@ func (r *memoryTrackingRepo) FindCategoryInProject(ctx context.Context, projectI
 		return tracking.Category{}, tracking.ErrCategoryNotFound
 	}
 	return c, nil
+}
+func (r *memoryTrackingRepo) ListCategories(_ context.Context, projectID uint64) ([]tracking.Category, error) {
+	items := []tracking.Category{}
+	for _, item := range r.categories {
+		if item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+func (r *memoryTrackingRepo) UpdateCategory(_ context.Context, projectID, id, _ uint64, in tracking.UpdateCategory) (tracking.Category, error) {
+	item, ok := r.categories[id]
+	if !ok || item.ProjectID != projectID {
+		return tracking.Category{}, tracking.ErrCategoryNotFound
+	}
+	item.Name, item.Description, item.SortOrder, item.Active = in.Name, in.Description, in.SortOrder, in.Active
+	r.categories[id] = item
+	return item, nil
+}
+func (r *memoryTrackingRepo) ListPoints(_ context.Context, projectID uint64, _ tracking.PointFilter) (tracking.PointList, error) {
+	items := []tracking.Point{}
+	for _, item := range r.points {
+		if item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return tracking.PointList{Items: items, Total: len(items)}, nil
 }
 func (r *memoryTrackingRepo) CreateDraft(_ context.Context, p tracking.Point) (tracking.Point, error) {
 	r.next++

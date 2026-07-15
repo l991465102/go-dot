@@ -17,7 +17,10 @@ func NewTrackingController(service *tracking.Service) TrackingController {
 }
 func (c TrackingController) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/categories", c.createCategory)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/categories", c.listCategories)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/categories/{id}", c.updateCategory)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/points", c.saveDraft)
+	mux.HandleFunc("GET /api/v1/projects/{projectID}/points", c.listPoints)
 	mux.HandleFunc("GET /api/v1/projects/{projectID}/points/{id}", c.getPoint)
 	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/points/{id}", c.updateDraft)
 	mux.HandleFunc("DELETE /api/v1/projects/{projectID}/points/{id}", c.deleteDraft)
@@ -25,6 +28,51 @@ func (c TrackingController) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/copy", c.copyPoint)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/deprecate", c.deprecate)
 	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/points/{id}/development-state", c.updateDevelopmentState)
+}
+func (c TrackingController) listCategories(w http.ResponseWriter, r *http.Request) {
+	actor, projectID, ok := principalID(w, r)
+	if !ok {
+		return
+	}
+	result, err := c.service.ListCategories(r.Context(), actor, projectID)
+	if err != nil {
+		trackingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+func (c TrackingController) updateCategory(w http.ResponseWriter, r *http.Request) {
+	actor, projectID, id, ok := principalAndID(w, r)
+	if !ok {
+		return
+	}
+	var req v1.UpdateCategoryReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := c.service.UpdateCategory(r.Context(), actor, projectID, id, req)
+	if err != nil {
+		trackingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+func (c TrackingController) listPoints(w http.ResponseWriter, r *http.Request) {
+	actor, projectID, ok := principalID(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	filter := tracking.PointFilter{Query: q.Get("q"), DefinitionState: tracking.DefinitionState(q.Get("definition_state")), DevelopmentState: tracking.DevelopmentState(q.Get("development_state")), BehaviorType: tracking.BehaviorType(q.Get("behavior_type")), Platform: q.Get("platform"), Owner: q.Get("owner"), CreatedFrom: q.Get("created_from"), CreatedTo: q.Get("created_to")}
+	filter.CategoryID, _ = strconv.ParseUint(q.Get("category_id"), 10, 64)
+	filter.Page, _ = strconv.Atoi(q.Get("page"))
+	filter.PageSize, _ = strconv.Atoi(q.Get("page_size"))
+	result, err := c.service.ListPoints(r.Context(), actor, projectID, filter)
+	if err != nil {
+		trackingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 func principalAndID(w http.ResponseWriter, r *http.Request) (uint64, uint64, uint64, bool) {
 	p, ok := PrincipalFromContext(r.Context())
@@ -207,7 +255,11 @@ func trackingError(w http.ResponseWriter, err error) {
 		message = err.Error()
 	default:
 		if code, ok := tracking.ErrorCode(err); ok {
-			status = http.StatusBadRequest
+			if code == "CATEGORY_IN_USE" {
+				status = http.StatusConflict
+			} else {
+				status = http.StatusBadRequest
+			}
 			message = code
 		}
 	}

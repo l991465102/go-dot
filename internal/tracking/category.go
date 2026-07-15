@@ -44,6 +44,13 @@ type CreateCategory struct {
 	SortOrder   int           `json:"sort_order"`
 }
 
+type UpdateCategory struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	SortOrder   int    `json:"sort_order"`
+	Active      bool   `json:"active"`
+}
+
 func (in CreateCategory) validate(parent *Category) error {
 	if in.ProjectID == 0 || in.Code == "" || in.Name == "" {
 		return coded("CATEGORY_INVALID", "project_id, code and name are required")

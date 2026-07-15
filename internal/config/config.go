@@ -16,6 +16,7 @@ type Config struct {
 	ClickHouse ClickHouseConfig
 	Auth       AuthConfig
 	Tracking   TrackingConfig
+	Queue      QueueConfig
 }
 
 type HTTPConfig struct {
@@ -46,6 +47,13 @@ type TrackingConfig struct {
 	MaxBodyBytes   int
 }
 
+type QueueConfig struct {
+	EventStream   string
+	InvalidStream string
+	DeadStream    string
+	ConsumerGroup string
+}
+
 func Load(ctx context.Context) (Config, error) {
 	cfg := Config{
 		HTTP:       HTTPConfig{Address: g.Cfg().MustGet(ctx, "server.address", ":8080").String()},
@@ -59,6 +67,12 @@ func Load(ctx context.Context) (Config, error) {
 			RefreshTTL:       7 * 24 * time.Hour,
 		},
 		Tracking: TrackingConfig{MaxBatchEvents: 100, MaxBodyBytes: 256 << 10},
+		Queue: QueueConfig{
+			EventStream:   envOr("GO_DOT_QUEUE_EVENT_STREAM", "tracking:events"),
+			InvalidStream: envOr("GO_DOT_QUEUE_INVALID_STREAM", "tracking:invalid"),
+			DeadStream:    envOr("GO_DOT_QUEUE_DEAD_STREAM", "tracking:dead"),
+			ConsumerGroup: envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
+		},
 	}
 	if cfg.Auth.JWTSecret == "" {
 		return Config{}, errors.New("GO_DOT_JWT_SECRET is required")

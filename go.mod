@@ -6,6 +6,7 @@ toolchain go1.26.5
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.47.0
+	github.com/alicebob/miniredis/v2 v2.30.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gogf/gf/v2 v2.10.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -19,6 +20,7 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/ClickHouse/ch-go v0.73.0 // indirect
+	github.com/alicebob/gopher-json v0.0.0-20200520072559-a9ecdc9d1d3a // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
@@ -47,11 +49,13 @@ require (
 	github.com/rivo/uniseg v0.2.0 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
+	github.com/yuin/gopher-lua v0.0.0-20220504180219-658193537a64 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

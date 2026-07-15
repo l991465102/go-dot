@@ -93,13 +93,12 @@ func (c *Counter) QueryRealtime(ctx context.Context, f ports.StatisticsFilter) (
 	if f.Channel != "" {
 		channel = encodePart(f.Channel)
 	}
-	pattern := "rt:pv:hour:" + tag + ":*:" + point + ":" + platform + ":" + channel
-	pvKeys, err := c.scanRange(ctx, pattern, f)
+	pvPattern := "rt:pv:hour:" + tag + ":*:" + point + ":" + platform + ":" + channel
+	pvKeys, err := c.scanRange(ctx, pvPattern, f)
 	if err != nil {
 		return ports.Summary{}, err
 	}
 	var pv uint64
-	uvKeys := make([]string, 0, len(pvKeys))
 	mode := string(tracking.Approximate)
 	if f.ExactUV {
 		mode = string(tracking.Exact)
@@ -110,7 +109,11 @@ func (c *Counter) QueryRealtime(ctx context.Context, f ports.StatisticsFilter) (
 			return ports.Summary{}, fmt.Errorf("read realtime PV: %w", err)
 		}
 		pv += value
-		uvKeys = append(uvKeys, strings.Replace(key, "rt:pv:hour:", "rt:uv:hour:", 1)+":"+mode)
+	}
+	uvPattern := "rt:uv:hour:" + tag + ":*:" + point + ":" + platform + ":" + channel + ":" + mode
+	uvKeys, err := c.scanRange(ctx, uvPattern, f)
+	if err != nil {
+		return ports.Summary{}, err
 	}
 	var uv uint64
 	if f.ExactUV {
@@ -138,7 +141,11 @@ func (c *Counter) QueryRealtime(ctx context.Context, f ports.StatisticsFilter) (
 func (c *Counter) scanRange(ctx context.Context, pattern string, f ports.StatisticsFilter) ([]string, error) {
 	var cursor uint64
 	var keys []string
-	location, err := time.LoadLocation(f.Timezone)
+	timezone := f.StorageTimezone
+	if timezone == "" {
+		return nil, errors.New("trusted storage timezone is required")
+	}
+	location, err := time.LoadLocation(timezone)
 	if err != nil {
 		return nil, fmt.Errorf("load timezone: %w", err)
 	}

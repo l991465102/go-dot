@@ -40,6 +40,12 @@ func TestSanitizePropertiesRemovesIdentityAndSecretKeysRecursively(t *testing.T)
 	require.Equal(t, map[string]any{"product_id": "p", "nested": map[string]any{"ok": true}}, got)
 }
 
+func TestSanitizePropertiesHandlesArbitraryContainersAndCanonicalSensitiveKeys(t *testing.T) {
+	input := map[string]any{"safe": []map[string]any{{"userId": "u", "nested": []any{map[string]string{"Anonymous-ID": "a", "ok": "yes"}}}}, "SESSION.id": "s", "access_Token": "t"}
+	got := sanitizeProperties(input)
+	require.Equal(t, map[string]any{"safe": []any{map[string]any{"nested": []any{map[string]any{"ok": "yes"}}}}}, got)
+}
+
 func TestDiagnosticsClickHouseIntegration(t *testing.T) {
 	dsn := os.Getenv("GO_DOT_TEST_CLICKHOUSE_DSN")
 	if dsn == "" {

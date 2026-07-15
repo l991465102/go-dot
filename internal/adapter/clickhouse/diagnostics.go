@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -157,35 +158,72 @@ func encodeDiagnosticCursor(cursor diagnosticCursor) string {
 }
 
 var sensitivePropertyKeys = map[string]struct{}{
-	"user_id": {}, "anonymous_id": {}, "visitor_id": {}, "visitor_hash": {}, "session_id": {}, "session_hash": {},
-	"password": {}, "passwd": {}, "secret": {}, "token": {}, "authorization": {}, "cookie": {}, "write_key": {}, "app_secret": {},
+	"userid": {}, "anonymousid": {}, "visitorid": {}, "visitorhash": {}, "sessionid": {}, "sessionhash": {},
+	"password": {}, "passwd": {}, "secret": {}, "token": {}, "authorization": {}, "cookie": {}, "writekey": {}, "appsecret": {}, "accesstoken": {}, "refreshtoken": {},
 }
 
 func sanitizeProperties(value map[string]any) map[string]any {
-	out := make(map[string]any, len(value))
-	for key, item := range value {
-		normalized := strings.ToLower(key)
-		_, exactSensitive := sensitivePropertyKeys[normalized]
-		sensitive := exactSensitive || strings.Contains(normalized, "password") || strings.Contains(normalized, "passwd") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "token") || strings.Contains(normalized, "authorization") || strings.Contains(normalized, "cookie") || strings.Contains(normalized, "visitor") || strings.Contains(normalized, "anonymous_id") || strings.Contains(normalized, "user_id") || strings.Contains(normalized, "session")
-		if sensitive {
-			continue
+	cleaned, _ := sanitizeDiagnosticValue(reflect.ValueOf(value), 0).(map[string]any)
+	if cleaned == nil {
+		return map[string]any{}
+	}
+	return cleaned
+}
+
+func sanitizeDiagnosticValue(value reflect.Value, depth int) any {
+	if !value.IsValid() || depth > 32 {
+		return nil
+	}
+	for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
 		}
-		switch nested := item.(type) {
-		case map[string]any:
-			out[key] = sanitizeProperties(nested)
-		case []any:
-			clean := make([]any, 0, len(nested))
-			for _, child := range nested {
-				if object, ok := child.(map[string]any); ok {
-					clean = append(clean, sanitizeProperties(object))
-				} else {
-					clean = append(clean, child)
-				}
+		value = value.Elem()
+	}
+	switch value.Kind() {
+	case reflect.Map:
+		out := map[string]any{}
+		iter := value.MapRange()
+		for iter.Next() {
+			keyValue := iter.Key()
+			if keyValue.Kind() != reflect.String {
+				continue
 			}
-			out[key] = clean
-		default:
-			out[key] = item
+			key := keyValue.String()
+			if sensitiveDiagnosticKey(key) {
+				continue
+			}
+			out[key] = sanitizeDiagnosticValue(iter.Value(), depth+1)
+		}
+		return out
+	case reflect.Slice, reflect.Array:
+		out := make([]any, value.Len())
+		for i := 0; i < value.Len(); i++ {
+			out[i] = sanitizeDiagnosticValue(value.Index(i), depth+1)
+		}
+		return out
+	default:
+		if value.CanInterface() {
+			return value.Interface()
+		}
+		return nil
+	}
+}
+func sensitiveDiagnosticKey(key string) bool {
+	var canonical strings.Builder
+	for _, r := range strings.ToLower(key) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			canonical.WriteRune(r)
 		}
 	}
-	return out
+	value := canonical.String()
+	if _, ok := sensitivePropertyKeys[value]; ok {
+		return true
+	}
+	for _, fragment := range []string{"password", "passwd", "secret", "token", "authorization", "cookie", "visitor", "anonymousid", "userid", "sessionid", "sessionhash"} {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
 }

@@ -217,12 +217,26 @@ func TestQueryRealtimeMergesPVAndExactUVAcrossHourlyBuckets(t *testing.T) {
 		_, err := counter.Apply(context.Background(), event)
 		require.NoError(t, err)
 	}
-	got, err := counter.QueryRealtime(context.Background(), ports.StatisticsFilter{ProjectID: 7, PointID: 9, Platform: "web", Channel: "organic", Start: start, End: start.Add(2 * time.Hour), Timezone: "UTC", ExactUV: true})
+	got, err := counter.QueryRealtime(context.Background(), ports.StatisticsFilter{ProjectID: 7, PointID: 9, Platform: "web", Channel: "organic", Start: start, End: start.Add(2 * time.Hour), Timezone: "UTC", StorageTimezone: "UTC", ExactUV: true})
 	require.NoError(t, err)
 	require.EqualValues(t, 3, got.PV)
 	require.EqualValues(t, 2, got.UV)
 	require.False(t, got.Approximate)
 	require.NotEmpty(t, s.Keys())
+}
+
+func TestQueryRealtimeUsesStorageTimezoneAndFindsUVWithoutPVKey(t *testing.T) {
+	s := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	counter := New(client)
+	at := time.Date(2026, 7, 15, 16, 30, 0, 0, time.FixedZone("CST", 8*3600))
+	event := ports.CountEvent{EventID: "uv-only", ProjectID: 7, PointID: 9, Platform: "web", Channel: "organic", ProjectTimezone: "Asia/Shanghai", StatTime: at, VisitorHash: 1, CountUV: true, UVMode: tracking.Exact}
+	_, err := counter.Apply(context.Background(), event)
+	require.NoError(t, err)
+	got, err := counter.QueryRealtime(context.Background(), ports.StatisticsFilter{ProjectID: 7, PointID: 9, Start: at.Truncate(time.Hour), End: at.Truncate(time.Hour).Add(time.Hour), StorageTimezone: "Asia/Shanghai", Timezone: "America/New_York", ExactUV: true})
+	require.NoError(t, err)
+	require.Zero(t, got.PV)
+	require.EqualValues(t, 1, got.UV)
 }
 
 func withCountEvent(base ports.CountEvent, id string, visitor uint64, at time.Time) ports.CountEvent {

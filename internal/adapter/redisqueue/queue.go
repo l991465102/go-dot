@@ -90,9 +90,10 @@ return promoted
 `)
 
 type Queue struct {
-	client          redis.UniversalClient
-	deadStream      string
-	publishDedupTTL time.Duration
+	client              redis.UniversalClient
+	deadStream          string
+	publishDedupTTL     time.Duration
+	deadLetterScanLimit int
 }
 
 func WithPublishDedupTTL(ttl time.Duration) Option {
@@ -112,9 +113,16 @@ func WithDeadStream(stream string) Option {
 		}
 	}
 }
+func WithDeadLetterScanLimit(limit int) Option {
+	return func(queue *Queue) {
+		if limit > 0 && limit <= 10000 {
+			queue.deadLetterScanLimit = limit
+		}
+	}
+}
 
 func New(client redis.UniversalClient, options ...Option) *Queue {
-	queue := &Queue{client: client, deadStream: ports.DeadLetterStream, publishDedupTTL: 72 * time.Hour}
+	queue := &Queue{client: client, deadStream: ports.DeadLetterStream, publishDedupTTL: 72 * time.Hour, deadLetterScanLimit: 1000}
 	for _, option := range options {
 		option(queue)
 	}
@@ -272,9 +280,11 @@ func (q *Queue) ListDeadLetters(ctx context.Context, f statistics.DeadLetterFilt
 	if f.Cursor != "" {
 		end = "(" + f.Cursor
 	}
-	items := make([]statistics.DeadLetter, 0, f.Limit+1)
-	for len(items) <= f.Limit {
-		messages, err := q.client.XRevRangeN(ctx, q.deadStream, end, "-", 100).Result()
+	items := make([]statistics.DeadLetter, 0, f.Limit)
+	scanned, stopped, lastScanned := 0, false, ""
+	for len(items) < f.Limit && scanned < q.deadLetterScanLimit {
+		batchSize := min(100, q.deadLetterScanLimit-scanned)
+		messages, err := q.client.XRevRangeN(ctx, q.deadStream, end, "-", int64(batchSize)).Result()
 		if err != nil && err != redis.Nil {
 			return statistics.DeadLetterPage{}, fmt.Errorf("read dead letters: %w", err)
 		}
@@ -282,29 +292,35 @@ func (q *Queue) ListDeadLetters(ctx context.Context, f statistics.DeadLetterFilt
 			break
 		}
 		for _, message := range messages {
+			scanned++
+			lastScanned = message.ID
 			end = "(" + message.ID
 			payload := valueString(message.Values[fieldPayload])
 			var envelope struct {
 				ProjectID uint64 `json:"project_id"`
 			}
 			if json.Unmarshal([]byte(payload), &envelope) != nil || envelope.ProjectID != f.ProjectID {
+				if scanned == q.deadLetterScanLimit {
+					stopped = true
+					break
+				}
 				continue
 			}
 			deliveries, _ := strconv.Atoi(valueString(message.Values[fieldDeliveries]))
 			firstSeenMillis, _ := strconv.ParseInt(valueString(message.Values[fieldFirstSeen]), 10, 64)
 			items = append(items, statistics.DeadLetter{ID: message.ID, BatchID: valueString(message.Values[fieldBatchID]), Deliveries: deliveries, FirstSeen: time.UnixMilli(firstSeenMillis).UTC(), LastError: sanitizeQueueError(valueString(message.Values[fieldLastError]))})
-			if len(items) > f.Limit {
+			if len(items) == f.Limit || scanned == q.deadLetterScanLimit {
+				stopped = true
 				break
 			}
 		}
-		if len(messages) < 100 {
+		if len(messages) < batchSize {
 			break
 		}
 	}
 	page := statistics.DeadLetterPage{Items: items}
-	if len(page.Items) > f.Limit {
-		page.Items = page.Items[:f.Limit]
-		page.NextCursor = page.Items[len(page.Items)-1].ID
+	if stopped && lastScanned != "" {
+		page.NextCursor = lastScanned
 	}
 	return page, nil
 }

@@ -95,6 +95,15 @@ func TestStatisticsPointCodeListUsesParameterizedIN(t *testing.T) {
 	require.Contains(t, db.queryArgs[0], "a' OR 1=1 --")
 }
 
+func TestCategoryCodeHistoryUsesDurableAggregateColumnsNotRawTTL(t *testing.T) {
+	db := &statisticsRecordingDB{queryErr: errors.New("recorded")}
+	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	_, _ = NewStatisticsStore(db).QuerySummary(context.Background(), ports.StatisticsFilter{ProjectID: 9, Start: start, End: start.Add(60 * 24 * time.Hour), DomainCategoryCode: "mall"})
+	query := strings.Join(strings.Fields(db.queries[0]), " ")
+	require.Contains(t, query, "s.domain_category_code=?")
+	require.NotContains(t, query, "SELECT domain_category_id FROM tracking_event")
+}
+
 func TestStatisticsGenerationClickHouseIntegration(t *testing.T) {
 	dsn := os.Getenv("GO_DOT_TEST_CLICKHOUSE_DSN")
 	if dsn == "" {
@@ -112,9 +121,9 @@ func TestStatisticsGenerationClickHouseIntegration(t *testing.T) {
 	exact := "business_stat_exact_hourly_" + suffix
 	generation := "business_stat_generation_" + suffix
 	ddls := []string{
-		`CREATE TABLE ` + raw + ` (project_id UInt64,event_id String,domain_category_id UInt64,module_category_id UInt64,scene_category_id UInt64,point_id UInt64,point_code String,platform String,channel String,visitor_hash FixedString(64),count_pv Bool,count_uv Bool,uv_mode String,statistic_at DateTime64(3,'UTC'),version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,event_id)`,
-		`CREATE TABLE ` + approx + ` (hour DateTime('UTC'),project_id UInt64,domain_category_id UInt64,module_category_id UInt64,scene_category_id UInt64,point_id UInt64,point_code String,platform String,channel String,pv UInt64,uv_state AggregateFunction(uniqCombined64,FixedString(64)),version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,hour,domain_category_id,module_category_id,scene_category_id,point_id,platform,channel)`,
-		`CREATE TABLE ` + exact + ` (hour DateTime('UTC'),project_id UInt64,domain_category_id UInt64,module_category_id UInt64,scene_category_id UInt64,point_id UInt64,point_code String,platform String,channel String,pv UInt64,uv_state AggregateFunction(uniqExact,FixedString(64)),version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,hour,domain_category_id,module_category_id,scene_category_id,point_id,platform,channel)`,
+		`CREATE TABLE ` + raw + ` (project_id UInt64,event_id String,domain_category_id UInt64,domain_category_code String,module_category_id UInt64,module_category_code String,scene_category_id UInt64,scene_category_code String,point_id UInt64,point_code String,platform String,channel String,visitor_hash FixedString(64),count_pv Bool,count_uv Bool,uv_mode String,statistic_at DateTime64(3,'UTC'),version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,event_id)`,
+		`CREATE TABLE ` + approx + ` (hour DateTime('UTC'),project_id UInt64,domain_category_id UInt64,domain_category_code String,module_category_id UInt64,module_category_code String,scene_category_id UInt64,scene_category_code String,point_id UInt64,point_code String,platform String,channel String,pv UInt64,uv_state AggregateFunction(uniqCombined64,FixedString(64)),version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,hour,domain_category_id,module_category_id,scene_category_id,point_id,platform,channel)`,
+		`CREATE TABLE ` + exact + ` (hour DateTime('UTC'),project_id UInt64,domain_category_id UInt64,domain_category_code String,module_category_id UInt64,module_category_code String,scene_category_id UInt64,scene_category_code String,point_id UInt64,point_code String,platform String,channel String,pv UInt64,uv_state AggregateFunction(uniqExact,FixedString(64)),version UInt64) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,hour,domain_category_id,module_category_id,scene_category_id,point_id,platform,channel)`,
 		`CREATE TABLE ` + generation + ` (project_id UInt64,hour DateTime('UTC'),generation UInt64,committed_at DateTime64(3,'UTC')) ENGINE=ReplacingMergeTree(generation) ORDER BY (project_id,hour)`,
 	}
 	for _, ddl := range ddls {
@@ -127,7 +136,7 @@ func TestStatisticsGenerationClickHouseIntegration(t *testing.T) {
 		}
 	})
 	hour := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
-	insert := `INSERT INTO ` + raw + ` VALUES (9,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+	insert := `INSERT INTO ` + raw + ` VALUES (9,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	visitorA := strings.Repeat("a", 64)
 	visitorB := strings.Repeat("b", 64)
 	for _, row := range []struct {
@@ -135,7 +144,7 @@ func TestStatisticsGenerationClickHouseIntegration(t *testing.T) {
 		visitor string
 		version uint64
 	}{{"evt-1", visitorA, 1}, {"evt-1", visitorA, 2}, {"evt-2", visitorB, 1}} {
-		_, err = db.ExecContext(ctx, insert, row.id, uint64(1), uint64(2), uint64(3), uint64(9), "view", "web", "organic", row.visitor, true, true, "EXACT", hour.Add(time.Minute), row.version)
+		_, err = db.ExecContext(ctx, insert, row.id, uint64(1), "mall", uint64(2), "product", uint64(3), "detail", uint64(9), "view", "web", "organic", row.visitor, true, true, "EXACT", hour.Add(time.Minute), row.version)
 		require.NoError(t, err)
 	}
 	store := newStatisticsStoreWithTables(db, raw, approx, exact, generation)
@@ -145,7 +154,7 @@ func TestStatisticsGenerationClickHouseIntegration(t *testing.T) {
 	require.EqualValues(t, 2, summary.PV)
 	require.EqualValues(t, 2, summary.UV)
 	// An uncommitted newer generation must remain invisible.
-	_, err = db.ExecContext(ctx, `INSERT INTO `+exact+` SELECT hour,project_id,domain_category_id,module_category_id,scene_category_id,point_id,point_code,platform,channel,pv,uv_state,99 FROM `+exact+` WHERE version=10`)
+	_, err = db.ExecContext(ctx, `INSERT INTO `+exact+` SELECT hour,project_id,domain_category_id,domain_category_code,module_category_id,module_category_code,scene_category_id,scene_category_code,point_id,point_code,platform,channel,pv,uv_state,99 FROM `+exact+` WHERE version=10`)
 	require.NoError(t, err)
 	summary, err = store.QuerySummary(ctx, ports.StatisticsFilter{ProjectID: 9, Start: hour, End: hour.Add(time.Hour), ExactUV: true})
 	require.NoError(t, err)

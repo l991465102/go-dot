@@ -73,11 +73,11 @@ func (s *StatisticsStore) refresh(ctx context.Context, projectID uint64, hour ti
 	hour = hour.UTC()
 	writeCtx := ch.Context(ctx, ch.WithSettings(statisticsRefreshSettings()))
 	deduplicatedEvents := fmt.Sprintf(deduplicatedEventsTemplate, s.rawTable)
-	base := `INSERT INTO ` + s.approximateTable + `
-SELECT ?, project_id, domain_category_id, module_category_id, scene_category_id, point_id, point_code, platform, channel,
+	base := `INSERT INTO ` + s.approximateTable + ` (hour,project_id,domain_category_id,domain_category_code,module_category_id,module_category_code,scene_category_id,scene_category_code,point_id,point_code,platform,channel,pv,uv_state,version)
+SELECT ?, project_id, domain_category_id, domain_category_code, module_category_id, module_category_code, scene_category_id, scene_category_code, point_id, point_code, platform, channel,
  sum(toUInt64(count_pv)) AS pv, uniqCombined64StateIf(visitor_hash, count_uv) AS uv_state, ? AS version
 FROM (` + deduplicatedEvents + `)
-GROUP BY project_id, domain_category_id, module_category_id, scene_category_id, point_id, point_code, platform, channel`
+GROUP BY project_id, domain_category_id, domain_category_code, module_category_id, module_category_code, scene_category_id, scene_category_code, point_id, point_code, platform, channel`
 	args := []any{hour, version, projectID, projectID, hour, hour.Add(time.Hour)}
 	if projectID != 0 {
 		args = []any{hour, version, projectID, hour, hour.Add(time.Hour)}
@@ -175,7 +175,7 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 		group = " GROUP BY period"
 		order = " ORDER BY period"
 	}
-	inner := `SELECT s.hour,s.project_id,s.domain_category_id,s.module_category_id,s.scene_category_id,s.point_id,s.point_code,s.platform,s.channel,s.version,any(s.pv) AS pv,any(s.uv_state) AS uv_state FROM ` + table + ` AS s INNER JOIN ` + s.generationTable + ` FINAL AS g ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation WHERE s.project_id=? AND s.hour>=? AND s.hour<?`
+	inner := `SELECT s.hour,s.project_id,s.domain_category_id,s.domain_category_code,s.module_category_id,s.module_category_code,s.scene_category_id,s.scene_category_code,s.point_id,s.point_code,s.platform,s.channel,s.version,any(s.pv) AS pv,any(s.uv_state) AS uv_state FROM ` + table + ` AS s INNER JOIN ` + s.generationTable + ` FINAL AS g ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation WHERE s.project_id=? AND s.hour>=? AND s.hour<?`
 	args = append(args, f.ProjectID, f.Start.UTC(), f.End.UTC())
 	for _, item := range []struct {
 		col   string
@@ -193,17 +193,17 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 			args = append(args, code)
 		}
 	}
-	for _, item := range []struct{ idColumn, codeColumn, value string }{
-		{"domain_category_id", "domain_category_code", f.DomainCategoryCode},
-		{"module_category_id", "module_category_code", f.ModuleCategoryCode},
-		{"scene_category_id", "scene_category_code", f.SceneCategoryCode},
+	for _, item := range []struct{ codeColumn, value string }{
+		{"domain_category_code", f.DomainCategoryCode},
+		{"module_category_code", f.ModuleCategoryCode},
+		{"scene_category_code", f.SceneCategoryCode},
 	} {
 		if item.value != "" {
-			inner += " AND s." + item.idColumn + " IN (SELECT " + item.idColumn + " FROM " + s.rawTable + " FINAL WHERE project_id=? AND " + item.codeColumn + "=?)"
-			args = append(args, f.ProjectID, item.value)
+			inner += " AND s." + item.codeColumn + "=?"
+			args = append(args, item.value)
 		}
 	}
-	inner += ` GROUP BY s.hour,s.project_id,s.domain_category_id,s.module_category_id,s.scene_category_id,s.point_id,s.point_code,s.platform,s.channel,s.version`
+	inner += ` GROUP BY s.hour,s.project_id,s.domain_category_id,s.domain_category_code,s.module_category_id,s.module_category_code,s.scene_category_id,s.scene_category_code,s.point_id,s.point_code,s.platform,s.channel,s.version`
 	q := `SELECT ` + period + ` sum(pv), ` + merge + ` FROM (` + inner + `)` + group + order
 	return s.db.QueryContext(ctx, q, args...)
 }

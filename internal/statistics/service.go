@@ -21,6 +21,9 @@ var (
 type Authorizer interface {
 	RequireRole(context.Context, uint64, uint64, ...project.Role) error
 }
+type ProjectTimezoneSource interface {
+	ProjectTimezone(context.Context, uint64, uint64) (string, error)
+}
 type RealtimeStore interface {
 	QueryRealtime(context.Context, ports.StatisticsFilter) (ports.Summary, error)
 }
@@ -144,7 +147,10 @@ func NewService(auth Authorizer, realtime RealtimeStore, history HistoryStore, p
 }
 
 func (s *Service) Realtime(ctx context.Context, actor uint64, q Query) (ports.Summary, error) {
-	f, err := s.filter(ctx, actor, q, false)
+	if len(uniqueNonempty(q.PointCodes)) == 0 {
+		return ports.Summary{}, fmt.Errorf("%w: realtime requires point_code to determine UV mode", ErrInvalidQuery)
+	}
+	f, err := s.filter(ctx, actor, q, 72*time.Hour)
 	if err != nil {
 		return ports.Summary{}, err
 	}
@@ -160,7 +166,7 @@ func (s *Service) Realtime(ctx context.Context, actor uint64, q Query) (ports.Su
 	return s.realtime.QueryRealtime(ctx, f)
 }
 func (s *Service) Summary(ctx context.Context, actor uint64, q Query) (ports.Summary, error) {
-	f, err := s.filter(ctx, actor, q, false)
+	f, err := s.filter(ctx, actor, q, 90*24*time.Hour)
 	if err != nil {
 		return ports.Summary{}, err
 	}
@@ -170,7 +176,7 @@ func (s *Service) Summary(ctx context.Context, actor uint64, q Query) (ports.Sum
 	return s.history.QuerySummary(ctx, f)
 }
 func (s *Service) Trend(ctx context.Context, actor uint64, q Query) ([]ports.TrendPoint, error) {
-	f, err := s.filter(ctx, actor, q, true)
+	f, err := s.filter(ctx, actor, q, 90*24*time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -180,14 +186,14 @@ func (s *Service) Trend(ctx context.Context, actor uint64, q Query) ([]ports.Tre
 	return s.history.QueryTrend(ctx, f)
 }
 
-func (s *Service) filter(ctx context.Context, actor uint64, q Query, trend bool) (ports.StatisticsFilter, error) {
-	if q.ProjectID == 0 || q.Start.IsZero() || !q.End.After(q.Start) || q.End.Sub(q.Start) > 90*24*time.Hour {
-		return ports.StatisticsFilter{}, fmt.Errorf("%w: project and a range no longer than 90 days are required", ErrInvalidQuery)
+func (s *Service) filter(ctx context.Context, actor uint64, q Query, maxRange time.Duration) (ports.StatisticsFilter, error) {
+	if q.ProjectID == 0 || q.Start.IsZero() || !q.End.After(q.Start) || q.End.Sub(q.Start) > maxRange {
+		return ports.StatisticsFilter{}, fmt.Errorf("%w: project and a range no longer than %s are required", ErrInvalidQuery, maxRange)
 	}
 	if q.End.After(s.now().UTC().Add(10 * time.Minute)) {
 		return ports.StatisticsFilter{}, fmt.Errorf("%w: end is in the future", ErrInvalidQuery)
 	}
-	if trend && q.Granularity == "" {
+	if q.Granularity == "" {
 		q.Granularity = "hour"
 	}
 	if q.Granularity != "" && q.Granularity != "hour" && q.Granularity != "day" {
@@ -202,7 +208,23 @@ func (s *Service) filter(ctx context.Context, actor uint64, q Query, trend bool)
 	if err := s.auth.RequireRole(ctx, actor, q.ProjectID, project.Admin, project.Viewer); err != nil {
 		return ports.StatisticsFilter{}, err
 	}
+	timezoneSource, ok := s.auth.(ProjectTimezoneSource)
+	if !ok {
+		return ports.StatisticsFilter{}, errors.New("trusted project timezone source unavailable")
+	}
+	storageTimezone, err := timezoneSource.ProjectTimezone(ctx, actor, q.ProjectID)
+	if err != nil {
+		return ports.StatisticsFilter{}, err
+	}
+	storageLocation, err := time.LoadLocation(storageTimezone)
+	if err != nil {
+		return ports.StatisticsFilter{}, errors.New("project timezone is invalid")
+	}
+	if !alignedBoundary(q.Start, q.Granularity, storageLocation) || !alignedBoundary(q.End, q.Granularity, storageLocation) {
+		return ports.StatisticsFilter{}, fmt.Errorf("%w: range must align to %s boundaries in project timezone", ErrInvalidQuery, q.Granularity)
+	}
 	f := ports.StatisticsFilter{ProjectID: q.ProjectID, Start: q.Start.UTC(), End: q.End.UTC(), Granularity: q.Granularity, Timezone: q.Timezone,
+		StorageTimezone:  storageTimezone,
 		DomainCategoryID: q.DomainCategoryID, ModuleCategoryID: q.ModuleCategoryID, SceneCategoryID: q.SceneCategoryID,
 		DomainCategoryCode: q.DomainCategoryCode, ModuleCategoryCode: q.ModuleCategoryCode, SceneCategoryCode: q.SceneCategoryCode,
 		PointCodes: uniqueNonempty(q.PointCodes), Platform: q.Platform, Channel: q.Channel}
@@ -231,6 +253,14 @@ func (s *Service) filter(ctx context.Context, actor uint64, q Query, trend bool)
 		f.PointID = f.PointIDs[0]
 	}
 	return f, nil
+}
+
+func alignedBoundary(value time.Time, granularity string, location *time.Location) bool {
+	local := value.In(location)
+	if local.Minute() != 0 || local.Second() != 0 || local.Nanosecond() != 0 {
+		return false
+	}
+	return granularity != "day" || local.Hour() == 0
 }
 
 func (s *Service) RecentEvents(ctx context.Context, actor uint64, q DiagnosticQuery) (EventPage, error) {

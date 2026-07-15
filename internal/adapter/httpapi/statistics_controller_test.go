@@ -92,6 +92,7 @@ func (a httpAuth) RequireRole(_ context.Context, _, projectID uint64, roles ...p
 	}
 	return nil
 }
+func (a httpAuth) ProjectTimezone(context.Context, uint64, uint64) (string, error) { return "UTC", nil }
 
 type httpHistory struct {
 	last    ports.StatisticsFilter

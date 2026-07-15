@@ -148,6 +148,24 @@ func TestListDeadLettersReturnsOnlyProjectMetadataWithoutPayload(t *testing.T) {
 	require.NotContains(t, fmt.Sprintf("%+v", page.Items[0]), "secret")
 }
 
+func TestListDeadLettersBoundsSparseScanAndContinuesFromLastScanned(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	queue := redisqueue.New(client, redisqueue.WithDeadStream("tracking:{queue}:dead"), redisqueue.WithDeadLetterScanLimit(3))
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: "tracking:{queue}:dead", Values: map[string]any{"batch_id": fmt.Sprintf("other-%d", i), "payload": `{"project_id":8}`, "deliveries": "1", "first_seen": "1000"}}).Err())
+	}
+	page, err := queue.ListDeadLetters(ctx, statistics.DeadLetterFilter{ProjectID: 7, Limit: 2})
+	require.NoError(t, err)
+	require.Empty(t, page.Items)
+	require.NotEmpty(t, page.NextCursor)
+	next, err := queue.ListDeadLetters(ctx, statistics.DeadLetterFilter{ProjectID: 7, Limit: 2, Cursor: page.NextCursor})
+	require.NoError(t, err)
+	require.Empty(t, next.Items)
+	require.Empty(t, next.NextCursor)
+}
+
 func TestRejectsPositiveSubMillisecondDurations(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)

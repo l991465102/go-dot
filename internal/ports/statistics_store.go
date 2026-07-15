@@ -23,6 +23,7 @@ type StatisticsFilter struct {
 	Channel            string
 	Granularity        string
 	Timezone           string
+	StorageTimezone    string
 	ExactUV            bool
 }
 

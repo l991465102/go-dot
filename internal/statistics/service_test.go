@@ -69,6 +69,30 @@ func TestStatisticsRejectsInvalidAndOversizedRanges(t *testing.T) {
 	}
 }
 
+func TestRealtimeUsesTrustedProjectTimezoneAndRejectsUnalignedOrExpiredRange(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	realtime := &fakeRealtime{}
+	svc := NewService(timezoneAuth{timezone: "Asia/Shanghai"}, realtime, &fakeHistory{}, fakePoints{"view": {PointID: 1, PointCode: "view", UVMode: tracking.Approximate}}, nil, nowFn(now))
+	_, err := svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: time.Date(2026, 7, 15, 10, 0, 0, 0, time.FixedZone("CST", 8*3600)), End: time.Date(2026, 7, 15, 11, 0, 0, 0, time.FixedZone("CST", 8*3600)), PointCodes: []string{"view"}, Timezone: "America/New_York"})
+	require.NoError(t, err)
+	require.Equal(t, "Asia/Shanghai", realtime.last.StorageTimezone)
+	require.Equal(t, "America/New_York", realtime.last.Timezone)
+	_, err = svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-90 * time.Minute), End: now.Add(-30 * time.Minute), PointCodes: []string{"view"}, Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInvalidQuery)
+	_, err = svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-73 * time.Hour), End: now, PointCodes: []string{"view"}, Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInvalidQuery)
+}
+
+func TestRealtimeRequiresPointModesAndRejectsMixedModes(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	points := fakePoints{"exact": {PointID: 1, PointCode: "exact", UVMode: tracking.Exact}, "approx": {PointID: 2, PointCode: "approx", UVMode: tracking.Approximate}}
+	svc := NewService(allowViewer{}, &fakeRealtime{}, &fakeHistory{}, points, nil, nowFn(now))
+	_, err := svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInvalidQuery)
+	_, err = svc.Realtime(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, Timezone: "UTC", PointCodes: []string{"exact", "approx"}})
+	require.ErrorIs(t, err, ErrInvalidQuery)
+}
+
 func TestStatisticsAllowsViewerAndDeniesCrossProject(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	auth := selectiveAuth{allowedProject: 9}
@@ -95,6 +119,16 @@ func TestDiagnosticsLimitRecentQueriesToThirtyDays(t *testing.T) {
 type allowViewer struct{}
 
 func (allowViewer) RequireRole(context.Context, uint64, uint64, ...project.Role) error { return nil }
+func (allowViewer) ProjectTimezone(context.Context, uint64, uint64) (string, error) {
+	return "UTC", nil
+}
+
+type timezoneAuth struct{ timezone string }
+
+func (a timezoneAuth) RequireRole(context.Context, uint64, uint64, ...project.Role) error { return nil }
+func (a timezoneAuth) ProjectTimezone(context.Context, uint64, uint64) (string, error) {
+	return a.timezone, nil
+}
 
 type selectiveAuth struct{ allowedProject uint64 }
 
@@ -104,14 +138,19 @@ func (a selectiveAuth) RequireRole(_ context.Context, _, projectID uint64, _ ...
 	}
 	return nil
 }
+func (a selectiveAuth) ProjectTimezone(context.Context, uint64, uint64) (string, error) {
+	return "UTC", nil
+}
 
 type fakeRealtime struct {
 	calls   int
 	summary ports.Summary
+	last    ports.StatisticsFilter
 }
 
 func (f *fakeRealtime) QueryRealtime(_ context.Context, in ports.StatisticsFilter) (ports.Summary, error) {
 	f.calls++
+	f.last = in
 	return f.summary, nil
 }
 

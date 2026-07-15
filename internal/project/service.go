@@ -86,6 +86,19 @@ func (s *Service) List(ctx context.Context, userID uint64) ([]Project, error) {
 	return s.repo.ListProjects(ctx, userID)
 }
 
+func (s *Service) ProjectTimezone(ctx context.Context, userID, projectID uint64) (string, error) {
+	projects, err := s.repo.ListProjects(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	for _, item := range projects {
+		if item.ID == projectID && item.Active {
+			return item.Timezone, nil
+		}
+	}
+	return "", ErrForbidden
+}
+
 func newSecret() (string, string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {

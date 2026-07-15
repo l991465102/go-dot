@@ -45,6 +45,16 @@ describe('PointWizard', () => {
     expect(trackingApi.publishPoint).toHaveBeenCalledWith(9, 7)
   })
 
+  it('does not publish stale edits until the current model is saved', async () => {
+    vi.mocked(trackingApi.updateDraft).mockResolvedValue(baseDraft)
+    const wrapper = mount(PointWizard, { props: { projectId: 9, categories: [scene], initialPoint: baseDraft, canMutate: true } })
+    await wrapper.get('[data-test=save-draft]').trigger('click')
+    await wrapper.get('input[placeholder="product_detail_view"]').setValue('product_detail_view_changed')
+    await wrapper.get('[data-test=publish]').trigger('click')
+    expect(wrapper.text()).toContain('请先保存当前修改')
+    expect(trackingApi.publishPoint).not.toHaveBeenCalled()
+  })
+
   it('renders a published point without edit actions for a viewer', async () => {
     vi.mocked(trackingApi.getPoint).mockResolvedValue({ ...baseDraft, definition_state: 'PUBLISHED' })
     const wrapper = mount(PointDetailView, { props: { projectId: 9, pointId: 7, canMutate: false } })

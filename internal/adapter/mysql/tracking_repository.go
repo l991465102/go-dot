@@ -1,11 +1,13 @@
 package mysql
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +28,18 @@ func (r *TrackingRepository) CreateCategory(ctx context.Context, c tracking.Cate
 		return created, err
 	}
 	defer rollbackOnError(tx, &err)
+	if c.ParentID != nil {
+		parent, e := findCategoryWithLock(ctx, tx, c.ProjectID, *c.ParentID, true)
+		if e != nil {
+			return created, e
+		}
+		validParent := (c.Level == tracking.Module && parent.Level == tracking.Domain) || (c.Level == tracking.Scene && parent.Level == tracking.Module)
+		if !parent.Active || !validParent {
+			return created, tracking.NewCodedError("CATEGORY_INVALID", "parent must be active and at the preceding level")
+		}
+	} else if c.Level != tracking.Domain {
+		return created, tracking.NewCodedError("CATEGORY_INVALID", "non-domain category requires a parent")
+	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO tracking_category(project_id,parent_id,code,name,level,description,sort_order,is_active,created_by) VALUES(?,?,?,?,?,?,?,?,?)`, c.ProjectID, c.ParentID, c.Code, c.Name, c.Level, nullable(c.Description), c.SortOrder, c.Active, c.CreatedBy)
 	if err != nil {
 		return created, translateConflict(err)
@@ -85,22 +99,52 @@ func (r *TrackingRepository) UpdateCategory(ctx context.Context, projectID, id, 
 		return updated, err
 	}
 	defer rollbackOnError(tx, &err)
-	before, err := findCategory(ctx, tx, projectID, id)
+	initial, err := findCategory(ctx, tx, projectID, id)
 	if err != nil {
 		return updated, err
 	}
-	if !in.Active && before.Active {
-		var count int
-		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracking_category WHERE project_id=? AND parent_id=? AND is_active=TRUE`, projectID, id).Scan(&count); err != nil {
+	if initial.ParentID != nil {
+		parent, e := findCategoryWithLock(ctx, tx, projectID, *initial.ParentID, true)
+		if e != nil {
+			return updated, e
+		}
+		if !initial.Active && in.Active && !parent.Active {
+			return updated, tracking.NewCodedError("CATEGORY_INVALID", "parent category is inactive")
+		}
+	}
+	before, err := findCategoryWithLock(ctx, tx, projectID, id, true)
+	if err != nil {
+		return updated, err
+	}
+	if before.Name == in.Name && before.Description == in.Description && before.SortOrder == in.SortOrder && before.Active == in.Active {
+		if err = tx.Commit(); err != nil {
 			return updated, err
 		}
-		if count > 0 {
+		return before, nil
+	}
+	if !in.Active && before.Active {
+		rows, e := tx.QueryContext(ctx, `SELECT id FROM tracking_category WHERE project_id=? AND parent_id=? AND is_active=TRUE FOR UPDATE`, projectID, id)
+		if e != nil {
+			return updated, e
+		}
+		hasChildren := rows.Next()
+		closeErr := rows.Close()
+		if closeErr != nil {
+			return updated, closeErr
+		}
+		if hasChildren {
 			return updated, tracking.NewCodedError("CATEGORY_IN_USE", "active child categories exist")
 		}
-		if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracking_point WHERE project_id=? AND category_id=? AND definition_state IN ('DRAFT','PUBLISHED')`, projectID, id).Scan(&count); err != nil {
-			return updated, err
+		rows, e = tx.QueryContext(ctx, `SELECT id FROM tracking_point WHERE project_id=? AND category_id=? AND definition_state IN ('DRAFT','PUBLISHED') FOR UPDATE`, projectID, id)
+		if e != nil {
+			return updated, e
 		}
-		if count > 0 {
+		hasPoints := rows.Next()
+		closeErr = rows.Close()
+		if closeErr != nil {
+			return updated, closeErr
+		}
+		if hasPoints {
 			return updated, tracking.NewCodedError("CATEGORY_IN_USE", "active points use this category")
 		}
 	}
@@ -165,6 +209,9 @@ func (r *TrackingRepository) resolveCategoryIDs(ctx context.Context, projectID u
 	return domainID, moduleID, sceneID, nil
 }
 func findCategory(ctx context.Context, q queryer, projectID, id uint64) (tracking.Category, error) {
+	return findCategoryWithLock(ctx, q, projectID, id, false)
+}
+func findCategoryWithLock(ctx context.Context, q queryer, projectID, id uint64, lock bool) (tracking.Category, error) {
 	var c tracking.Category
 	var parent sql.NullInt64
 	var description sql.NullString
@@ -173,6 +220,9 @@ func findCategory(ctx context.Context, q queryer, projectID, id uint64) (trackin
 	if projectID != 0 {
 		query += ` AND project_id=?`
 		args = append(args, projectID)
+	}
+	if lock {
+		query += ` FOR UPDATE`
 	}
 	err := q.QueryRowContext(ctx, query, args...).Scan(&c.ID, &c.ProjectID, &parent, &c.Code, &c.Name, &c.Level, &description, &c.SortOrder, &c.Active, &c.CreatedBy)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -195,6 +245,13 @@ func (r *TrackingRepository) CreateDraft(ctx context.Context, p tracking.Point) 
 		return created, err
 	}
 	defer rollbackOnError(tx, &err)
+	category, err := findCategoryWithLock(ctx, tx, p.ProjectID, p.CategoryID, true)
+	if err != nil {
+		return created, err
+	}
+	if !category.Active || category.Level != tracking.Scene {
+		return created, tracking.NewCodedError("CATEGORY_INVALID", "point requires an active same-project SCENE category")
+	}
 	platforms, _ := json.Marshal(nonNilStrings(p.SupportedPlatforms))
 	channels, _ := json.Marshal(nonNilStrings(p.SupportedChannels))
 	result, err := tx.ExecContext(ctx, insertPointSQL, p.ProjectID, p.CategoryID, p.Code, p.Name, nullable(p.Description), p.BehaviorType, tracking.Draft, p.DevelopmentState, nullable(p.TriggerPage), nullable(p.TriggerTiming), nullable(p.TriggerCountRule), nullable(p.AbnormalTriggerRule), p.CountPV, p.CountUV, p.UVMode, p.TimeBasis, platforms, channels, nullable(p.ProductOwner), nullable(p.DeveloperOwner), nullable(p.RequirementURL), p.CreatedBy, p.UpdatedBy)
@@ -230,7 +287,7 @@ func (r *TrackingRepository) FindPoint(ctx context.Context, id uint64) (tracking
 	if err != nil {
 		return p, err
 	}
-	p.CategoryPath, err = loadCategoryPath(ctx, r.db, p.Category)
+	p.CategoryPath, err = loadCategoryPath(ctx, r.db, p.Category, false)
 	return p, err
 }
 func (r *TrackingRepository) FindPointInProject(ctx context.Context, projectID, id uint64) (tracking.Point, error) {
@@ -238,7 +295,7 @@ func (r *TrackingRepository) FindPointInProject(ctx context.Context, projectID, 
 	if err != nil {
 		return p, err
 	}
-	p.CategoryPath, err = loadCategoryPath(ctx, r.db, p.Category)
+	p.CategoryPath, err = loadCategoryPath(ctx, r.db, p.Category, false)
 	return p, err
 }
 
@@ -251,8 +308,8 @@ func (r *TrackingRepository) ListPoints(ctx context.Context, projectID uint64, f
 		args = append(args, like, like)
 	}
 	if f.CategoryID != 0 {
-		where = append(where, `p.category_id=?`)
-		args = append(args, f.CategoryID)
+		where = append(where, `p.category_id IN (SELECT c.id FROM tracking_category c LEFT JOIN tracking_category parent ON c.parent_id=parent.id WHERE c.project_id=? AND (c.id=? OR c.parent_id=? OR parent.parent_id=?))`)
+		args = append(args, projectID, f.CategoryID, f.CategoryID, f.CategoryID)
 	}
 	if f.DefinitionState != "" {
 		where = append(where, `p.definition_state=?`)
@@ -313,7 +370,7 @@ func (r *TrackingRepository) ListPoints(ctx context.Context, projectID uint64, f
 		if err != nil {
 			return tracking.PointList{}, err
 		}
-		path, err := loadCategoryPath(ctx, r.db, item.Category)
+		path, err := loadCategoryPath(ctx, r.db, item.Category, false)
 		if err != nil {
 			return tracking.PointList{}, err
 		}
@@ -445,12 +502,42 @@ func (r *TrackingRepository) UpdateDraft(ctx context.Context, p tracking.Point) 
 		return updated, err
 	}
 	defer rollbackOnError(tx, &err)
+	observed, err := findPoint(ctx, tx, p.ID, false, p.ProjectID)
+	if err != nil {
+		return updated, err
+	}
+	categoryIDs := []uint64{observed.CategoryID}
+	if p.CategoryID != observed.CategoryID {
+		categoryIDs = append(categoryIDs, p.CategoryID)
+	}
+	sort.Slice(categoryIDs, func(i, j int) bool { return categoryIDs[i] < categoryIDs[j] })
+	lockedCategories := make(map[uint64]tracking.Category, len(categoryIDs))
+	for _, categoryID := range categoryIDs {
+		category, e := findCategoryWithLock(ctx, tx, p.ProjectID, categoryID, true)
+		if e != nil {
+			return updated, e
+		}
+		lockedCategories[categoryID] = category
+	}
 	beforePoint, err := findPoint(ctx, tx, p.ID, true, p.ProjectID)
 	if err != nil {
 		return updated, err
 	}
 	if beforePoint.State != tracking.Draft {
 		return updated, tracking.ErrImmutable
+	}
+	if beforePoint.CategoryID != observed.CategoryID {
+		return updated, tracking.ErrConflict
+	}
+	target := lockedCategories[p.CategoryID]
+	if !target.Active || target.Level != tracking.Scene || target.ProjectID != p.ProjectID {
+		return updated, tracking.NewCodedError("CATEGORY_INVALID", "point requires an active same-project SCENE category")
+	}
+	if draftEquivalent(beforePoint, p) {
+		if err = tx.Commit(); err != nil {
+			return updated, err
+		}
+		return beforePoint, nil
 	}
 	platforms, _ := json.Marshal(nonNilStrings(p.SupportedPlatforms))
 	channels, _ := json.Marshal(nonNilStrings(p.SupportedChannels))
@@ -474,6 +561,23 @@ func (r *TrackingRepository) UpdateDraft(ctx context.Context, p tracking.Point) 
 		return updated, err
 	}
 	return p, nil
+}
+
+func draftEquivalent(left, right tracking.Point) bool {
+	normalize := func(p tracking.Point) tracking.Point {
+		p.ID, p.ProjectID, p.CreatedBy, p.UpdatedBy = 0, 0, 0, 0
+		p.Category, p.CategoryPath, p.State, p.AuditAction = tracking.Category{}, nil, "", ""
+		p.PublishedVersion, p.DeprecationReason, p.ReplacementPointID = 0, "", nil
+		p.SupportedPlatforms = nonNilStrings(p.SupportedPlatforms)
+		p.SupportedChannels = nonNilStrings(p.SupportedChannels)
+		if p.Properties == nil {
+			p.Properties = []tracking.Property{}
+		}
+		return p
+	}
+	a, _ := json.Marshal(normalize(left))
+	b, _ := json.Marshal(normalize(right))
+	return bytes.Equal(a, b)
 }
 
 func (r *TrackingRepository) UpdateDevelopmentState(ctx context.Context, projectID, id, actorID uint64, state tracking.DevelopmentState) (updated tracking.Point, err error) {
@@ -560,7 +664,7 @@ func (r *TrackingRepository) Publish(ctx context.Context, projectID, id, actorID
 	if err = p.ValidateForPublication(); err != nil {
 		return snapshot, err
 	}
-	path, err := loadCategoryPath(ctx, tx, p.Category)
+	path, err := loadCategoryPath(ctx, tx, p.Category, true)
 	if err != nil {
 		return snapshot, err
 	}
@@ -692,13 +796,17 @@ func translateConflict(err error) error {
 	}
 	return err
 }
-func loadCategoryPath(ctx context.Context, q queryer, leaf tracking.Category) ([]tracking.CategoryRef, error) {
+func loadCategoryPath(ctx context.Context, q queryer, leaf tracking.Category, lock bool) ([]tracking.CategoryRef, error) {
 	path := []tracking.CategoryRef{{ID: leaf.ID, Code: leaf.Code, Name: leaf.Name, Level: leaf.Level}}
 	parent := leaf.ParentID
 	for parent != nil {
 		var c tracking.Category
 		var next sql.NullInt64
-		if err := q.QueryRowContext(ctx, `SELECT id,project_id,code,name,level,parent_id,is_active FROM tracking_category WHERE id=? FOR UPDATE`, *parent).Scan(&c.ID, &c.ProjectID, &c.Code, &c.Name, &c.Level, &next, &c.Active); err != nil {
+		query := `SELECT id,project_id,code,name,level,parent_id,is_active FROM tracking_category WHERE id=?`
+		if lock {
+			query += ` FOR UPDATE`
+		}
+		if err := q.QueryRowContext(ctx, query, *parent).Scan(&c.ID, &c.ProjectID, &c.Code, &c.Name, &c.Level, &next, &c.Active); err != nil {
 			return nil, err
 		}
 		if c.ProjectID != leaf.ProjectID {

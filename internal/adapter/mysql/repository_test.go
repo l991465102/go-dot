@@ -96,6 +96,68 @@ func TestTrackingRepositoryMissingCategoryCodeIsNotFound(t *testing.T) {
 	require.ErrorIs(t, err, tracking.ErrCategoryNotFound)
 }
 
+func TestTrackingCreateCategoryLocksActiveParentBeforeInsert(t *testing.T) {
+	parent := uint64(1)
+	script, db := openScriptedDB(t, categoryRow(1, 9, nil, "mall", "Mall", "DOMAIN", true))
+	script.execResults = []driver.Result{scriptResult{lastID: 2, affected: 1}, scriptResult{affected: 1}}
+	_, err := NewTrackingRepository(db).CreateCategory(context.Background(), tracking.Category{ProjectID: 9, ParentID: &parent, Code: "product", Name: "Product", Level: tracking.Module, Active: true, CreatedBy: 1})
+	require.NoError(t, err)
+	require.NotEmpty(t, script.queries)
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Equal(t, 1, script.commits)
+}
+
+func TestTrackingCategoryUnchangedUpdateIsIdempotentWithoutAudit(t *testing.T) {
+	script, db := openScriptedDB(t, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true))
+	updated, err := NewTrackingRepository(db).UpdateCategory(context.Background(), 9, 3, 1, tracking.UpdateCategory{Name: "Detail", SortOrder: 0, Active: true})
+	require.NoError(t, err)
+	require.Equal(t, "Detail", updated.Name)
+	require.Contains(t, strings.ToUpper(script.queries[len(script.queries)-1]), "FOR UPDATE")
+	require.Empty(t, script.execQueries)
+	require.Equal(t, 1, script.commits)
+}
+
+func TestTrackingCategoryEnableLocksAndRequiresActiveParent(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", false), categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", false), categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", false)}
+	_, err := NewTrackingRepository(db).UpdateCategory(context.Background(), 9, 3, 1, tracking.UpdateCategory{Name: "Detail", Active: true})
+	require.ErrorContains(t, err, "CATEGORY_INVALID")
+	require.Empty(t, script.execQueries)
+	require.Contains(t, strings.ToUpper(script.queries[1]), "FOR UPDATE")
+	for _, query := range script.queries[1:] {
+		require.Contains(t, strings.ToUpper(query), "FOR UPDATE")
+	}
+}
+
+func TestTrackingCategoryDisableLocksChildrenAndAttachedPoints(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true), categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), {}, {}}
+	script.execResults = []driver.Result{scriptResult{affected: 1}, scriptResult{affected: 1}}
+	_, err := NewTrackingRepository(db).UpdateCategory(context.Background(), 9, 3, 1, tracking.UpdateCategory{Name: "Detail", Active: false})
+	require.NoError(t, err)
+	require.Contains(t, strings.ToUpper(script.queries[3]), "FOR UPDATE")
+	require.Contains(t, strings.ToUpper(script.queries[4]), "FOR UPDATE")
+}
+
+func TestTrackingDraftCreationLocksActiveSceneBeforeInsert(t *testing.T) {
+	script, db := openScriptedDB(t, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true))
+	script.execResults = []driver.Result{scriptResult{lastID: 7, affected: 1}, scriptResult{affected: 1}}
+	p := tracking.Point{ProjectID: 9, CategoryID: 3, Code: "product_detail_view", Name: "Product detail", State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, CreatedBy: 1, UpdatedBy: 1}
+	_, err := NewTrackingRepository(db).CreateDraft(context.Background(), p)
+	require.NoError(t, err)
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+}
+
+func TestTrackingPointListCategoryFilterIncludesFixedDepthDescendants(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{{0}, {}}
+	result, err := NewTrackingRepository(db).ListPoints(context.Background(), 9, tracking.PointFilter{CategoryID: 1, Page: 1, PageSize: 20})
+	require.NoError(t, err)
+	require.Zero(t, result.Total)
+	require.Contains(t, script.queries[0], "c.parent_id=?")
+	require.Contains(t, script.queries[0], "parent.parent_id=?")
+}
+
 func TestAuthRepositorySuccessorInsertFailureRollsBackOldRevocation(t *testing.T) {
 	now := time.Now().UTC()
 	script, db := openScriptedDB(t, []driver.Value{uint64(7), "old-hash", now.Add(time.Hour), nil, "admin", "password-hash", "Admin", false, "ACTIVE", nil})
@@ -157,7 +219,7 @@ func TestTrackingPublishLocksDraftAndCommitsSnapshotStateAndAuditTogether(t *tes
 }
 
 func TestTrackingDraftCreationRollsBackWhenAuditInsertFails(t *testing.T) {
-	script, db := openScriptedDB(t, nil)
+	script, db := openScriptedDB(t, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true))
 	script.execErrors = []error{nil, errors.New("audit unavailable")}
 	script.execResults = []driver.Result{scriptResult{lastID: 7, affected: 1}}
 	p := tracking.Point{ProjectID: 9, CategoryID: 3, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, CreatedBy: 1, UpdatedBy: 1}
@@ -234,13 +296,15 @@ func TestTrackingPublicationRejectsCrossProjectCategoryUnderLock(t *testing.T) {
 
 func TestTrackingDraftUpdateLocksAndRollsBackAuditWithBeforeAfter(t *testing.T) {
 	script, db := openScriptedDB(t, nil)
-	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}}
+	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), trackingPointRow("DRAFT"), {}}
 	script.execErrors = []error{nil, nil, errors.New("audit unavailable")}
 	script.execResults = []driver.Result{scriptResult{affected: 1}, scriptResult{affected: 1}}
 	p := tracking.Point{ID: 7, ProjectID: 9, CategoryID: 3, Category: tracking.Category{ID: 3, ProjectID: 9, Level: tracking.Scene, Active: true}, Code: "product_detail_view", Name: "Renamed", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, UpdatedBy: 1}
 	_, err := NewTrackingRepository(db).UpdateDraft(context.Background(), p)
 	require.ErrorContains(t, err, "audit unavailable")
-	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.NotContains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Contains(t, strings.ToUpper(script.queries[2]), "FOR UPDATE")
+	require.Contains(t, strings.ToUpper(script.queries[3]), "FOR UPDATE")
 	require.Equal(t, 1, script.rollbacks)
 	require.Zero(t, script.commits)
 	var before, after map[string]any
@@ -264,7 +328,7 @@ func TestTrackingDevelopmentStateTransitionAuditsPublishedPoint(t *testing.T) {
 
 func TestTrackingDraftUpdateAllowsZeroChangedScalarRowsForPropertyEdit(t *testing.T) {
 	script, db := openScriptedDB(t, nil)
-	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}}
+	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), trackingPointRow("DRAFT"), {}}
 	script.execResults = []driver.Result{scriptResult{affected: 0}, scriptResult{affected: 1}, scriptResult{affected: 1}, scriptResult{affected: 1}}
 	p := tracking.Point{ID: 7, ProjectID: 9, CategoryID: 3, Category: tracking.Category{ID: 3, ProjectID: 9, Level: tracking.Scene, Active: true}, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, Properties: []tracking.Property{{Code: "product_id", Name: "Product ID", Type: tracking.String}}, UpdatedBy: 1}
 	_, err := NewTrackingRepository(db).UpdateDraft(context.Background(), p)
@@ -274,6 +338,19 @@ func TestTrackingDraftUpdateAllowsZeroChangedScalarRowsForPropertyEdit(t *testin
 	require.Contains(t, script.execQueries[2], "INSERT INTO tracking_point_property")
 	require.Contains(t, script.execQueries[3], "audit_log")
 	require.Equal(t, 1, script.commits)
+}
+
+func TestTrackingDraftUnchangedUpdateIsIdempotentWithoutAudit(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), trackingPointRow("DRAFT"), {}}
+	p := tracking.Point{ID: 7, ProjectID: 9, CategoryID: 3, Category: tracking.Category{ID: 3, ProjectID: 9, Level: tracking.Scene, Active: true}, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, CountPV: true, CountUV: true, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, SupportedChannels: []string{}, Properties: []tracking.Property{}, CreatedBy: 1, UpdatedBy: 1}
+	updated, err := NewTrackingRepository(db).UpdateDraft(context.Background(), p)
+	require.NoError(t, err)
+	require.Equal(t, "Product detail", updated.Name)
+	require.Empty(t, script.execQueries)
+	require.Equal(t, 1, script.commits)
+	require.Contains(t, strings.ToUpper(script.queries[2]), "FOR UPDATE")
+	require.Contains(t, strings.ToUpper(script.queries[3]), "FOR UPDATE")
 }
 
 func TestTrackingDevelopmentStateSameValueIsIdempotentWithoutAudit(t *testing.T) {
@@ -288,6 +365,16 @@ func TestTrackingDevelopmentStateSameValueIsIdempotentWithoutAudit(t *testing.T)
 
 func trackingPointRow(state string) []driver.Value {
 	return []driver.Value{uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "PAGE_VIEW", state, "PENDING", nil, nil, nil, nil, true, true, "APPROXIMATE", "CLIENT", []byte(`["web"]`), []byte(`[]`), nil, nil, nil, uint64(1), nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true, "detail", "Detail", uint64(2)}
+}
+
+func uint64Ptr(value uint64) *uint64 { return &value }
+
+func categoryRow(id, projectID uint64, parent *uint64, code, name, level string, active bool) []driver.Value {
+	var parentValue driver.Value
+	if parent != nil {
+		parentValue = *parent
+	}
+	return []driver.Value{id, projectID, parentValue, code, name, level, nil, 0, active, uint64(1)}
 }
 func trackingReplacementRow(state string) []driver.Value {
 	row := trackingPointRow(state)

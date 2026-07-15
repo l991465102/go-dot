@@ -2,6 +2,7 @@ package statistics
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,6 +31,15 @@ func TestAggregateRefreshesCurrentAndPreviousProjectLocalHours(t *testing.T) {
 	require.Greater(t, store.hours[1].Version, store.hours[0].Version)
 }
 
+func TestAggregateContinuesOtherHoursAndProjectsAndReturnsJoinedErrors(t *testing.T) {
+	store := &recordingStatisticsStore{fail: map[uint64]error{7: errors.New("project seven unavailable")}}
+	agg := NewAggregator(store, fakeProjects{{ID: 7, Timezone: "UTC"}, {ID: 8, Timezone: "UTC"}}, func() time.Time { return time.Date(2026, 7, 15, 1, 30, 0, 0, time.UTC) })
+	err := agg.RefreshCurrentAndPrevious(context.Background())
+	require.ErrorContains(t, err, "project seven unavailable")
+	require.Len(t, store.hours, 4)
+	require.Equal(t, uint64(8), store.hours[2].ProjectID)
+}
+
 type fakeProjects []ports.StatisticsProject
 
 func (f fakeProjects) ListStatisticsProjects(context.Context) ([]ports.StatisticsProject, error) {
@@ -41,12 +51,15 @@ type refreshedHour struct {
 	Start     time.Time
 	Version   uint64
 }
-type recordingStatisticsStore struct{ hours []refreshedHour }
+type recordingStatisticsStore struct {
+	hours []refreshedHour
+	fail  map[uint64]error
+}
 
 func (s *recordingStatisticsStore) RefreshHour(context.Context, time.Time, uint64) error { return nil }
 func (s *recordingStatisticsStore) RefreshProjectHour(_ context.Context, projectID uint64, hour time.Time, version uint64) error {
 	s.hours = append(s.hours, refreshedHour{projectID, hour, version})
-	return nil
+	return s.fail[projectID]
 }
 func (s *recordingStatisticsStore) QuerySummary(context.Context, ports.StatisticsFilter) (ports.Summary, error) {
 	return ports.Summary{}, nil

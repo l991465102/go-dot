@@ -79,7 +79,7 @@ func RunMessageQueueContract(t *testing.T, factory Factory) {
 		require.Zero(t, pending)
 	})
 
-	t.Run("stale reclaim increases delivery count", func(t *testing.T) {
+	t.Run("stale reclaim preserves durable envelope attempts", func(t *testing.T) {
 		fixture := resetFixture(t, factory)
 		ctx := context.Background()
 		stream := unique("contract:reclaim")
@@ -93,7 +93,7 @@ func RunMessageQueueContract(t *testing.T, factory Factory) {
 		require.NoError(t, err)
 		require.Len(t, reclaimed, 1)
 		require.Equal(t, messages[0].Payload, reclaimed[0].Payload)
-		require.GreaterOrEqual(t, reclaimed[0].Deliveries, 2)
+		require.Equal(t, messages[0].Deliveries, reclaimed[0].Deliveries)
 	})
 
 	t.Run("retry republishes with error and incremented deliveries", func(t *testing.T) {

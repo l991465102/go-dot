@@ -171,7 +171,7 @@ func (q *Queue) Consume(ctx context.Context, stream, group, consumer string, cou
 	if err != nil {
 		return nil, err
 	}
-	return q.pendingDeliveries(ctx, stream, group, messages)
+	return messages, nil
 }
 
 func (q *Queue) Ack(ctx context.Context, stream, group string, ids ...string) error {
@@ -276,7 +276,7 @@ func (q *Queue) ReclaimStale(ctx context.Context, stream, group, consumer string
 	if err != nil {
 		return nil, err
 	}
-	return q.pendingDeliveries(ctx, stream, group, decoded)
+	return decoded, nil
 }
 
 func (q *Queue) ensureGroup(ctx context.Context, stream, group string) error {

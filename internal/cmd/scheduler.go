@@ -56,6 +56,7 @@ func runScheduler(ctx context.Context) error {
 	monitor := redisqueue.NewQueueMonitor(redisClient, []string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup, cfg.Queue.DeadStream, redisqueue.NoopQueueSnapshotSink{})
 	host, _ := os.Hostname()
 	jobs := ingestion.SchedulerRuntimeJobs{Statistics: aggregate, Queue: queue, Observer: monitor, Keys: projectRepo}
-	scheduler := ingestion.NewScheduler(redisqueue.NewLeaseManager(redisClient), jobs, ingestion.SchedulerConfig{EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup, ReclaimConsumer: fmt.Sprintf("scheduler-%s-%d", host, os.Getpid()), AggregateEvery: cfg.Scheduler.AggregateEvery, ReclaimEvery: cfg.Scheduler.ReclaimEvery, MetricsEvery: cfg.Scheduler.MetricsEvery, ExpireKeysEvery: cfg.Scheduler.ExpireKeysEvery, ReclaimIdle: cfg.Scheduler.ReclaimIdle, LeaseTTL: cfg.Scheduler.LeaseTTL, BatchSize: cfg.Scheduler.BatchSize})
+	reporter := ingestion.ErrorReporterFunc(func(err error) { _, _ = fmt.Fprintf(os.Stderr, "scheduler job failed: %v\n", err) })
+	scheduler := ingestion.NewScheduler(redisqueue.NewLeaseManager(redisClient), jobs, ingestion.SchedulerConfig{EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup, ReclaimConsumer: fmt.Sprintf("scheduler-%s-%d", host, os.Getpid()), AggregateEvery: cfg.Scheduler.AggregateEvery, ReclaimEvery: cfg.Scheduler.ReclaimEvery, MetricsEvery: cfg.Scheduler.MetricsEvery, ExpireKeysEvery: cfg.Scheduler.ExpireKeysEvery, ReclaimIdle: cfg.Scheduler.ReclaimIdle, LeaseTTL: cfg.Scheduler.LeaseTTL, BatchSize: cfg.Scheduler.BatchSize, MaxDeliveries: cfg.Worker.MaxDeliveries, Reporter: reporter})
 	return scheduler.Run(ctx)
 }

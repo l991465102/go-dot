@@ -14,6 +14,20 @@ import (
 var releaseLeaseScript = redis.NewScript(`if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`)
 var renewLeaseScript = redis.NewScript(`if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end`)
 
+const acquireLeaseLua = `
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 end
+return 0`
+const completeLeaseLua = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+redis.call('PEXPIRE', KEYS[2], ARGV[2])
+redis.call('DEL', KEYS[1])
+return 1`
+
+var acquireLeaseScript = redis.NewScript(acquireLeaseLua)
+var completeLeaseScript = redis.NewScript(completeLeaseLua)
+
 type LeaseManager struct{ client redis.UniversalClient }
 
 func NewLeaseManager(client redis.UniversalClient) *LeaseManager {
@@ -28,22 +42,15 @@ func (m *LeaseManager) WithLease(ctx context.Context, key string, ttl time.Durat
 		return errors.New("lease key, positive ttl, and function are required")
 	}
 	doneKey := key + ":done"
-	completed, err := m.client.Exists(ctx, doneKey).Result()
-	if err != nil {
-		return fmt.Errorf("check Redis lease completion %q: %w", key, err)
-	}
-	if completed > 0 {
-		return nil
-	}
 	token, err := leaseToken()
 	if err != nil {
 		return err
 	}
-	acquired, err := m.client.SetNX(ctx, key, token, ttl).Result()
+	acquired, err := acquireLeaseScript.Run(ctx, m.client, []string{key, doneKey}, token, ttl.Milliseconds()).Int()
 	if err != nil {
 		return fmt.Errorf("acquire Redis lease %q: %w", key, err)
 	}
-	if !acquired {
+	if acquired == 0 {
 		return nil
 	}
 	jobCtx, cancel := context.WithCancel(ctx)
@@ -83,12 +90,16 @@ func (m *LeaseManager) WithLease(ctx context.Context, key string, ttl time.Durat
 	<-done
 	releaseCtx := context.WithoutCancel(ctx)
 	if jobErr == nil {
-		if err := m.client.Set(releaseCtx, doneKey, token, ttl).Err(); err != nil {
-			jobErr = fmt.Errorf("mark Redis lease %q complete: %w", key, err)
+		completed, e := completeLeaseScript.Run(releaseCtx, m.client, []string{key, doneKey}, token, ttl.Milliseconds()).Int()
+		if e != nil {
+			jobErr = fmt.Errorf("complete Redis lease %q: %w", key, e)
+		} else if completed == 0 {
+			jobErr = fmt.Errorf("complete Redis lease %q: ownership lost", key)
 		}
-	}
-	if _, e := releaseLeaseScript.Run(releaseCtx, m.client, []string{key}, token).Result(); e != nil && jobErr == nil {
-		jobErr = fmt.Errorf("release Redis lease %q: %w", key, e)
+	} else {
+		if _, e := releaseLeaseScript.Run(releaseCtx, m.client, []string{key}, token).Result(); e != nil && jobErr == nil {
+			jobErr = fmt.Errorf("release Redis lease %q: %w", key, e)
+		}
 	}
 	select {
 	case e := <-renewErr:

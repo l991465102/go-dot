@@ -230,6 +230,28 @@ func TestReclaimReturnsMalformedPendingEntry(t *testing.T) {
 	require.Contains(t, reclaimed[0].Malformed.Reason, "deliveries")
 }
 
+func TestReclaimPreservesDurableEnvelopeAttemptsInsteadOfXPendingCount(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	ctx := context.Background()
+	stream := "tracking:{queue}:events"
+	group := "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{"batch_id": "b", "payload": "{}", "deliveries": "2", "first_seen": time.Now().UnixMilli()}}).Result()
+	require.NoError(t, err)
+	_, err = client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: group, Consumer: "dead", Streams: []string{stream, ">"}, Count: 1}).Result()
+	require.NoError(t, err)
+	for range 3 {
+		_, _, err = client.XAutoClaim(ctx, &redis.XAutoClaimArgs{Stream: stream, Group: group, Consumer: "other", MinIdle: 0, Start: "0-0", Count: 1}).Result()
+		require.NoError(t, err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	messages, err := redisqueue.New(client).ReclaimStale(ctx, stream, group, "scheduler", time.Millisecond, 1)
+	require.NoError(t, err)
+	require.Len(t, messages, 1)
+	require.Equal(t, 2, messages[0].Deliveries)
+}
+
 func TestDelayedRetrySurvivesQueueRestartAndIncrementsDelivery(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	ctx := context.Background()

@@ -40,19 +40,24 @@ func (a *Aggregator) RefreshCurrentAndPrevious(ctx context.Context) error {
 		return fmt.Errorf("list statistics projects: %w", err)
 	}
 	now := a.now()
+	var refreshErrors []error
 	for _, project := range projects {
 		loc, err := time.LoadLocation(project.Timezone)
 		if err != nil {
-			return fmt.Errorf("load project %d timezone %q: %w", project.ID, project.Timezone, err)
+			refreshErrors = append(refreshErrors, fmt.Errorf("load project %d timezone %q: %w", project.ID, project.Timezone, err))
+			continue
 		}
 		current, _ := ProjectHourRange(now, loc)
 		for _, hour := range []time.Time{current, current.Add(-time.Hour)} {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if err := a.store.RefreshProjectHour(ctx, project.ID, hour, a.nextVersion()); err != nil {
-				return fmt.Errorf("refresh project %d hour %s: %w", project.ID, hour.Format(time.RFC3339), err)
+				refreshErrors = append(refreshErrors, fmt.Errorf("refresh project %d hour %s: %w", project.ID, hour.Format(time.RFC3339), err))
 			}
 		}
 	}
-	return nil
+	return errors.Join(refreshErrors...)
 }
 
 func (a *Aggregator) nextVersion() uint64 {

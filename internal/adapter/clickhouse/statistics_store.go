@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/lzw7758/go-dot/internal/ports"
 )
 
@@ -17,15 +18,15 @@ type StatisticsExecutor interface {
 }
 
 type StatisticsStore struct {
-	db                                     StatisticsExecutor
-	rawTable, approximateTable, exactTable string
+	db                                                      StatisticsExecutor
+	rawTable, approximateTable, exactTable, generationTable string
 }
 
 func NewStatisticsStore(db StatisticsExecutor) *StatisticsStore {
-	return newStatisticsStoreWithTables(db, "tracking_event", "business_stat_hourly", "business_stat_exact_hourly")
+	return newStatisticsStoreWithTables(db, "tracking_event", "business_stat_hourly", "business_stat_exact_hourly", "business_stat_hour_generation")
 }
-func newStatisticsStoreWithTables(db StatisticsExecutor, raw, approximate, exact string) *StatisticsStore {
-	return &StatisticsStore{db: db, rawTable: raw, approximateTable: approximate, exactTable: exact}
+func newStatisticsStoreWithTables(db StatisticsExecutor, raw, approximate, exact, generation string) *StatisticsStore {
+	return &StatisticsStore{db: db, rawTable: raw, approximateTable: approximate, exactTable: exact, generationTable: generation}
 }
 
 func (s *StatisticsStore) RefreshHour(ctx context.Context, hour time.Time, version uint64) error {
@@ -63,10 +64,11 @@ func (s *StatisticsStore) refresh(ctx context.Context, projectID uint64, hour ti
 	if hour.IsZero() || version == 0 {
 		return errors.New("hour and version are required")
 	}
-	if !identifierPattern.MatchString(s.rawTable) || !identifierPattern.MatchString(s.approximateTable) || !identifierPattern.MatchString(s.exactTable) {
+	if !identifierPattern.MatchString(s.rawTable) || !identifierPattern.MatchString(s.approximateTable) || !identifierPattern.MatchString(s.exactTable) || !identifierPattern.MatchString(s.generationTable) {
 		return errors.New("invalid ClickHouse statistics table name")
 	}
 	hour = hour.UTC()
+	writeCtx := ch.Context(ctx, ch.WithSettings(statisticsRefreshSettings()))
 	deduplicatedEvents := fmt.Sprintf(deduplicatedEventsTemplate, s.rawTable)
 	base := `INSERT INTO ` + s.approximateTable + `
 SELECT ?, project_id, domain_category_id, module_category_id, scene_category_id, point_id, point_code, platform, channel,
@@ -78,16 +80,29 @@ GROUP BY project_id, domain_category_id, module_category_id, scene_category_id, 
 		args = []any{hour, version, projectID, hour, hour.Add(time.Hour)}
 		base = bindRefreshQuery(base)
 	}
-	if _, err := s.db.ExecContext(ctx, base, args...); err != nil {
+	if _, err := s.db.ExecContext(writeCtx, base, args...); err != nil {
 		return fmt.Errorf("refresh approximate hourly statistics: %w", err)
 	}
 	exact := strings.Replace(base, s.approximateTable, s.exactTable, 1)
 	exact = strings.Replace(exact, "uniqCombined64StateIf", "uniqExactStateIf", 1)
 	exact = strings.Replace(exact, "GROUP BY project_id, domain_category_id", "WHERE uv_mode = 'EXACT' GROUP BY project_id, domain_category_id", 1)
-	if _, err := s.db.ExecContext(ctx, exact, args...); err != nil {
+	if _, err := s.db.ExecContext(writeCtx, exact, args...); err != nil {
 		return fmt.Errorf("refresh exact hourly statistics: %w", err)
 	}
+	markerQuery := `INSERT INTO ` + s.generationTable + ` (project_id,hour,generation,committed_at) VALUES (?,?,?,now64(3))`
+	markerArgs := []any{projectID, hour, version}
+	if projectID == 0 {
+		markerQuery = `INSERT INTO ` + s.generationTable + ` (project_id,hour,generation,committed_at) SELECT DISTINCT project_id,?,?,now64(3) FROM ` + s.rawTable + ` FINAL WHERE statistic_at>=? AND statistic_at<?`
+		markerArgs = []any{hour, version, hour, hour.Add(time.Hour)}
+	}
+	if _, err := s.db.ExecContext(writeCtx, markerQuery, markerArgs...); err != nil {
+		return fmt.Errorf("commit hourly statistics generation: %w", err)
+	}
 	return nil
+}
+
+func statisticsRefreshSettings() ch.Settings {
+	return ch.Settings{"async_insert": 0, "wait_for_async_insert": 1}
 }
 
 func bindRefreshQuery(query string) string {
@@ -157,7 +172,7 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 		group = " GROUP BY period"
 		order = " ORDER BY period"
 	}
-	q := `SELECT ` + period + ` sum(pv), ` + merge + ` FROM ` + table + ` FINAL WHERE project_id=? AND hour>=? AND hour<?`
+	inner := `SELECT s.hour,s.project_id,s.domain_category_id,s.module_category_id,s.scene_category_id,s.point_id,s.point_code,s.platform,s.channel,s.version,any(s.pv) AS pv,any(s.uv_state) AS uv_state FROM ` + table + ` AS s INNER JOIN ` + s.generationTable + ` FINAL AS g ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation WHERE s.project_id=? AND s.hour>=? AND s.hour<?`
 	args = append(args, f.ProjectID, f.Start.UTC(), f.End.UTC())
 	for _, item := range []struct {
 		col   string
@@ -165,9 +180,11 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 		set   bool
 	}{{"domain_category_id", f.DomainCategoryID, f.DomainCategoryID != 0}, {"module_category_id", f.ModuleCategoryID, f.ModuleCategoryID != 0}, {"scene_category_id", f.SceneCategoryID, f.SceneCategoryID != 0}, {"point_id", f.PointID, f.PointID != 0}, {"point_code", f.PointCode, f.PointCode != ""}, {"platform", f.Platform, f.Platform != ""}, {"channel", f.Channel, f.Channel != ""}} {
 		if item.set {
-			q += " AND " + item.col + "=?"
+			inner += " AND s." + item.col + "=?"
 			args = append(args, item.value)
 		}
 	}
-	return s.db.QueryContext(ctx, q+group+order, args...)
+	inner += ` GROUP BY s.hour,s.project_id,s.domain_category_id,s.module_category_id,s.scene_category_id,s.point_id,s.point_code,s.platform,s.channel,s.version`
+	q := `SELECT ` + period + ` sum(pv), ` + merge + ` FROM (` + inner + `)` + group + order
+	return s.db.QueryContext(ctx, q, args...)
 }

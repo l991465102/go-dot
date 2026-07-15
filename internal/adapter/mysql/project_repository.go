@@ -108,7 +108,7 @@ func (r *ProjectRepository) RotateWriteKey(ctx context.Context, projectID uint64
 	return tx.Commit()
 }
 func (r *ProjectRepository) ListProjects(ctx context.Context, userID uint64) ([]project.Project, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT p.id,p.code,p.name,p.allowed_origins,p.timezone,p.is_active,p.created_by FROM project p JOIN project_member m ON m.project_id=p.id WHERE m.user_id=? AND m.is_active=TRUE ORDER BY p.id`, userID)
+	rows, err := r.db.QueryContext(ctx, `SELECT p.id,p.code,p.name,p.allowed_origins,p.timezone,p.is_active,p.created_by,m.role FROM project p JOIN project_member m ON m.project_id=p.id WHERE m.user_id=? AND m.is_active=TRUE ORDER BY p.id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +117,7 @@ func (r *ProjectRepository) ListProjects(ctx context.Context, userID uint64) ([]
 	for rows.Next() {
 		var p project.Project
 		var origins []byte
-		if err := rows.Scan(&p.ID, &p.Code, &p.Name, &origins, &p.Timezone, &p.Active, &p.CreatedBy); err != nil {
+		if err := rows.Scan(&p.ID, &p.Code, &p.Name, &origins, &p.Timezone, &p.Active, &p.CreatedBy, &p.Role); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(origins, &p.AllowedOrigins); err != nil {

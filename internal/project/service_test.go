@@ -111,7 +111,9 @@ func (r *projectMemoryRepository) ListProjects(_ context.Context, userID uint64)
 	var out []project.Project
 	for key := range r.members {
 		if key[0] == userID {
-			out = append(out, r.projects[key[1]])
+			p := r.projects[key[1]]
+			p.Role = r.members[key].Role
+			out = append(out, p)
 		}
 	}
 	return out, nil

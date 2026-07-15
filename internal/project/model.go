@@ -31,6 +31,7 @@ type Project struct {
 	VisitorSalt               []byte     `json:"-"`
 	Active                    bool       `json:"is_active"`
 	CreatedBy                 uint64     `json:"created_by"`
+	Role                      Role       `json:"role,omitempty"`
 }
 
 type Member struct {

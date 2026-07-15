@@ -63,6 +63,7 @@ func (s *Service) Create(ctx context.Context, actorID uint64, in CreateInput) (C
 	if err != nil {
 		return Creation{}, err
 	}
+	p.Role = Admin
 	return Creation{Project: p, WriteKey: key}, nil
 }
 

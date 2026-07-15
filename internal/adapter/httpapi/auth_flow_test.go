@@ -60,6 +60,27 @@ func TestViewerWriteRequestReturnsForbidden(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, response.Code)
 }
 
+func TestProjectListReturnsAuthenticatedMembershipRoleAndOnlyOwnedProjects(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "viewer", "initial"))
+	viewer := authRepo.byName("viewer")
+	require.NoError(t, authSvc.ChangePassword(context.Background(), viewer.ID, "initial", "changed"))
+	session, err := authSvc.Login(context.Background(), "viewer", "changed")
+	require.NoError(t, err)
+	repo := newProjectRepo()
+	repo.projects[9] = project.Project{ID: 9, Code: "visible", Name: "Visible", Active: true}
+	repo.projects[10] = project.Project{ID: 10, Code: "foreign", Name: "Foreign", Active: true}
+	repo.members[[2]uint64{viewer.ID, 9}] = project.Member{UserID: viewer.ID, ProjectID: 9, Role: project.Viewer, Active: true}
+	repo.members[[2]uint64{999, 10}] = project.Member{UserID: 999, ProjectID: 10, Role: project.Admin, Active: true}
+	handler := httpapi.NewHandler(authSvc, project.NewService(repo), false)
+
+	response := performJSON(t, handler, http.MethodGet, "/api/v1/projects", nil, session.AccessToken)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	require.JSONEq(t, `{"projects":[{"id":9,"code":"visible","name":"Visible","allowed_origins":null,"timezone":"","is_active":true,"created_by":0,"role":"VIEWER"}]}`, response.Body.String())
+}
+
 func TestLoginInfrastructureFailureReturnsGeneric500(t *testing.T) {
 	authRepo := newAuthRepo()
 	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
@@ -380,7 +401,9 @@ func (r *testProjectRepo) ListProjects(_ context.Context, u uint64) ([]project.P
 	var out []project.Project
 	for k := range r.members {
 		if k[0] == u {
-			out = append(out, r.projects[k[1]])
+			p := r.projects[k[1]]
+			p.Role = r.members[k].Role
+			out = append(out, p)
 		}
 	}
 	return out, nil

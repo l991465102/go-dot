@@ -35,6 +35,9 @@ type StoredEvent struct {
 	StatisticAt        time.Time
 	ProjectTimezone    string
 	TimeCorrected      bool
+	CountPV            bool
+	CountUV            bool
+	UVMode             string
 	Properties         map[string]any
 	Version            uint64
 }

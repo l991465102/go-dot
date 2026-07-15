@@ -20,6 +20,7 @@ type Config struct {
 	Tracking   TrackingConfig
 	Queue      QueueConfig
 	Worker     WorkerConfig
+	Scheduler  SchedulerConfig
 }
 
 type HTTPConfig struct {
@@ -66,6 +67,10 @@ type WorkerConfig struct {
 	RetryBase     time.Duration
 	RetryMax      time.Duration
 }
+type SchedulerConfig struct {
+	AggregateEvery, ReclaimEvery, MetricsEvery, ExpireKeysEvery, ReclaimIdle, LeaseTTL time.Duration
+	BatchSize                                                                          int
+}
 
 func Load(ctx context.Context) (Config, error) {
 	cfg := Config{
@@ -87,7 +92,8 @@ func Load(ctx context.Context) (Config, error) {
 			ConsumerGroup:   envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
 			PublishDedupTTL: 72 * time.Hour,
 		},
-		Worker: WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second, RetryBase: time.Second, RetryMax: time.Minute},
+		Worker:    WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second, RetryBase: time.Second, RetryMax: time.Minute},
+		Scheduler: SchedulerConfig{AggregateEvery: time.Minute, ReclaimEvery: 15 * time.Second, MetricsEvery: time.Minute, ExpireKeysEvery: time.Hour, ReclaimIdle: time.Minute, LeaseTTL: 2 * time.Minute, BatchSize: 100},
 	}
 	if raw := os.Getenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL"); raw != "" {
 		ttl, err := time.ParseDuration(raw)
@@ -112,6 +118,17 @@ func Load(ctx context.Context) (Config, error) {
 		return Config{}, err
 	}
 	if err := loadPositiveDuration("GO_DOT_WORKER_RETRY_MAX", &cfg.Worker.RetryMax); err != nil {
+		return Config{}, err
+	}
+	for _, item := range []struct {
+		name   string
+		target *time.Duration
+	}{{"GO_DOT_SCHEDULER_AGGREGATE_EVERY", &cfg.Scheduler.AggregateEvery}, {"GO_DOT_SCHEDULER_RECLAIM_EVERY", &cfg.Scheduler.ReclaimEvery}, {"GO_DOT_SCHEDULER_METRICS_EVERY", &cfg.Scheduler.MetricsEvery}, {"GO_DOT_SCHEDULER_EXPIRE_KEYS_EVERY", &cfg.Scheduler.ExpireKeysEvery}, {"GO_DOT_SCHEDULER_RECLAIM_IDLE", &cfg.Scheduler.ReclaimIdle}, {"GO_DOT_SCHEDULER_LEASE_TTL", &cfg.Scheduler.LeaseTTL}} {
+		if err := loadPositiveDuration(item.name, item.target); err != nil {
+			return Config{}, err
+		}
+	}
+	if err := loadPositiveInt("GO_DOT_SCHEDULER_BATCH_SIZE", &cfg.Scheduler.BatchSize); err != nil {
 		return Config{}, err
 	}
 	if cfg.Worker.RetryBase < 100*time.Millisecond || cfg.Worker.RetryBase > time.Hour {

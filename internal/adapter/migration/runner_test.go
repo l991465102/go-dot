@@ -60,7 +60,7 @@ func TestRunRetriesAfterPartiallyAppliedDDL(t *testing.T) {
 		wantNames []string
 	}{
 		{name: "mysql", dialect: MySQL, directory: "mysql", wantNames: []string{"0001_metadata.sql"}},
-		{name: "clickhouse", dialect: ClickHouse, directory: "clickhouse", wantNames: []string{"0001_events.sql", "0002_hourly_stats.sql", "0003_non_replicated_deduplication.sql"}},
+		{name: "clickhouse", dialect: ClickHouse, directory: "clickhouse", wantNames: []string{"0001_events.sql", "0002_hourly_stats.sql", "0003_non_replicated_deduplication.sql", "0004_event_statistics_contract.sql"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

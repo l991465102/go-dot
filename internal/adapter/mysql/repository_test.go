@@ -49,6 +49,18 @@ func TestProjectRepositoryRejectsUnknownOrExpiredWriteKey(t *testing.T) {
 	require.ErrorIs(t, err, project.ErrProjectNotFound)
 }
 
+func TestProjectRepositoryExpiresPreviousWriteKeysTransactionally(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.execResults = []driver.Result{scriptResult{affected: 2}}
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	affected, err := NewProjectRepository(db).ExpirePreviousWriteKeys(context.Background(), now)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, affected)
+	require.Len(t, script.execQueries, 1)
+	require.Contains(t, script.execQueries[0], "previous_write_key_hash=NULL")
+	require.Equal(t, 1, script.commits)
+}
+
 func TestTrackingRepositoryLoadsOnlyPublishedImmutableSnapshot(t *testing.T) {
 	snapshot := tracking.Snapshot{ProjectID: 9, PointID: 7, PointCode: "product_detail_view", Version: 1}
 	raw, err := json.Marshal(snapshot)

@@ -139,7 +139,8 @@ func (w *Worker) handleValid(ctx context.Context, msg ports.Message) error {
 			VisitorHash: visitorHash, Platform: event.Platform, Channel: event.Channel, AppVersion: event.AppVersion,
 			SessionHash: opaqueSession(w.cfg.VisitorMasterKey, event.ProjectID, event.SessionID), ClientEventAt: event.ClientTime,
 			ReceivedAt: event.ReceivedAt, StatisticAt: event.StatTime, ProjectTimezone: event.ProjectTimezone,
-			TimeCorrected: event.TimeCorrected, Properties: event.Properties, Version: uint64(event.ReceivedAt.UnixMilli()),
+			TimeCorrected: event.TimeCorrected, CountPV: event.CountPV, CountUV: event.CountUV, UVMode: string(event.UVMode),
+			Properties: event.Properties, Version: uint64(event.ReceivedAt.UnixMilli()),
 		})
 		counted = append(counted, ports.CountEvent{EventID: event.EventID, ProjectID: event.ProjectID, PointID: event.PointID,
 			Platform: event.Platform, Channel: event.Channel, StatTime: event.StatTime, ProjectTimezone: event.ProjectTimezone,
@@ -281,71 +282,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 	}
 	streams := []string{w.cfg.EventStream, w.cfg.InvalidStream}
-	promote := func() error {
-		for _, stream := range streams {
-			if _, err := w.queue.PromoteDue(ctx, stream, workerReadCount); err != nil {
-				return fmt.Errorf("promote due retries for %q: %w", stream, err)
-			}
-		}
-		return nil
-	}
-	reclaim := func() error {
-		for _, stream := range streams {
-			messages, err := w.queue.ReclaimStale(ctx, stream, w.cfg.Group, w.cfg.Consumer, w.cfg.ReclaimIdle, workerReadCount)
-			if err != nil {
-				return fmt.Errorf("reclaim stale messages from %q: %w", stream, err)
-			}
-			for _, msg := range messages {
-				if !launch(msg) {
-					return ctx.Err()
-				}
-			}
-		}
-		return nil
-	}
-	if err := promote(); err != nil {
-		if ctx.Err() != nil {
-			drain()
-			return nil
-		}
-		return err
-	}
-	if err := reclaim(); err != nil {
-		if ctx.Err() != nil {
-			drain()
-			return nil
-		}
-		drain()
-		return err
-	}
-	reclaimEvery := w.cfg.ReclaimIdle / 2
-	if reclaimEvery <= 0 {
-		reclaimEvery = time.Nanosecond
-	}
-	if reclaimEvery > 30*time.Second {
-		reclaimEvery = 30 * time.Second
-	}
-	nextReclaim := time.Now().Add(reclaimEvery)
 	for {
-		if err := promote(); err != nil {
-			if ctx.Err() != nil {
-				drain()
-				return nil
-			}
-			drain()
-			return err
-		}
-		if !time.Now().Before(nextReclaim) {
-			if err := reclaim(); err != nil {
-				if ctx.Err() != nil {
-					drain()
-					return nil
-				}
-				drain()
-				return err
-			}
-			nextReclaim = time.Now().Add(reclaimEvery)
-		}
 		for _, stream := range streams {
 			if ctx.Err() != nil {
 				drain()

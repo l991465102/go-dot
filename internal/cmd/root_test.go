@@ -32,3 +32,12 @@ func TestRunDispatchesWorkerCommand(t *testing.T) {
 	require.NoError(t, Run(context.Background(), []string{"worker"}))
 	require.True(t, called)
 }
+
+func TestRunDispatchesSchedulerCommand(t *testing.T) {
+	original := schedulerCommand
+	t.Cleanup(func() { schedulerCommand = original })
+	called := false
+	schedulerCommand = func(context.Context) error { called = true; return nil }
+	require.NoError(t, Run(context.Background(), []string{"scheduler"}))
+	require.True(t, called)
+}

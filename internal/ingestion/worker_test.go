@@ -136,7 +136,7 @@ func TestWorkerStoresInvalidStreamThenAcks(t *testing.T) {
 	require.Equal(t, 1, queue.acks)
 }
 
-func TestWorkerRunUsesBoundedReadAndReclaimsThenStopsOnCancellation(t *testing.T) {
+func TestWorkerRunUsesBoundedReadAndLeavesMaintenanceToScheduler(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	queue := &workerQueue{consumeFn: func(_ context.Context, stream, group, consumer string, count int, block time.Duration) ([]ports.Message, error) {
 		require.Equal(t, 16, count)
@@ -148,10 +148,10 @@ func TestWorkerRunUsesBoundedReadAndReclaimsThenStopsOnCancellation(t *testing.T
 	worker.cfg.ReclaimIdle = time.Millisecond
 
 	require.NoError(t, worker.Run(ctx))
-	require.NotZero(t, queue.reclaims)
+	require.Zero(t, queue.reclaims)
 }
 
-func TestWorkerRunPeriodicallyReclaimsMessagesThatBecomeStale(t *testing.T) {
+func TestWorkerRunNeverDuplicatesSchedulerReclaimOwnership(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	consumes := 0
 	queue := &workerQueue{consumeFn: func(_ context.Context, _, _, _ string, _ int, _ time.Duration) ([]ports.Message, error) {
@@ -165,7 +165,7 @@ func TestWorkerRunPeriodicallyReclaimsMessagesThatBecomeStale(t *testing.T) {
 	worker.cfg.ReclaimIdle = time.Nanosecond
 
 	require.NoError(t, worker.Run(ctx))
-	require.GreaterOrEqual(t, queue.reclaims, 4, "pending recovery must continue after startup")
+	require.Zero(t, queue.reclaims, "Scheduler exclusively owns pending recovery")
 }
 
 func TestWorkerRunPropagatesQueueFailure(t *testing.T) {
@@ -219,10 +219,14 @@ func TestWorkerRunNeverLaunchesMessagesAfterCancellation(t *testing.T) {
 func TestWorkerRunDLQsPoisonAndContinuesValidSibling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	poison := ports.Message{ID: "bad-1", Stream: EventStream, Deliveries: 1, Malformed: &ports.MalformedMessage{Reason: "payload required", RawEnvelope: []byte(`{"batch_id":"bad"}`)}}
+	delivered := false
 	queue := &workerQueue{
-		reclaimMessages:     []ports.Message{poison, validWorkerMessage()},
 		cancelAfterOutcomes: cancel,
-		consumeFn: func(ctx context.Context, _, _, _ string, _ int, _ time.Duration) ([]ports.Message, error) {
+		consumeFn: func(ctx context.Context, stream, _, _ string, _ int, _ time.Duration) ([]ports.Message, error) {
+			if stream == EventStream && !delivered {
+				delivered = true
+				return []ports.Message{poison, validWorkerMessage()}, nil
+			}
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},

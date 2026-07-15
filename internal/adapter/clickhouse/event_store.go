@@ -41,8 +41,8 @@ func (s *EventStore) SaveValid(ctx context.Context, token string, events []ports
 	if err := validateStore(s, token); err != nil {
 		return err
 	}
-	const columns = `(event_id,batch_id,project_id,point_id,point_code,point_version,domain_category_id,domain_category_code,module_category_id,module_category_code,scene_category_id,scene_category_code,visitor_hash,platform,channel,app_version,session_hash,client_event_at,received_at,statistic_at,statistic_date,time_corrected,properties_json,version)`
-	args := make([]any, 0, len(events)*24)
+	const columns = `(event_id,batch_id,project_id,point_id,point_code,point_version,domain_category_id,domain_category_code,module_category_id,module_category_code,scene_category_id,scene_category_code,visitor_hash,platform,channel,app_version,session_hash,client_event_at,received_at,statistic_at,statistic_date,time_corrected,count_pv,count_uv,uv_mode,properties_json,version)`
+	args := make([]any, 0, len(events)*27)
 	rows := make([]string, 0, len(events))
 	for i, event := range events {
 		properties, err := canonicalJSON(event.Properties)
@@ -57,14 +57,14 @@ func (s *EventStore) SaveValid(ctx context.Context, token string, events []ports
 		if version == 0 {
 			version = timestampVersion(event.ReceivedAt)
 		}
-		rows = append(rows, placeholders(24))
+		rows = append(rows, placeholders(27))
 		args = append(args,
 			event.EventID, token, event.ProjectID, event.PointID, event.PointCode, event.PointVersion,
 			event.DomainCategoryID, event.DomainCategoryCode, event.ModuleCategoryID, event.ModuleCategoryCode,
 			event.SceneCategoryID, event.SceneCategoryCode, fmt.Sprintf("%064x", event.VisitorHash),
 			event.Platform, event.Channel, event.AppVersion, event.SessionHash,
 			event.ClientEventAt.UTC(), event.ReceivedAt.UTC(), event.StatisticAt.UTC(), statisticDate,
-			event.TimeCorrected, properties, version,
+			event.TimeCorrected, event.CountPV, event.CountUV, event.UVMode, properties, version,
 		)
 	}
 	query := `INSERT INTO ` + s.validTable + ` ` + columns + ` VALUES ` + strings.Join(rows, ",")

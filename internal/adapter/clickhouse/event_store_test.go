@@ -24,7 +24,8 @@ func TestSaveValidUsesReliableDeduplicatedInsertAndCanonicalJSON(t *testing.T) {
 	require.NoError(t, store.SaveValid(context.Background(), "batch-1", []ports.StoredEvent{event}))
 	require.Len(t, db.calls, 1)
 	require.Contains(t, db.calls[0].query, "INSERT INTO tracking_event")
-	require.Equal(t, `{"a":{"x":1,"y":2},"z":1}`, db.calls[0].args[22])
+	require.Contains(t, db.calls[0].query, "count_pv,count_uv,uv_mode")
+	require.Equal(t, `{"a":{"x":1,"y":2},"z":1}`, db.calls[0].args[25])
 	settings := insertSettings("batch-1")
 	require.EqualValues(t, 1, settings["async_insert"])
 	require.EqualValues(t, 1, settings["wait_for_async_insert"])
@@ -99,7 +100,7 @@ event_id String,batch_id String,project_id UInt64,point_id UInt64,point_code Str
 domain_category_id UInt64,domain_category_code String,module_category_id UInt64,module_category_code String,
 scene_category_id UInt64,scene_category_code String,visitor_hash FixedString(64),platform String,channel String,
 app_version String,session_hash String,client_event_at DateTime64(3,'UTC'),received_at DateTime64(3,'UTC'),
-statistic_at DateTime64(3,'UTC'),statistic_date Date,time_corrected Bool,properties_json String,version UInt64
+statistic_at DateTime64(3,'UTC'),statistic_date Date,time_corrected Bool,count_pv Bool,count_uv Bool,uv_mode String,properties_json String,version UInt64
 )`
 	_, err = db.ExecContext(ctx, `CREATE TABLE `+dedupTable+` `+validColumns+`
 ENGINE=MergeTree ORDER BY (project_id,event_id)
@@ -148,7 +149,8 @@ func validEvent() ports.StoredEvent {
 	return ports.StoredEvent{EventID: "evt-1", ProjectID: 7, PointID: 9, PointCode: "view", PointVersion: 1,
 		DomainCategoryID: 1, DomainCategoryCode: "mall", ModuleCategoryID: 2, ModuleCategoryCode: "product", SceneCategoryID: 3, SceneCategoryCode: "detail",
 		VisitorHash: 42, Platform: "web", Channel: "organic", AppVersion: "1.0", SessionHash: "s", ClientEventAt: time.Unix(1, 0).UTC(),
-		ReceivedAt: time.Unix(2, 0).UTC(), StatisticAt: time.Unix(1, 0).UTC(), TimeCorrected: false, Properties: map[string]any{"a": 1}, Version: 1}
+		ReceivedAt: time.Unix(2, 0).UTC(), StatisticAt: time.Unix(1, 0).UTC(), TimeCorrected: false,
+		CountPV: true, CountUV: true, UVMode: "APPROXIMATE", Properties: map[string]any{"a": 1}, Version: 1}
 }
 
 type execCall struct {

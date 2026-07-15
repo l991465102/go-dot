@@ -37,6 +37,11 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 	require.Equal(t, 30*time.Second, cfg.Worker.DrainTimeout)
 	require.Equal(t, time.Second, cfg.Worker.RetryBase)
 	require.Equal(t, time.Minute, cfg.Worker.RetryMax)
+	require.Equal(t, time.Minute, cfg.Scheduler.AggregateEvery)
+	require.Equal(t, 15*time.Second, cfg.Scheduler.ReclaimEvery)
+	require.Equal(t, time.Minute, cfg.Scheduler.ReclaimIdle)
+	require.Equal(t, 2*time.Minute, cfg.Scheduler.LeaseTTL)
+	require.Equal(t, 100, cfg.Scheduler.BatchSize)
 }
 
 func TestLoadRejectsQueueStreamsWithoutOneCommonRedisHashTag(t *testing.T) {

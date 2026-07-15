@@ -127,6 +127,41 @@ func (r *ProjectRepository) ListProjects(ctx context.Context, userID uint64) ([]
 	}
 	return out, rows.Err()
 }
+func (r *ProjectRepository) ListStatisticsProjects(ctx context.Context) ([]ports.StatisticsProject, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id,timezone FROM project WHERE is_active=TRUE ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ports.StatisticsProject
+	for rows.Next() {
+		var p ports.StatisticsProject
+		if err := rows.Scan(&p.ID, &p.Timezone); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+func (r *ProjectRepository) ExpirePreviousWriteKeys(ctx context.Context, now time.Time) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE project SET previous_write_key_hash=NULL,previous_write_key_expires_at=NULL WHERE previous_write_key_expires_at IS NOT NULL AND previous_write_key_expires_at<=?`, now)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
 func nonNilStrings(values []string) []string {
 	if values == nil {
 		return []string{}

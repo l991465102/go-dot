@@ -15,6 +15,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/auth"
 	"github.com/lzw7758/go-dot/internal/config"
 	"github.com/lzw7758/go-dot/internal/project"
+	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
 func runAPI(ctx context.Context) error {
@@ -38,7 +39,8 @@ func runAPI(ctx context.Context) error {
 		return fmt.Errorf("ensure initial admin: %w", err)
 	}
 	projectService := project.NewService(mysqladapter.NewProjectRepository(db))
-	handler := httpapi.NewHandler(authService, projectService, os.Getenv("GO_DOT_SECURE_COOKIES") == "true")
+	trackingService := tracking.NewService(mysqladapter.NewTrackingRepository(db), projectService)
+	handler := httpapi.NewHandler(authService, projectService, os.Getenv("GO_DOT_SECURE_COOKIES") == "true", trackingService)
 
 	server := g.Server()
 	server.SetAddr(cfg.HTTP.Address)

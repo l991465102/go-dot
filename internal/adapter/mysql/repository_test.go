@@ -66,6 +66,29 @@ func TestAuthRepositoryUserLookupFailureRollsBackAndOldTokenRemainsUsable(t *tes
 	require.Equal(t, 1, script.commits)
 }
 
+func TestTrackingPublishLocksDraftAndCommitsSnapshotStateAndAuditTogether(t *testing.T) {
+	pointRow := []driver.Value{
+		uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "VIEW", "DRAFT", "PENDING",
+		nil, nil, nil, nil, true, true, "APPROXIMATE", "EVENT_TIME", []byte(`["WEB"]`), []byte(`[]`), nil, nil, nil,
+		nil, nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true,
+	}
+	propertyRow := []driver.Value{"product_id", "Product ID", "STRING", true, nil, nil, nil, nil, 0}
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{pointRow, propertyRow}
+	script.execResults = []driver.Result{scriptResult{lastID: 41, affected: 1}, scriptResult{affected: 1}, scriptResult{affected: 1}}
+
+	_, err := NewTrackingRepository(db).Publish(context.Background(), 7, 1)
+	require.NoError(t, err)
+	require.Len(t, script.queries, 2)
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Len(t, script.execQueries, 3)
+	require.Contains(t, script.execQueries[0], "tracking_point_snapshot")
+	require.Contains(t, script.execQueries[1], "definition_state='DRAFT'")
+	require.Contains(t, script.execQueries[2], "audit_log")
+	require.Equal(t, 1, script.commits)
+	require.Zero(t, script.rollbacks)
+}
+
 var (
 	registerScriptedDriver sync.Once
 	scriptRegistry         sync.Map
@@ -88,7 +111,9 @@ func openScriptedDB(t *testing.T, row []driver.Value) (*dbScript, *sql.DB) {
 type dbScript struct {
 	mu          sync.Mutex
 	row         []driver.Value
+	queryRows   [][]driver.Value
 	execErrors  []error
+	execResults []driver.Result
 	queryErrors []error
 	queries     []string
 	execQueries []string
@@ -127,7 +152,12 @@ func (c *scriptedConn) QueryContext(_ context.Context, query string, _ []driver.
 			return nil, err
 		}
 	}
-	return &scriptedRows{row: append([]driver.Value(nil), c.script.row...)}, nil
+	row := c.script.row
+	if len(c.script.queryRows) > 0 {
+		row = c.script.queryRows[0]
+		c.script.queryRows = c.script.queryRows[1:]
+	}
+	return &scriptedRows{row: append([]driver.Value(nil), row...)}, nil
 }
 func (c *scriptedConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	c.script.mu.Lock()
@@ -140,8 +170,18 @@ func (c *scriptedConn) ExecContext(_ context.Context, query string, _ []driver.N
 			return nil, err
 		}
 	}
+	if len(c.script.execResults) > 0 {
+		result := c.script.execResults[0]
+		c.script.execResults = c.script.execResults[1:]
+		return result, nil
+	}
 	return driver.RowsAffected(1), nil
 }
+
+type scriptResult struct{ lastID, affected int64 }
+
+func (r scriptResult) LastInsertId() (int64, error) { return r.lastID, nil }
+func (r scriptResult) RowsAffected() (int64, error) { return r.affected, nil }
 
 type scriptedTx struct{ script *dbScript }
 

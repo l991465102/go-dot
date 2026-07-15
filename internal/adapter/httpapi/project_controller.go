@@ -8,6 +8,7 @@ import (
 	v1 "github.com/lzw7758/go-dot/api/projects/v1"
 	"github.com/lzw7758/go-dot/internal/auth"
 	"github.com/lzw7758/go-dot/internal/project"
+	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
 type ProjectController struct{ service *project.Service }
@@ -88,9 +89,12 @@ func (c ProjectController) rotateWriteKey(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, rotation)
 }
 
-func NewHandler(authService *auth.Service, projectService *project.Service, secureCookie bool) http.Handler {
+func NewHandler(authService *auth.Service, projectService *project.Service, secureCookie bool, trackingServices ...*tracking.Service) http.Handler {
 	mux := http.NewServeMux()
 	NewAuthController(authService, secureCookie).Register(mux)
 	NewProjectController(projectService).Register(mux)
+	if len(trackingServices) > 0 && trackingServices[0] != nil {
+		NewTrackingController(trackingServices[0]).Register(mux)
+	}
 	return NewAuthMiddleware(authService).Wrap(mux)
 }

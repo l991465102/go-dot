@@ -203,6 +203,33 @@ func TestCounterKeysShareAClusterHashTagAndIsolateDimensions(t *testing.T) {
 	require.NotEqual(t, keys.DayPV, keysFor(other).DayPV)
 }
 
+func TestQueryRealtimeMergesPVAndExactUVAcrossHourlyBuckets(t *testing.T) {
+	s := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: s.Addr()})
+	counter := New(client)
+	start := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	base := ports.CountEvent{ProjectID: 7, PointID: 9, Platform: "web", Channel: "organic", ProjectTimezone: "UTC", CountPV: true, CountUV: true, UVMode: tracking.Exact}
+	for _, event := range []ports.CountEvent{
+		withCountEvent(base, "a", 1, start.Add(time.Minute)),
+		withCountEvent(base, "b", 1, start.Add(time.Hour+time.Minute)),
+		withCountEvent(base, "c", 2, start.Add(time.Hour+time.Minute)),
+	} {
+		_, err := counter.Apply(context.Background(), event)
+		require.NoError(t, err)
+	}
+	got, err := counter.QueryRealtime(context.Background(), ports.StatisticsFilter{ProjectID: 7, PointID: 9, Platform: "web", Channel: "organic", Start: start, End: start.Add(2 * time.Hour), Timezone: "UTC", ExactUV: true})
+	require.NoError(t, err)
+	require.EqualValues(t, 3, got.PV)
+	require.EqualValues(t, 2, got.UV)
+	require.False(t, got.Approximate)
+	require.NotEmpty(t, s.Keys())
+}
+
+func withCountEvent(base ports.CountEvent, id string, visitor uint64, at time.Time) ports.CountEvent {
+	base.EventID, base.VisitorHash, base.StatTime = id, visitor, at
+	return base
+}
+
 func countEvent(eventID string) ports.CountEvent {
 	return ports.CountEvent{
 		EventID: eventID, ProjectID: 7, PointID: 9, Platform: "web", Channel: "organic",

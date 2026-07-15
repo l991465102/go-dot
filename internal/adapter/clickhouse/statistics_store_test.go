@@ -86,6 +86,15 @@ func TestEmptyRefreshStillCommitsGeneration(t *testing.T) {
 	require.Contains(t, db.execs[2], "generation")
 }
 
+func TestStatisticsPointCodeListUsesParameterizedIN(t *testing.T) {
+	db := &statisticsRecordingDB{queryErr: errors.New("recorded")}
+	start := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	_, _ = NewStatisticsStore(db).QuerySummary(context.Background(), ports.StatisticsFilter{ProjectID: 9, Start: start, End: start.Add(time.Hour), PointCodes: []string{"a' OR 1=1 --", "safe"}})
+	require.Contains(t, db.queries[0], "s.point_code IN (?,?)")
+	require.NotContains(t, db.queries[0], "OR 1=1")
+	require.Contains(t, db.queryArgs[0], "a' OR 1=1 --")
+}
+
 func TestStatisticsGenerationClickHouseIntegration(t *testing.T) {
 	dsn := os.Getenv("GO_DOT_TEST_CLICKHOUSE_DSN")
 	if dsn == "" {

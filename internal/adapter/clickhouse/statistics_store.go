@@ -18,15 +18,18 @@ type StatisticsExecutor interface {
 }
 
 type StatisticsStore struct {
-	db                                                      StatisticsExecutor
-	rawTable, approximateTable, exactTable, generationTable string
+	db                                                                          StatisticsExecutor
+	rawTable, invalidEventsTable, approximateTable, exactTable, generationTable string
 }
 
 func NewStatisticsStore(db StatisticsExecutor) *StatisticsStore {
 	return newStatisticsStoreWithTables(db, "tracking_event", "business_stat_hourly", "business_stat_exact_hourly", "business_stat_hour_generation")
 }
 func newStatisticsStoreWithTables(db StatisticsExecutor, raw, approximate, exact, generation string) *StatisticsStore {
-	return &StatisticsStore{db: db, rawTable: raw, approximateTable: approximate, exactTable: exact, generationTable: generation}
+	return newStatisticsStoreWithAllTables(db, raw, "tracking_invalid_event", approximate, exact, generation)
+}
+func newStatisticsStoreWithAllTables(db StatisticsExecutor, raw, invalid, approximate, exact, generation string) *StatisticsStore {
+	return &StatisticsStore{db: db, rawTable: raw, invalidEventsTable: invalid, approximateTable: approximate, exactTable: exact, generationTable: generation}
 }
 
 func (s *StatisticsStore) RefreshHour(ctx context.Context, hour time.Time, version uint64) error {
@@ -182,6 +185,22 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 		if item.set {
 			inner += " AND s." + item.col + "=?"
 			args = append(args, item.value)
+		}
+	}
+	if len(f.PointCodes) > 0 {
+		inner += " AND s.point_code IN " + placeholders(len(f.PointCodes))
+		for _, code := range f.PointCodes {
+			args = append(args, code)
+		}
+	}
+	for _, item := range []struct{ idColumn, codeColumn, value string }{
+		{"domain_category_id", "domain_category_code", f.DomainCategoryCode},
+		{"module_category_id", "module_category_code", f.ModuleCategoryCode},
+		{"scene_category_id", "scene_category_code", f.SceneCategoryCode},
+	} {
+		if item.value != "" {
+			inner += " AND s." + item.idColumn + " IN (SELECT " + item.idColumn + " FROM " + s.rawTable + " FINAL WHERE project_id=? AND " + item.codeColumn + "=?)"
+			args = append(args, f.ProjectID, item.value)
 		}
 	}
 	inner += ` GROUP BY s.hour,s.project_id,s.domain_category_id,s.module_category_id,s.scene_category_id,s.point_id,s.point_code,s.platform,s.channel,s.version`

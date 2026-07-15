@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/lzw7758/go-dot/internal/ports"
+	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -251,6 +253,69 @@ func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg p
 		return fmt.Errorf("move Redis Stream message %q to DLQ: %w", msg.ID, err)
 	}
 	return nil
+}
+
+var redisStreamIDPattern = regexp.MustCompile(`^[0-9]+-[0-9]+$`)
+var credentialURLPattern = regexp.MustCompile(`(?i)(://)[^/@\s:]+:[^/@\s]+@`)
+var secretAssignmentPattern = regexp.MustCompile(`(?i)(password|passwd|secret|token|authorization|cookie|write_key)\s*[=:]\s*[^\s,;]+`)
+
+// ListDeadLetters exposes operational metadata only. The queued payload is
+// decoded solely to enforce project isolation and is never returned.
+func (q *Queue) ListDeadLetters(ctx context.Context, f statistics.DeadLetterFilter) (statistics.DeadLetterPage, error) {
+	if q == nil || q.client == nil {
+		return statistics.DeadLetterPage{}, errors.New("Redis queue client is required")
+	}
+	if f.ProjectID == 0 || f.Limit < 1 || f.Limit > 100 || (f.Cursor != "" && !redisStreamIDPattern.MatchString(f.Cursor)) {
+		return statistics.DeadLetterPage{}, fmt.Errorf("%w: dead-letter cursor or limit", statistics.ErrInvalidQuery)
+	}
+	end := "+"
+	if f.Cursor != "" {
+		end = "(" + f.Cursor
+	}
+	items := make([]statistics.DeadLetter, 0, f.Limit+1)
+	for len(items) <= f.Limit {
+		messages, err := q.client.XRevRangeN(ctx, q.deadStream, end, "-", 100).Result()
+		if err != nil && err != redis.Nil {
+			return statistics.DeadLetterPage{}, fmt.Errorf("read dead letters: %w", err)
+		}
+		if len(messages) == 0 {
+			break
+		}
+		for _, message := range messages {
+			end = "(" + message.ID
+			payload := valueString(message.Values[fieldPayload])
+			var envelope struct {
+				ProjectID uint64 `json:"project_id"`
+			}
+			if json.Unmarshal([]byte(payload), &envelope) != nil || envelope.ProjectID != f.ProjectID {
+				continue
+			}
+			deliveries, _ := strconv.Atoi(valueString(message.Values[fieldDeliveries]))
+			firstSeenMillis, _ := strconv.ParseInt(valueString(message.Values[fieldFirstSeen]), 10, 64)
+			items = append(items, statistics.DeadLetter{ID: message.ID, BatchID: valueString(message.Values[fieldBatchID]), Deliveries: deliveries, FirstSeen: time.UnixMilli(firstSeenMillis).UTC(), LastError: sanitizeQueueError(valueString(message.Values[fieldLastError]))})
+			if len(items) > f.Limit {
+				break
+			}
+		}
+		if len(messages) < 100 {
+			break
+		}
+	}
+	page := statistics.DeadLetterPage{Items: items}
+	if len(page.Items) > f.Limit {
+		page.Items = page.Items[:f.Limit]
+		page.NextCursor = page.Items[len(page.Items)-1].ID
+	}
+	return page, nil
+}
+
+func sanitizeQueueError(value string) string {
+	value = credentialURLPattern.ReplaceAllString(value, `${1}[redacted]@`)
+	value = secretAssignmentPattern.ReplaceAllString(value, `${1}=[redacted]`)
+	if len(value) > 500 {
+		value = value[:500]
+	}
+	return value
 }
 
 func (q *Queue) ReclaimStale(ctx context.Context, stream, group, consumer string, idle time.Duration, count int) ([]ports.Message, error) {

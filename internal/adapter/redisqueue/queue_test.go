@@ -3,6 +3,7 @@ package redisqueue_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/adapter/redisqueue"
 	"github.com/lzw7758/go-dot/internal/ports"
 	"github.com/lzw7758/go-dot/internal/ports/contracttest"
+	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
@@ -124,6 +126,26 @@ func TestMoveToDLQUsesConfiguredStream(t *testing.T) {
 
 	require.Equal(t, int64(1), client.XLen(ctx, "custom:{queue}:dead").Val())
 	require.Equal(t, int64(0), client.XLen(ctx, ports.DeadLetterStream).Val())
+}
+
+func TestListDeadLettersReturnsOnlyProjectMetadataWithoutPayload(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	queue := redisqueue.New(client, redisqueue.WithDeadStream("tracking:{queue}:dead"))
+	ctx := context.Background()
+	for _, values := range []map[string]any{
+		{"batch_id": "other", "payload": `{"project_id":8,"secret":"x"}`, "deliveries": "2", "first_seen": "1000", "last_error": "outage"},
+		{"batch_id": "mine", "payload": `{"project_id":7,"events":[]}`, "deliveries": "3", "first_seen": "2000", "last_error": "bad"},
+	} {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: "tracking:{queue}:dead", Values: values}).Err())
+	}
+
+	page, err := queue.ListDeadLetters(ctx, statistics.DeadLetterFilter{ProjectID: 7, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, "mine", page.Items[0].BatchID)
+	require.Equal(t, 3, page.Items[0].Deliveries)
+	require.NotContains(t, fmt.Sprintf("%+v", page.Items[0]), "secret")
 }
 
 func TestRejectsPositiveSubMillisecondDurations(t *testing.T) {

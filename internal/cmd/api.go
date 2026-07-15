@@ -8,18 +8,22 @@ import (
 	"os"
 	"time"
 
+	_ "github.com/ClickHouse/clickhouse-go/v2"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/net/ghttp"
 	"github.com/redis/go-redis/v9"
 
+	clickhouseadapter "github.com/lzw7758/go-dot/internal/adapter/clickhouse"
 	"github.com/lzw7758/go-dot/internal/adapter/httpapi"
 	mysqladapter "github.com/lzw7758/go-dot/internal/adapter/mysql"
+	"github.com/lzw7758/go-dot/internal/adapter/rediscounter"
 	"github.com/lzw7758/go-dot/internal/adapter/redisqueue"
 	"github.com/lzw7758/go-dot/internal/auth"
 	"github.com/lzw7758/go-dot/internal/config"
 	"github.com/lzw7758/go-dot/internal/ingestion"
 	"github.com/lzw7758/go-dot/internal/project"
+	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
@@ -31,6 +35,9 @@ func runAPI(ctx context.Context) error {
 	if cfg.MySQL.DSN == "" {
 		return fmt.Errorf("GO_DOT_MYSQL_DSN is required")
 	}
+	if cfg.ClickHouse.DSN == "" {
+		return fmt.Errorf("GO_DOT_CLICKHOUSE_DSN is required")
+	}
 	db, err := sql.Open("mysql", cfg.MySQL.DSN)
 	if err != nil {
 		return fmt.Errorf("open mysql: %w", err)
@@ -38,6 +45,14 @@ func runAPI(ctx context.Context) error {
 	defer db.Close()
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping mysql: %w", err)
+	}
+	chDB, err := sql.Open("clickhouse", cfg.ClickHouse.DSN)
+	if err != nil {
+		return fmt.Errorf("open clickhouse: %w", err)
+	}
+	defer chDB.Close()
+	if err := chDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping clickhouse: %w", err)
 	}
 	authService := auth.NewService(mysqladapter.NewAuthRepository(db), []byte(cfg.Auth.JWTSecret), cfg.Auth.AccessTTL, cfg.Auth.RefreshTTL)
 	if err := authService.EnsureInitialAdmin(ctx, "admin", "admin"); err != nil {
@@ -51,13 +66,16 @@ func runAPI(ctx context.Context) error {
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Address})
 	defer redisClient.Close()
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL))
+	statisticsStore := clickhouseadapter.NewStatisticsStore(chDB)
+	statisticsService := statistics.NewService(projectService, rediscounter.New(redisClient), statisticsStore, snapshotCache,
+		statistics.CompositeDiagnostics{Events: statisticsStore, DeadLetters: queue}, time.Now)
 	collector := ingestion.NewCollector(snapshotCache, queue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
 	collectHandler := httpapi.NewCollectHandler(
 		httpapi.NewCollectController(collector, cfg.Tracking.MaxBodyBytes),
 		httpapi.NewWriteKeyMiddleware(projectRepo, time.Now),
 		httpapi.NewRateLimitMiddleware(httpapi.NewRedisTokenBucket(redisClient, 200, 100)),
 	)
-	managementHandler := httpapi.NewHandler(authService, projectService, os.Getenv("GO_DOT_SECURE_COOKIES") == "true", trackingService)
+	managementHandler := httpapi.NewHandler(authService, projectService, os.Getenv("GO_DOT_SECURE_COOKIES") == "true", trackingService, statisticsService)
 	handler := http.NewServeMux()
 	handler.Handle("/api/v1/collect/events", collectHandler)
 	handler.Handle("/", managementHandler)

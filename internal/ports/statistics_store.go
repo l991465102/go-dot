@@ -6,19 +6,24 @@ import (
 )
 
 type StatisticsFilter struct {
-	ProjectID        uint64
-	Start            time.Time
-	End              time.Time
-	DomainCategoryID uint64
-	ModuleCategoryID uint64
-	SceneCategoryID  uint64
-	PointID          uint64
-	PointCode        string
-	Platform         string
-	Channel          string
-	Granularity      string
-	Timezone         string
-	ExactUV          bool
+	ProjectID          uint64
+	Start              time.Time
+	End                time.Time
+	DomainCategoryID   uint64
+	DomainCategoryCode string
+	ModuleCategoryID   uint64
+	ModuleCategoryCode string
+	SceneCategoryID    uint64
+	SceneCategoryCode  string
+	PointID            uint64
+	PointIDs           []uint64
+	PointCode          string
+	PointCodes         []string
+	Platform           string
+	Channel            string
+	Granularity        string
+	Timezone           string
+	ExactUV            bool
 }
 
 type Summary struct {

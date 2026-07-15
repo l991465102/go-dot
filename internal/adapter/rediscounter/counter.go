@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lzw7758/go-dot/internal/ports"
@@ -67,6 +69,120 @@ func (c *Counter) Apply(ctx context.Context, event ports.CountEvent) (bool, erro
 		return false, fmt.Errorf("apply realtime counters: %w", err)
 	}
 	return result == 1, nil
+}
+
+// QueryRealtime reads only Redis counters. Hour keys are merged so UVs are not
+// added across buckets: exact sets are unioned and approximate HLLs are merged
+// by PFCOUNT's multi-key form.
+func (c *Counter) QueryRealtime(ctx context.Context, f ports.StatisticsFilter) (ports.Summary, error) {
+	if c == nil || c.client == nil {
+		return ports.Summary{}, errors.New("Redis counter client is required")
+	}
+	if f.ProjectID == 0 || f.Start.IsZero() || !f.End.After(f.Start) {
+		return ports.Summary{}, errors.New("project and valid time range are required")
+	}
+	tag := "{project:" + strconv.FormatUint(f.ProjectID, 10) + "}"
+	point := "*"
+	if f.PointID != 0 {
+		point = strconv.FormatUint(f.PointID, 10)
+	}
+	platform, channel := "*", "*"
+	if f.Platform != "" {
+		platform = encodePart(f.Platform)
+	}
+	if f.Channel != "" {
+		channel = encodePart(f.Channel)
+	}
+	pattern := "rt:pv:hour:" + tag + ":*:" + point + ":" + platform + ":" + channel
+	pvKeys, err := c.scanRange(ctx, pattern, f)
+	if err != nil {
+		return ports.Summary{}, err
+	}
+	var pv uint64
+	uvKeys := make([]string, 0, len(pvKeys))
+	mode := string(tracking.Approximate)
+	if f.ExactUV {
+		mode = string(tracking.Exact)
+	}
+	for _, key := range pvKeys {
+		value, err := c.client.Get(ctx, key).Uint64()
+		if err != nil && err != redis.Nil {
+			return ports.Summary{}, fmt.Errorf("read realtime PV: %w", err)
+		}
+		pv += value
+		uvKeys = append(uvKeys, strings.Replace(key, "rt:pv:hour:", "rt:uv:hour:", 1)+":"+mode)
+	}
+	var uv uint64
+	if f.ExactUV {
+		members := make(map[string]struct{})
+		for _, key := range uvKeys {
+			values, err := c.client.SMembers(ctx, key).Result()
+			if err != nil && err != redis.Nil {
+				return ports.Summary{}, fmt.Errorf("read realtime exact UV: %w", err)
+			}
+			for _, value := range values {
+				members[value] = struct{}{}
+			}
+		}
+		uv = uint64(len(members))
+	} else if len(uvKeys) > 0 {
+		value, err := c.client.PFCount(ctx, uvKeys...).Result()
+		if err != nil && err != redis.Nil {
+			return ports.Summary{}, fmt.Errorf("read realtime approximate UV: %w", err)
+		}
+		uv = uint64(value)
+	}
+	return ports.Summary{PV: pv, UV: uv, Approximate: !f.ExactUV}, nil
+}
+
+func (c *Counter) scanRange(ctx context.Context, pattern string, f ports.StatisticsFilter) ([]string, error) {
+	var cursor uint64
+	var keys []string
+	location, err := time.LoadLocation(f.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("load timezone: %w", err)
+	}
+	for {
+		batch, next, err := c.client.Scan(ctx, cursor, pattern, 200).Result()
+		if err != nil {
+			return nil, fmt.Errorf("scan realtime counters: %w", err)
+		}
+		for _, key := range batch {
+			parts := strings.Split(key, ":")
+			if len(parts) < 9 {
+				continue
+			}
+			if len(f.PointIDs) > 0 {
+				pointID, err := strconv.ParseUint(parts[6], 10, 64)
+				if err != nil || !containsPointID(f.PointIDs, pointID) {
+					continue
+				}
+			}
+			bucket := parts[5]
+			at, err := time.ParseInLocation("2006010215", bucket, location)
+			if err == nil && at.Before(f.End.In(location)) && at.Add(time.Hour).After(f.Start.In(location)) {
+				// Defensively re-check Scan results, as some Redis-compatible stores
+				// may return a superset for MATCH.
+				if ok, _ := path.Match(pattern, key); ok {
+					keys = append(keys, key)
+				}
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return keys, nil
+}
+
+func containsPointID(values []uint64, target uint64) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func keysFor(event ports.CountEvent) counterKeys {

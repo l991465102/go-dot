@@ -36,7 +36,16 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 func TestLoadRejectsUnsafeQueuePublishDedupTTL(t *testing.T) {
 	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
 	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
-	t.Setenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL", "30m")
+	t.Setenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL", "71h")
 	_, err := Load(context.Background())
 	require.ErrorContains(t, err, "GO_DOT_QUEUE_PUBLISH_DEDUP_TTL")
+}
+
+func TestLoadAcceptsMinimumQueuePublishDedupTTL(t *testing.T) {
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL", "72h")
+	cfg, err := Load(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 72*time.Hour, cfg.Queue.PublishDedupTTL)
 }

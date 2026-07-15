@@ -78,8 +78,8 @@ func Load(ctx context.Context) (Config, error) {
 	}
 	if raw := os.Getenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL"); raw != "" {
 		ttl, err := time.ParseDuration(raw)
-		if err != nil || ttl < time.Hour || ttl > 7*24*time.Hour {
-			return Config{}, errors.New("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL must be a duration between 1h and 168h")
+		if err != nil || ttl < 72*time.Hour || ttl > 7*24*time.Hour {
+			return Config{}, errors.New("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL must be a duration between 72h and 168h")
 		}
 		cfg.Queue.PublishDedupTTL = ttl
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/lzw7758/go-dot/internal/project"
@@ -19,6 +20,19 @@ func TestPublishRequiresSceneAndCompleteSchema(t *testing.T) {
 	repo.points[point.ID] = point
 	_, err := svc.Publish(context.Background(), 1, point.ID)
 	require.ErrorContains(t, err, "SCENE category")
+}
+
+func TestPublishAndDeprecateInvalidateCollectionSnapshot(t *testing.T) {
+	repo := &fakeRepository{nextID: 20, points: map[uint64]Point{}, categories: map[uint64]Category{3: {ID: 3, ProjectID: 2, Level: Scene, Active: true}}}
+	invalidator := &invalidationRecorder{}
+	svc := NewService(repo, allowAll{}, invalidator)
+	p := validDraft()
+	repo.points[p.ID] = p
+	_, err := svc.Publish(context.Background(), 1, p.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"2:product_detail_view"}, invalidator.keys)
+	require.NoError(t, svc.Deprecate(context.Background(), 1, p.ID, "old", nil))
+	require.Equal(t, []string{"2:product_detail_view", "2:product_detail_view"}, invalidator.keys)
 }
 
 func TestPublishedPointCannotBeEditedOrDeleted(t *testing.T) {
@@ -206,6 +220,12 @@ func (allowAll) RequireRole(context.Context, uint64, uint64, ...project.Role) er
 type denyAll struct{ err error }
 
 func (d denyAll) RequireRole(context.Context, uint64, uint64, ...project.Role) error { return d.err }
+
+type invalidationRecorder struct{ keys []string }
+
+func (r *invalidationRecorder) Invalidate(projectID uint64, code string) {
+	r.keys = append(r.keys, fmt.Sprintf("%d:%s", projectID, code))
+}
 
 type fakeRepository struct {
 	nextID     uint64

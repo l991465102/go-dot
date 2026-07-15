@@ -100,6 +100,7 @@ type DraftInput struct {
 }
 
 type Snapshot struct {
+	ID                  uint64        `json:"snapshot_id"`
 	ProjectID           uint64        `json:"project_id"`
 	PointID             uint64        `json:"point_id"`
 	CategoryID          uint64        `json:"category_id"`

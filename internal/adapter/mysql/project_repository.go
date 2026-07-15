@@ -58,6 +58,28 @@ func (r *ProjectRepository) FindMember(ctx context.Context, userID, projectID ui
 	}
 	return m, err
 }
+
+func (r *ProjectRepository) FindProjectByWriteKeyHash(ctx context.Context, hash string, now time.Time) (project.Project, error) {
+	var p project.Project
+	var previousHash sql.NullString
+	var previousExpiry sql.NullTime
+	var origins []byte
+	err := r.db.QueryRowContext(ctx, `SELECT id,code,name,write_key_hash,previous_write_key_hash,previous_write_key_expires_at,allowed_origins,timezone,visitor_salt,is_active,created_by FROM project WHERE is_active=TRUE AND (write_key_hash=? OR (previous_write_key_hash=? AND previous_write_key_expires_at>?)) LIMIT 1`, hash, hash, now).Scan(&p.ID, &p.Code, &p.Name, &p.WriteKeyHash, &previousHash, &previousExpiry, &origins, &p.Timezone, &p.VisitorSalt, &p.Active, &p.CreatedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return project.Project{}, project.ErrProjectNotFound
+	}
+	if err != nil {
+		return project.Project{}, err
+	}
+	p.PreviousWriteKeyHash = previousHash.String
+	if previousExpiry.Valid {
+		p.PreviousWriteKeyExpiresAt = &previousExpiry.Time
+	}
+	if err := json.Unmarshal(origins, &p.AllowedOrigins); err != nil {
+		return project.Project{}, fmt.Errorf("decode project origins: %w", err)
+	}
+	return p, nil
+}
 func (r *ProjectRepository) RotateWriteKey(ctx context.Context, projectID uint64, hash string, now, expires time.Time) (err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

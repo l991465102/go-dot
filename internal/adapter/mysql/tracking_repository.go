@@ -117,6 +117,27 @@ func (r *TrackingRepository) FindPointInProject(ctx context.Context, projectID, 
 	return findPoint(ctx, r.db, id, false, projectID)
 }
 
+func (r *TrackingRepository) FindPublishedSnapshot(ctx context.Context, projectID uint64, pointCode string) (tracking.Snapshot, error) {
+	var id uint64
+	var raw []byte
+	err := r.db.QueryRowContext(ctx, `SELECT s.id,s.schema_snapshot FROM tracking_point_snapshot s JOIN tracking_point p ON p.id=s.point_id AND p.project_id=s.project_id WHERE s.project_id=? AND s.point_code=? AND p.definition_state='PUBLISHED' ORDER BY s.version DESC LIMIT 1`, projectID, pointCode).Scan(&id, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tracking.Snapshot{}, tracking.ErrPointNotPublished
+	}
+	if err != nil {
+		return tracking.Snapshot{}, err
+	}
+	var snapshot tracking.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return tracking.Snapshot{}, errors.New("decode tracking snapshot")
+	}
+	if snapshot.ProjectID != projectID || snapshot.PointCode != pointCode || snapshot.PointID == 0 || snapshot.Version == 0 {
+		return tracking.Snapshot{}, errors.New("tracking snapshot metadata mismatch")
+	}
+	snapshot.ID = id
+	return snapshot, nil
+}
+
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)

@@ -25,12 +25,23 @@ type Authorizer interface {
 	RequireRole(context.Context, uint64, uint64, ...project.Role) error
 }
 
-type Service struct {
-	repo Repository
-	auth Authorizer
+type SnapshotInvalidator interface {
+	Invalidate(uint64, string)
 }
 
-func NewService(repo Repository, auth Authorizer) *Service { return &Service{repo: repo, auth: auth} }
+type Service struct {
+	repo        Repository
+	auth        Authorizer
+	invalidator SnapshotInvalidator
+}
+
+func NewService(repo Repository, auth Authorizer, invalidators ...SnapshotInvalidator) *Service {
+	service := &Service{repo: repo, auth: auth}
+	if len(invalidators) > 0 {
+		service.invalidator = invalidators[0]
+	}
+	return service
+}
 
 func (s *Service) CreateCategory(ctx context.Context, actorID uint64, in CreateCategory) (Category, error) {
 	if err := s.auth.RequireRole(ctx, actorID, in.ProjectID, project.Admin); err != nil {
@@ -146,7 +157,11 @@ func (s *Service) Publish(ctx context.Context, actorID, pointID uint64) (Snapsho
 	if err := p.ValidateForPublication(); err != nil {
 		return Snapshot{}, err
 	}
-	return s.repo.Publish(ctx, p.ProjectID, pointID, actorID)
+	snapshot, err := s.repo.Publish(ctx, p.ProjectID, pointID, actorID)
+	if err == nil && s.invalidator != nil {
+		s.invalidator.Invalidate(p.ProjectID, p.Code)
+	}
+	return snapshot, err
 }
 
 func (s *Service) Deprecate(ctx context.Context, actorID, pointID uint64, reason string, replacementID *uint64) error {
@@ -172,7 +187,13 @@ func (s *Service) Deprecate(ctx context.Context, actorID, pointID uint64, reason
 			return coded("REPLACEMENT_INVALID", "")
 		}
 	}
-	return s.repo.Deprecate(ctx, p.ProjectID, pointID, actorID, reason, replacementID)
+	if err := s.repo.Deprecate(ctx, p.ProjectID, pointID, actorID, reason, replacementID); err != nil {
+		return err
+	}
+	if s.invalidator != nil {
+		s.invalidator.Invalidate(p.ProjectID, p.Code)
+	}
+	return nil
 }
 
 func (s *Service) Copy(ctx context.Context, actorID, pointID uint64, newCode string) (Point, error) {
@@ -242,7 +263,11 @@ func (s *Service) PublishInProject(ctx context.Context, actorID, projectID, poin
 	if err := p.ValidateForPublication(); err != nil {
 		return Snapshot{}, err
 	}
-	return s.repo.Publish(ctx, projectID, pointID, actorID)
+	snapshot, err := s.repo.Publish(ctx, projectID, pointID, actorID)
+	if err == nil && s.invalidator != nil {
+		s.invalidator.Invalidate(projectID, p.Code)
+	}
+	return snapshot, err
 }
 func (s *Service) CopyInProject(ctx context.Context, actorID, projectID, pointID uint64, newCode string) (Point, error) {
 	if err := s.auth.RequireRole(ctx, actorID, projectID, project.Admin); err != nil {
@@ -280,7 +305,13 @@ func (s *Service) DeprecateInProject(ctx context.Context, actorID, projectID, po
 	if strings.TrimSpace(reason) == "" {
 		return coded("DEPRECATION_REASON_REQUIRED", "")
 	}
-	return s.repo.Deprecate(ctx, projectID, pointID, actorID, reason, replacementID)
+	if err := s.repo.Deprecate(ctx, projectID, pointID, actorID, reason, replacementID); err != nil {
+		return err
+	}
+	if s.invalidator != nil {
+		s.invalidator.Invalidate(projectID, p.Code)
+	}
+	return nil
 }
 
 func (s *Service) Get(ctx context.Context, actorID, pointID uint64) (Point, error) {

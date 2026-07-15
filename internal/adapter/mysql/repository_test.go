@@ -32,6 +32,34 @@ func TestProjectRepositoryRejectsRotationDuringGraceUnderRowLock(t *testing.T) {
 	require.Equal(t, 1, script.rollbacks)
 }
 
+func TestProjectRepositoryFindsCurrentOrUnexpiredPreviousWriteKey(t *testing.T) {
+	now := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+	row := []driver.Value{uint64(9), "mall", "Mall", "current", "previous", now.Add(time.Hour), []byte(`["https://app.example"]`), "Asia/Shanghai", []byte("salt"), true, uint64(1)}
+	script, db := openScriptedDB(t, row)
+	p, err := NewProjectRepository(db).FindProjectByWriteKeyHash(context.Background(), "previous", now)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9), p.ID)
+	require.Equal(t, []string{"https://app.example"}, p.AllowedOrigins)
+	require.Contains(t, script.queries[0], "previous_write_key_expires_at>?")
+}
+
+func TestProjectRepositoryRejectsUnknownOrExpiredWriteKey(t *testing.T) {
+	_, db := openScriptedDB(t, nil)
+	_, err := NewProjectRepository(db).FindProjectByWriteKeyHash(context.Background(), "expired", time.Now())
+	require.ErrorIs(t, err, project.ErrProjectNotFound)
+}
+
+func TestTrackingRepositoryLoadsOnlyPublishedImmutableSnapshot(t *testing.T) {
+	snapshot := tracking.Snapshot{ProjectID: 9, PointID: 7, PointCode: "product_detail_view", Version: 1}
+	raw, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	script, db := openScriptedDB(t, []driver.Value{uint64(41), raw})
+	loaded, err := NewTrackingRepository(db).FindPublishedSnapshot(context.Background(), 9, "product_detail_view")
+	require.NoError(t, err)
+	require.Equal(t, uint64(41), loaded.ID)
+	require.Contains(t, script.queries[0], "definition_state='PUBLISHED'")
+}
+
 func TestAuthRepositorySuccessorInsertFailureRollsBackOldRevocation(t *testing.T) {
 	now := time.Now().UTC()
 	script, db := openScriptedDB(t, []driver.Value{uint64(7), "old-hash", now.Add(time.Hour), nil, "admin", "password-hash", "Admin", false, "ACTIVE", nil})

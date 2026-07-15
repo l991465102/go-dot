@@ -197,16 +197,31 @@ func TestAuthRepositoryUserLookupFailureRollsBackAndOldTokenRemainsUsable(t *tes
 func TestTrackingPublishLocksDraftAndCommitsSnapshotStateAndAuditTogether(t *testing.T) {
 	pointRow := trackingPointRow("DRAFT")
 	propertyRow := []driver.Value{"product_id", "Product ID", "STRING", true, nil, nil, nil, nil, 0}
-	moduleRow := []driver.Value{uint64(2), uint64(9), "product", "Product", "MODULE", uint64(1), true}
-	domainRow := []driver.Value{uint64(1), uint64(9), "commerce", "Commerce", "DOMAIN", nil, true}
 	script, db := openScriptedDB(t, nil)
-	script.queryRows = [][]driver.Value{pointRow, propertyRow, moduleRow, domainRow}
+	script.queryRows = [][]driver.Value{
+		{uint64(3)},
+		categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true),
+		categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true),
+		categoryRow(1, 9, nil, "commerce", "Commerce", "DOMAIN", true),
+		categoryRow(1, 9, nil, "commerce", "Commerce", "DOMAIN", true),
+		categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true),
+		categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true),
+		pointRow,
+		propertyRow,
+	}
 	script.execResults = []driver.Result{scriptResult{lastID: 41, affected: 1}, scriptResult{affected: 1}, scriptResult{affected: 1}}
 
 	snapshot, err := NewTrackingRepository(db).Publish(context.Background(), 9, 7, 1)
 	require.NoError(t, err)
-	require.Len(t, script.queries, 4)
-	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Len(t, script.queries, 9)
+	require.NotContains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	for _, index := range []int{4, 5, 6, 7} {
+		require.Contains(t, strings.ToUpper(script.queries[index]), "FOR UPDATE")
+	}
+	require.Contains(t, script.queries[4], "tracking_category")
+	require.Contains(t, script.queries[5], "tracking_category")
+	require.Contains(t, script.queries[6], "tracking_category")
+	require.Contains(t, script.queries[7], "tracking_point")
 	require.Len(t, script.execQueries, 3)
 	require.Contains(t, script.execQueries[0], "tracking_point_snapshot")
 	require.Contains(t, script.execQueries[1], "definition_state='DRAFT'")
@@ -284,14 +299,33 @@ func TestTrackingDeprecationDetectsConcurrentStateChange(t *testing.T) {
 	require.Equal(t, 1, script.rollbacks)
 }
 func TestTrackingPublicationRejectsCrossProjectCategoryUnderLock(t *testing.T) {
-	row := trackingPointRow("DRAFT")
-	row[28] = uint64(10)
 	script, db := openScriptedDB(t, nil)
-	script.queryRows = [][]driver.Value{row, {}}
+	script.queryRows = [][]driver.Value{{uint64(3)}, categoryRow(3, 10, uint64Ptr(2), "detail", "Detail", "SCENE", true)}
 	_, err := NewTrackingRepository(db).Publish(context.Background(), 9, 7, 1)
 	require.ErrorContains(t, err, "CATEGORY_INVALID")
 	require.Empty(t, script.execQueries)
-	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.NotContains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+}
+
+func TestTrackingPublicationRejectsPointCategoryChangedAfterPathLocks(t *testing.T) {
+	changed := trackingPointRow("DRAFT")
+	changed[2] = uint64(4)
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{{uint64(3)}, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true), categoryRow(1, 9, nil, "commerce", "Commerce", "DOMAIN", true), categoryRow(1, 9, nil, "commerce", "Commerce", "DOMAIN", true), categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true), categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), changed, {}}
+	_, err := NewTrackingRepository(db).Publish(context.Background(), 9, 7, 1)
+	require.ErrorIs(t, err, tracking.ErrConflict)
+	require.Empty(t, script.execQueries)
+	require.Contains(t, strings.ToUpper(script.queries[6]), "FOR UPDATE")
+	require.Contains(t, strings.ToUpper(script.queries[7]), "FOR UPDATE")
+}
+
+func TestTrackingPublicationRejectsSceneDisabledBetweenReadAndLock(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{{uint64(3)}, categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", true), categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true), categoryRow(1, 9, nil, "commerce", "Commerce", "DOMAIN", true), categoryRow(1, 9, nil, "commerce", "Commerce", "DOMAIN", true), categoryRow(2, 9, uint64Ptr(1), "product", "Product", "MODULE", true), categoryRow(3, 9, uint64Ptr(2), "detail", "Detail", "SCENE", false)}
+	_, err := NewTrackingRepository(db).Publish(context.Background(), 9, 7, 1)
+	require.ErrorContains(t, err, "CATEGORY_INVALID")
+	require.Empty(t, script.execQueries)
+	require.Contains(t, strings.ToUpper(script.queries[6]), "FOR UPDATE")
 }
 
 func TestTrackingDraftUpdateLocksAndRollsBackAuditWithBeforeAfter(t *testing.T) {

@@ -654,21 +654,31 @@ func (r *TrackingRepository) Publish(ctx context.Context, projectID, id, actorID
 		return snapshot, err
 	}
 	defer rollbackOnError(tx, &err)
+	var observedCategoryID uint64
+	if err = tx.QueryRowContext(ctx, `SELECT category_id FROM tracking_point WHERE project_id=? AND id=?`, projectID, id).Scan(&observedCategoryID); errors.Is(err, sql.ErrNoRows) {
+		return snapshot, tracking.ErrPointNotFound
+	} else if err != nil {
+		return snapshot, err
+	}
+	path, lockedScene, err := lockActiveCategoryPath(ctx, tx, projectID, observedCategoryID)
+	if err != nil {
+		return snapshot, err
+	}
 	p, err := findPoint(ctx, tx, id, true, projectID)
 	if err != nil {
 		return snapshot, err
 	}
+	if p.ProjectID != projectID || p.CategoryID != observedCategoryID {
+		return snapshot, tracking.ErrConflict
+	}
 	if p.State != tracking.Draft {
 		return snapshot, tracking.ErrImmutable
 	}
+	p.Category = lockedScene
+	p.CategoryPath = path
 	if err = p.ValidateForPublication(); err != nil {
 		return snapshot, err
 	}
-	path, err := loadCategoryPath(ctx, tx, p.Category, true)
-	if err != nil {
-		return snapshot, err
-	}
-	p.CategoryPath = path
 	version := p.PublishedVersion + 1
 	publishedAt := time.Now().UTC()
 	snapshot = p.Snapshot(actorID, version, publishedAt)
@@ -699,6 +709,59 @@ func (r *TrackingRepository) Publish(ctx context.Context, projectID, id, actorID
 		return snapshot, err
 	}
 	return snapshot, nil
+}
+
+func lockActiveCategoryPath(ctx context.Context, tx *sql.Tx, projectID, leafID uint64) ([]tracking.CategoryRef, tracking.Category, error) {
+	leaf, err := findCategory(ctx, tx, projectID, leafID)
+	if err != nil {
+		return nil, tracking.Category{}, err
+	}
+	if leaf.ProjectID != projectID {
+		return nil, tracking.Category{}, tracking.NewCodedError("CATEGORY_INVALID", "category path crosses projects")
+	}
+	observed := []tracking.Category{leaf}
+	parentID := leaf.ParentID
+	for parentID != nil && len(observed) < 4 {
+		parent, e := findCategory(ctx, tx, projectID, *parentID)
+		if e != nil {
+			return nil, tracking.Category{}, e
+		}
+		if parent.ProjectID != projectID {
+			return nil, tracking.Category{}, tracking.NewCodedError("CATEGORY_INVALID", "category path crosses projects")
+		}
+		observed = append(observed, parent)
+		parentID = parent.ParentID
+	}
+	if parentID != nil || len(observed) != 3 {
+		return nil, tracking.Category{}, tracking.NewCodedError("CATEGORY_INVALID", "complete DOMAIN/MODULE/SCENE path required")
+	}
+	for i, j := 0, len(observed)-1; i < j; i, j = i+1, j-1 {
+		observed[i], observed[j] = observed[j], observed[i]
+	}
+	levels := []tracking.CategoryLevel{tracking.Domain, tracking.Module, tracking.Scene}
+	locked := make([]tracking.Category, 0, 3)
+	for index, expected := range observed {
+		current, e := findCategoryWithLock(ctx, tx, projectID, expected.ID, true)
+		if e != nil {
+			return nil, tracking.Category{}, e
+		}
+		if current.ProjectID != projectID || current.Level != levels[index] || !current.Active {
+			return nil, tracking.Category{}, tracking.NewCodedError("CATEGORY_INVALID", "category path must be active DOMAIN/MODULE/SCENE")
+		}
+		if index == 0 {
+			if current.ParentID != nil {
+				return nil, tracking.Category{}, tracking.NewCodedError("CATEGORY_INVALID", "DOMAIN cannot have parent")
+			}
+		} else if current.ParentID == nil || *current.ParentID != locked[index-1].ID {
+			return nil, tracking.Category{}, tracking.NewCodedError("CATEGORY_INVALID", "category parent chain changed")
+		}
+		locked = append(locked, current)
+	}
+	path := make([]tracking.CategoryRef, len(locked))
+	for index, category := range locked {
+		path[index] = tracking.CategoryRef{ID: category.ID, Code: category.Code, Name: category.Name, Level: category.Level}
+	}
+	return path, locked[2], nil
 }
 
 func (r *TrackingRepository) Deprecate(ctx context.Context, projectID, id, actorID uint64, reason string, replacementID *uint64) (err error) {

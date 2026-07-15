@@ -3,6 +3,8 @@ package statistics
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +98,35 @@ func TestHistoryResolvesCategoryCodesToProjectScopedDurableIDs(t *testing.T) {
 	require.EqualValues(t, 11, history.last.DomainCategoryID)
 	require.EqualValues(t, 22, history.last.ModuleCategoryID)
 	require.Equal(t, uint64(9), resolvedProject)
+}
+
+func TestStatisticsRejectsOversizedFiltersBeforePointOrCategoryLookup(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	calls := 0
+	points := &countingPointSource{calls: &calls}
+	svc := NewService(allowViewer{}, &fakeRealtime{}, &fakeHistory{}, points, nil, nowFn(now))
+	codes := make([]string, 101)
+	for i := range codes {
+		codes[i] = fmt.Sprintf("point_%03d", i)
+	}
+	_, err := svc.Summary(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, PointCodes: append(codes, codes[0], codes[1]), Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInputTooLarge)
+	require.Zero(t, calls)
+	_, err = svc.Summary(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, PointCodes: []string{strings.Join(codes, ",")}, Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInputTooLarge)
+	require.Zero(t, calls)
+	_, err = svc.Summary(context.Background(), 4, Query{ProjectID: 9, Start: now.Add(-time.Hour), End: now, DomainCategoryCode: strings.Repeat("x", 65), Timezone: "UTC"})
+	require.ErrorIs(t, err, ErrInputTooLarge)
+	require.Zero(t, calls)
+}
+
+func TestDiagnosticsRejectsOversizedFiltersBeforeAuthorization(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	auth := &countingAuth{}
+	svc := NewService(auth, nil, nil, nil, &fakeDiagnostics{}, nowFn(now))
+	_, err := svc.RecentEvents(context.Background(), 4, DiagnosticQuery{ProjectID: 9, Start: now.Add(-time.Hour), End: now, Limit: 20, PointCodes: []string{strings.Repeat("x", 129)}})
+	require.ErrorIs(t, err, ErrInputTooLarge)
+	require.Zero(t, auth.calls)
 }
 
 func TestRealtimeRequiresPointModesAndRejectsMixedModes(t *testing.T) {
@@ -211,6 +242,28 @@ func (f fakePoints) ResolveCategoryIDs(_ context.Context, projectID uint64, doma
 }
 
 type fakeDiagnostics struct{ recentCalls int }
+
+type countingAuth struct{ calls int }
+
+func (a *countingAuth) RequireRole(context.Context, uint64, uint64, ...project.Role) error {
+	a.calls++
+	return nil
+}
+func (a *countingAuth) ProjectTimezone(context.Context, uint64, uint64) (string, error) {
+	a.calls++
+	return "UTC", nil
+}
+
+type countingPointSource struct{ calls *int }
+
+func (p *countingPointSource) Get(context.Context, uint64, string) (tracking.Snapshot, error) {
+	(*p.calls)++
+	return tracking.Snapshot{}, nil
+}
+func (p *countingPointSource) ResolveCategoryIDs(context.Context, uint64, string, string, string) (uint64, uint64, uint64, error) {
+	(*p.calls)++
+	return 0, 0, 0, nil
+}
 
 func (f *fakeDiagnostics) ListRecent(context.Context, DiagnosticFilter) (EventPage, error) {
 	f.recentCalls++

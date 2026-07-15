@@ -50,12 +50,23 @@ func (r *TrackingRepository) FindCategoryInProject(ctx context.Context, projectI
 	return findCategory(ctx, r.db, projectID, id)
 }
 func (r *TrackingRepository) ResolveCategoryIDs(ctx context.Context, projectID uint64, domain, module, scene string) (uint64, uint64, uint64, error) {
+	return r.resolveCategoryIDs(ctx, projectID, domain, module, scene, false)
+}
+func (r *TrackingRepository) ResolveActiveCategoryIDs(ctx context.Context, projectID uint64, domain, module, scene string) (uint64, uint64, uint64, error) {
+	return r.resolveCategoryIDs(ctx, projectID, domain, module, scene, true)
+}
+func (r *TrackingRepository) resolveCategoryIDs(ctx context.Context, projectID uint64, domain, module, scene string, activeOnly bool) (uint64, uint64, uint64, error) {
 	resolve := func(code string, level tracking.CategoryLevel) (uint64, error) {
 		if code == "" {
 			return 0, nil
 		}
 		var id uint64
-		err := r.db.QueryRowContext(ctx, `SELECT id FROM tracking_category WHERE project_id=? AND code=? AND level=? AND is_active=TRUE LIMIT 1`, projectID, code, level).Scan(&id)
+		query := `SELECT id FROM tracking_category WHERE project_id=? AND code=? AND level=?`
+		if activeOnly {
+			query += ` AND is_active=TRUE`
+		}
+		query += ` LIMIT 1`
+		err := r.db.QueryRowContext(ctx, query, projectID, code, level).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, tracking.ErrCategoryNotFound
 		}

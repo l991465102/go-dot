@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,6 +48,18 @@ func TestStatisticsControllerMapsValidationAndForbidden(t *testing.T) {
 		mux.ServeHTTP(res, req)
 		require.Equal(t, tc.status, res.Code, res.Body.String())
 	}
+}
+
+func TestStatisticsControllerMapsOversizedFilterTo413(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	svc := statistics.NewService(httpAuth{project: 9}, nil, &httpHistory{}, nil, nil, func() time.Time { return now })
+	mux := http.NewServeMux()
+	NewStatisticsController(svc).Register(mux)
+	url := "/api/v1/statistics/summary?project_id=9&start=2026-07-15T10:00:00Z&end=2026-07-15T11:00:00Z&point_code=" + strings.Repeat("x", 129)
+	req := httptest.NewRequest(http.MethodGet, url, nil).WithContext(context.WithValue(context.Background(), principalKey{}, auth.Principal{UserID: 3}))
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, res.Code, res.Body.String())
 }
 
 func TestStatisticsControllerUnexpectedFailureHasRequestIDAndNoBackendDetail(t *testing.T) {

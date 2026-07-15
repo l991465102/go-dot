@@ -193,6 +193,11 @@ func (s *Service) Trend(ctx context.Context, actor uint64, q Query) ([]ports.Tre
 }
 
 func (s *Service) filter(ctx context.Context, actor uint64, q Query, maxRange time.Duration) (ports.StatisticsFilter, error) {
+	pointCodes, err := validateFilterInput(q.PointCodes, q.DomainCategoryCode, q.ModuleCategoryCode, q.SceneCategoryCode, q.Platform, q.Channel, q.Timezone, "")
+	if err != nil {
+		return ports.StatisticsFilter{}, err
+	}
+	q.PointCodes = pointCodes
 	if q.ProjectID == 0 || q.Start.IsZero() || !q.End.After(q.Start) || q.End.Sub(q.Start) > maxRange {
 		return ports.StatisticsFilter{}, fmt.Errorf("%w: project and a range no longer than %s are required", ErrInvalidQuery, maxRange)
 	}
@@ -312,6 +317,14 @@ func (s *Service) DeadLetters(ctx context.Context, actor, projectID uint64, curs
 	return s.diagnostics.ListDeadLetters(ctx, DeadLetterFilter{ProjectID: projectID, Cursor: cursor, Limit: limit})
 }
 func (s *Service) diagnosticFilter(ctx context.Context, actor uint64, q DiagnosticQuery) (DiagnosticFilter, error) {
+	pointCodes, err := validateFilterInput(q.PointCodes, "", "", "", q.Platform, q.Channel, "", q.ErrorCode)
+	if err != nil {
+		return DiagnosticFilter{}, err
+	}
+	if len(q.Cursor) > 2048 {
+		return DiagnosticFilter{}, fmt.Errorf("%w: cursor", ErrInputTooLarge)
+	}
+	q.PointCodes = pointCodes
 	if q.ProjectID == 0 || q.Start.IsZero() || !q.End.After(q.Start) || q.End.Sub(q.Start) > 30*24*time.Hour || q.Start.Before(s.now().UTC().Add(-30*24*time.Hour)) || q.Limit < 1 || q.Limit > 100 {
 		return DiagnosticFilter{}, fmt.Errorf("%w: diagnostics are limited to the latest 30 days and 100 rows", ErrInvalidQuery)
 	}
@@ -322,6 +335,39 @@ func (s *Service) diagnosticFilter(ctx context.Context, actor uint64, q Diagnost
 		return DiagnosticFilter{}, err
 	}
 	return DiagnosticFilter{ProjectID: q.ProjectID, Start: q.Start.UTC(), End: q.End.UTC(), PointCodes: uniqueNonempty(q.PointCodes), Platform: q.Platform, Channel: q.Channel, ErrorCode: q.ErrorCode, Cursor: q.Cursor, Limit: q.Limit}, nil
+}
+
+func validateFilterInput(pointCodes []string, domain, module, scene, platform, channel, timezone, errorCode string) ([]string, error) {
+	for _, item := range []struct {
+		value string
+		limit int
+	}{{domain, 64}, {module, 64}, {scene, 64}, {platform, 32}, {channel, 64}, {timezone, 64}, {errorCode, 64}} {
+		if len(item.value) > item.limit {
+			return nil, fmt.Errorf("%w: filter value", ErrInputTooLarge)
+		}
+	}
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(pointCodes))
+	for _, raw := range pointCodes {
+		for _, code := range strings.Split(raw, ",") {
+			code = strings.TrimSpace(code)
+			if code == "" {
+				continue
+			}
+			if len(code) > 128 {
+				return nil, fmt.Errorf("%w: point_code", ErrInputTooLarge)
+			}
+			if _, ok := seen[code]; ok {
+				continue
+			}
+			seen[code] = struct{}{}
+			normalized = append(normalized, code)
+			if len(normalized) > 100 {
+				return nil, fmt.Errorf("%w: too many point_code filters", ErrInputTooLarge)
+			}
+		}
+	}
+	return normalized, nil
 }
 func uniqueNonempty(values []string) []string {
 	seen := map[string]struct{}{}

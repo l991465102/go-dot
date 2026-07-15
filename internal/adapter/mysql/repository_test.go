@@ -72,7 +72,7 @@ func TestTrackingRepositoryLoadsOnlyPublishedImmutableSnapshot(t *testing.T) {
 	require.Contains(t, script.queries[0], "definition_state='PUBLISHED'")
 }
 
-func TestTrackingRepositoryResolvesCategoryCodeInsideProjectAndLevel(t *testing.T) {
+func TestTrackingRepositoryResolvesInactiveHistoricalCategoryInsideProjectAndLevel(t *testing.T) {
 	script, db := openScriptedDB(t, []driver.Value{uint64(41)})
 	domainID, moduleID, sceneID, err := NewTrackingRepository(db).ResolveCategoryIDs(context.Background(), 9, "mall", "", "")
 	require.NoError(t, err)
@@ -80,6 +80,14 @@ func TestTrackingRepositoryResolvesCategoryCodeInsideProjectAndLevel(t *testing.
 	require.Zero(t, moduleID)
 	require.Zero(t, sceneID)
 	require.Contains(t, script.queries[0], "project_id=? AND code=? AND level=?")
+	require.NotContains(t, script.queries[0], "is_active=TRUE")
+}
+
+func TestTrackingRepositoryKeepsSeparateActiveCategoryResolverForGovernance(t *testing.T) {
+	script, db := openScriptedDB(t, []driver.Value{uint64(41)})
+	_, _, _, err := NewTrackingRepository(db).ResolveActiveCategoryIDs(context.Background(), 9, "mall", "", "")
+	require.NoError(t, err)
+	require.Contains(t, script.queries[0], "is_active=TRUE")
 }
 
 func TestTrackingRepositoryMissingCategoryCodeIsNotFound(t *testing.T) {

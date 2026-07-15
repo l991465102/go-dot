@@ -57,6 +57,8 @@ services:
       GO_DOT_CLICKHOUSE_DSN: clickhouse://default:@clickhouse:9000/go_dot
       GO_DOT_JWT_SECRET: local-jwt-secret-change-before-production
       GO_DOT_VISITOR_MASTER_KEY: local-visitor-key-change-before-production
+      # Set true only when the browser-facing deployment is served through HTTPS.
+      GO_DOT_SECURE_COOKIES: ${GO_DOT_SECURE_COOKIES:-false}
       TZ: UTC
     depends_on:
       mysql:

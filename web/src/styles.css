@@ -95,6 +95,19 @@ h1, h2, p { margin-top: 0; }
 .auth-page--compact { display: block; background: #f5f7fb; }
 .auth-page--compact .auth-panel { min-height: 100vh; }
 .auth-page--compact .auth-card { padding: 38px; background: white; border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 16px 50px rgba(15,23,42,.07); }
+.onboarding-page { min-height: 100vh; padding-bottom: 64px; background: #f5f7fb; }
+.onboarding-topbar { height: 82px; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; background: var(--nav); }
+.onboarding-topbar .brand { height: auto; padding: 0; border: 0; }
+.text-button { color: #aeb9ca; background: transparent; border: 0; cursor: pointer; }
+.text-button:hover { color: white; }
+.onboarding-card { width: min(580px, calc(100% - 36px)); margin: 56px auto 0; padding: 42px; background: white; border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 16px 45px rgba(15,23,42,.06); }
+.onboarding-card h1 { margin: 5px 0 9px; font-size: 29px; letter-spacing: -.035em; }
+.onboarding-card form { display: grid; }
+.onboarding-card label { margin: 17px 0 8px; color: #344054; font-size: 13px; font-weight: 600; }
+.onboarding-card form > .el-button, .onboarding-card > .el-button { width: 100%; margin-top: 25px; }
+.onboarding-card .el-select { width: 100%; }
+.success-mark { width: 52px; height: 52px; margin-bottom: 25px; display: grid; place-items: center; color: #047857; background: #dff7ec; border-radius: 50%; font-size: 25px; }
+.write-key-box { overflow-wrap: anywhere; padding: 16px; color: #1d4ed8; background: #eff5ff; border: 1px solid #cbdcff; border-radius: 9px; font-size: 13px; }
 
 @media (max-width: 1080px) {
   .overview-grid { grid-template-columns: repeat(2, 1fr); }

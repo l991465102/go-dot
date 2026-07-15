@@ -56,10 +56,9 @@ apiClient.interceptors.response.use(
       throw error
     }
     request._authRetried = true
+    let token: string
     try {
-      const token = await refreshAccessToken()
-      request.headers.Authorization = `Bearer ${token}`
-      return await apiClient(request)
+      token = await refreshAccessToken()
     } catch (refreshError) {
       setAccessToken(null)
       if (!unauthorizedNotified) {
@@ -68,5 +67,7 @@ apiClient.interceptors.response.use(
       }
       throw refreshError
     }
+    request.headers.Authorization = `Bearer ${token}`
+    return apiClient(request)
   },
 )

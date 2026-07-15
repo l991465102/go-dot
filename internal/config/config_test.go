@@ -106,3 +106,22 @@ func TestLoadAcceptsMinimumQueuePublishDedupTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 72*time.Hour, cfg.Queue.PublishDedupTTL)
 }
+
+func TestLoadSecureCookiesFromEnvironment(t *testing.T) {
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_SECURE_COOKIES", "true")
+
+	cfg, err := Load(context.Background())
+	require.NoError(t, err)
+	require.True(t, cfg.Auth.SecureCookies)
+}
+
+func TestLoadRejectsInvalidSecureCookiesValue(t *testing.T) {
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_SECURE_COOKIES", "sometimes")
+
+	_, err := Load(context.Background())
+	require.ErrorContains(t, err, "GO_DOT_SECURE_COOKIES")
+}

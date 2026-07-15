@@ -40,11 +40,8 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function signOut() {
-    try {
-      await authApi.logout()
-    } finally {
-      clearSession()
-    }
+    await authApi.logout()
+    clearSession()
   }
 
   async function updatePassword(currentPassword: string, newPassword: string) {

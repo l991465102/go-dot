@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
@@ -75,7 +74,7 @@ func runAPI(ctx context.Context) error {
 		httpapi.NewWriteKeyMiddleware(projectRepo, time.Now),
 		httpapi.NewRateLimitMiddleware(httpapi.NewRedisTokenBucket(redisClient, 200, 100)),
 	)
-	managementHandler := httpapi.NewHandler(authService, projectService, os.Getenv("GO_DOT_SECURE_COOKIES") == "true", trackingService, statisticsService)
+	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService)
 	handler := http.NewServeMux()
 	handler.Handle("/api/v1/collect/events", collectHandler)
 	handler.Handle("/", managementHandler)

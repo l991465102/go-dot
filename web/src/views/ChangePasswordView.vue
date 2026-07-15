@@ -20,7 +20,7 @@ async function submit() {
     await auth.updatePassword(form.currentPassword, form.newPassword)
     await projects.load()
     if (projects.currentProjectId) await router.replace({ name: 'project-overview', params: { projectId: projects.currentProjectId } })
-    else await router.replace({ name: 'login' })
+    else await router.replace({ name: 'project-onboarding' })
   } catch {
     error.value = '密码修改失败，请确认当前密码和新密码规则。'
   } finally {

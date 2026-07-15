@@ -26,9 +26,13 @@ async function selectProject(value: number) {
 }
 
 async function signOut() {
-  projects.reset()
-  await auth.signOut()
-  await router.replace({ name: 'login' })
+  try {
+    await auth.signOut()
+    projects.reset()
+    await router.replace({ name: 'login' })
+  } catch {
+    projects.error = '退出登录失败，会话仍然有效，请稍后重试。'
+  }
 }
 </script>
 

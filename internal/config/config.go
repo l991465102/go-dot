@@ -44,6 +44,7 @@ type AuthConfig struct {
 	VisitorMasterKey string
 	AccessTTL        time.Duration
 	RefreshTTL       time.Duration
+	SecureCookies    bool
 }
 
 type TrackingConfig struct {
@@ -94,6 +95,13 @@ func Load(ctx context.Context) (Config, error) {
 		},
 		Worker:    WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second, RetryBase: time.Second, RetryMax: time.Minute},
 		Scheduler: SchedulerConfig{AggregateEvery: time.Minute, ReclaimEvery: 15 * time.Second, MetricsEvery: time.Minute, ExpireKeysEvery: time.Hour, ReclaimIdle: time.Minute, LeaseTTL: 2 * time.Minute, BatchSize: 100},
+	}
+	if raw := os.Getenv("GO_DOT_SECURE_COOKIES"); raw != "" {
+		secure, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, errors.New("GO_DOT_SECURE_COOKIES must be true or false")
+		}
+		cfg.Auth.SecureCookies = secure
 	}
 	if raw := os.Getenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL"); raw != "" {
 		ttl, err := time.ParseDuration(raw)

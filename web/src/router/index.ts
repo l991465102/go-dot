@@ -5,6 +5,7 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ProjectOverviewView from '@/views/ProjectOverviewView.vue'
+import ProjectOnboardingView from '@/views/ProjectOnboardingView.vue'
 
 const EmptyView = { template: '<div />' }
 
@@ -14,6 +15,7 @@ export function createAppRouter(): Router {
     routes: [
       { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
       { path: '/change-password', name: 'change-password', component: ChangePasswordView },
+      { path: '/onboarding', name: 'project-onboarding', component: ProjectOnboardingView },
       {
         path: '/projects/:projectId',
         component: AppLayout,
@@ -35,19 +37,42 @@ export function createAppRouter(): Router {
     if (!auth.initialized) await auth.restore()
     if (to.meta.public) {
       if (auth.authenticated && auth.mustChangePassword) return { name: 'change-password' }
-      const lastProjectId = Number(localStorage.getItem('go-dot:last-project-id'))
-      if (auth.authenticated && Number.isSafeInteger(lastProjectId) && lastProjectId > 0) {
-        return { name: 'project-overview', params: { projectId: lastProjectId } }
+      if (auth.authenticated) {
+        const projectStore = useProjectStore()
+        try {
+          if (!projectStore.projects.length) await projectStore.load()
+        } catch {
+          return { name: 'project-onboarding' }
+        }
+        return projectStore.currentProjectId
+          ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
+          : { name: 'project-onboarding' }
       }
       return true
     }
     if (!auth.authenticated) return { name: 'login', query: { redirect: to.fullPath } }
     if (auth.mustChangePassword && to.name !== 'change-password') return { name: 'change-password' }
     if (!auth.mustChangePassword && to.name === 'change-password') {
-      const lastProjectId = Number(localStorage.getItem('go-dot:last-project-id'))
-      return Number.isSafeInteger(lastProjectId) && lastProjectId > 0
-        ? { name: 'project-overview', params: { projectId: lastProjectId } }
-        : { name: 'login' }
+      const projectStore = useProjectStore()
+      try {
+        if (!projectStore.projects.length) await projectStore.load()
+      } catch {
+        return { name: 'project-onboarding' }
+      }
+      return projectStore.currentProjectId
+        ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
+        : { name: 'project-onboarding' }
+    }
+    if (to.name === 'project-onboarding') {
+      const projectStore = useProjectStore()
+      try {
+        if (!projectStore.projects.length) await projectStore.load()
+      } catch {
+        return true
+      }
+      return projectStore.currentProjectId
+        ? { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
+        : true
     }
     if (to.path.startsWith('/projects/')) {
       const projectStore = useProjectStore()
@@ -63,7 +88,7 @@ export function createAppRouter(): Router {
         if (projectStore.currentProjectId) {
           return { name: 'project-overview', params: { projectId: projectStore.currentProjectId } }
         }
-        return { name: 'login' }
+        return { name: 'project-onboarding' }
       }
     }
     return true

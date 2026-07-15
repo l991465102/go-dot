@@ -26,7 +26,7 @@ async function submit() {
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : null
     if (redirect) await router.replace(redirect)
     else if (projects.currentProjectId) await router.replace({ name: 'project-overview', params: { projectId: projects.currentProjectId } })
-    else error.value = '当前账号暂无可访问项目，请联系管理员。'
+    else await router.replace({ name: 'project-onboarding' })
   } catch {
     error.value = '账号或密码错误，请重新输入。'
   } finally {

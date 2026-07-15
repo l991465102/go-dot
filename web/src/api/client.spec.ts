@@ -42,4 +42,22 @@ describe('API authentication recovery', () => {
 
     expect(onUnauthorized).toHaveBeenCalledTimes(1)
   })
+
+  it('propagates a replay 500 without clearing the refreshed session', async () => {
+    setAccessToken('expired')
+    vi.spyOn(axios, 'post').mockResolvedValue({ data: { access_token: 'fresh' } })
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    apiClient.defaults.adapter = async (config) => {
+      if (config.headers.Authorization !== 'Bearer fresh') throw unauthorized(config)
+      const response: AxiosResponse = { data: {}, status: 500, statusText: 'Server Error', headers: {}, config }
+      throw new AxiosError('server error', 'ERR_BAD_RESPONSE', config, undefined, response)
+    }
+
+    const result = await Promise.allSettled([apiClient.get('/projects')])
+
+    expect(result[0]?.status).toBe('rejected')
+    expect(onUnauthorized).not.toHaveBeenCalled()
+    expect((await import('./client')).getAccessToken()).toBe('fresh')
+  })
 })

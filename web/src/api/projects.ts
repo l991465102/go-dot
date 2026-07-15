@@ -24,6 +24,18 @@ export interface Project {
   role: ProjectRole
 }
 
+export interface CreateProjectInput {
+  code: string
+  name: string
+  allowedOrigins: string[]
+  timezone: string
+}
+
+export interface CreatedProject {
+  project: Project
+  writeKey: string
+}
+
 function mapProject(project: ApiProject): Project {
   return {
     id: project.id,
@@ -40,4 +52,14 @@ function mapProject(project: ApiProject): Project {
 export async function listProjects(): Promise<Project[]> {
   const { data } = await apiClient.get<{ projects: ApiProject[] }>('/projects')
   return data.projects.map(mapProject)
+}
+
+export async function createProject(input: CreateProjectInput): Promise<CreatedProject> {
+  const { data } = await apiClient.post<{ project: ApiProject; write_key: string }>('/projects', {
+    code: input.code,
+    name: input.name,
+    allowed_origins: input.allowedOrigins,
+    timezone: input.timezone,
+  })
+  return { project: mapProject(data.project), writeKey: data.write_key }
 }

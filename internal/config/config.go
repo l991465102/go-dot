@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gogf/gf/v2/frame/g"
@@ -17,6 +18,7 @@ type Config struct {
 	Auth       AuthConfig
 	Tracking   TrackingConfig
 	Queue      QueueConfig
+	Worker     WorkerConfig
 }
 
 type HTTPConfig struct {
@@ -55,6 +57,13 @@ type QueueConfig struct {
 	PublishDedupTTL time.Duration
 }
 
+type WorkerConfig struct {
+	Concurrency   int
+	MaxDeliveries int
+	ReclaimIdle   time.Duration
+	DrainTimeout  time.Duration
+}
+
 func Load(ctx context.Context) (Config, error) {
 	cfg := Config{
 		HTTP:       HTTPConfig{Address: g.Cfg().MustGet(ctx, "server.address", ":8080").String()},
@@ -75,6 +84,7 @@ func Load(ctx context.Context) (Config, error) {
 			ConsumerGroup:   envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
 			PublishDedupTTL: 72 * time.Hour,
 		},
+		Worker: WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second},
 	}
 	if raw := os.Getenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL"); raw != "" {
 		ttl, err := time.ParseDuration(raw)
@@ -83,6 +93,18 @@ func Load(ctx context.Context) (Config, error) {
 		}
 		cfg.Queue.PublishDedupTTL = ttl
 	}
+	if err := loadPositiveInt("GO_DOT_WORKER_CONCURRENCY", &cfg.Worker.Concurrency); err != nil {
+		return Config{}, err
+	}
+	if err := loadPositiveInt("GO_DOT_WORKER_MAX_DELIVERIES", &cfg.Worker.MaxDeliveries); err != nil {
+		return Config{}, err
+	}
+	if err := loadPositiveDuration("GO_DOT_WORKER_RECLAIM_IDLE", &cfg.Worker.ReclaimIdle); err != nil {
+		return Config{}, err
+	}
+	if err := loadPositiveDuration("GO_DOT_WORKER_DRAIN_TIMEOUT", &cfg.Worker.DrainTimeout); err != nil {
+		return Config{}, err
+	}
 	if cfg.Auth.JWTSecret == "" {
 		return Config{}, errors.New("GO_DOT_JWT_SECRET is required")
 	}
@@ -90,6 +112,28 @@ func Load(ctx context.Context) (Config, error) {
 		return Config{}, errors.New("GO_DOT_VISITOR_MASTER_KEY is required")
 	}
 	return cfg, nil
+}
+
+func loadPositiveInt(name string, target *int) error {
+	if raw := os.Getenv(name); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 {
+			return errors.New(name + " must be a positive integer")
+		}
+		*target = value
+	}
+	return nil
+}
+
+func loadPositiveDuration(name string, target *time.Duration) error {
+	if raw := os.Getenv(name); raw != "" {
+		value, err := time.ParseDuration(raw)
+		if err != nil || value <= 0 {
+			return errors.New(name + " must be a positive duration")
+		}
+		*target = value
+	}
+	return nil
 }
 
 func envOr(name, fallback string) string {

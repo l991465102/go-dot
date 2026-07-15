@@ -8,6 +8,7 @@ import (
 const usage = "usage: go-dot <api|worker|scheduler|migrate>"
 
 var migrateCommand = runMigrate
+var workerCommand = runWorker
 
 func Run(ctx context.Context, args []string) error {
 	if len(args) != 1 {
@@ -19,6 +20,8 @@ func Run(ctx context.Context, args []string) error {
 		return runAPI(ctx)
 	case "migrate":
 		return migrateCommand(ctx)
+	case "worker":
+		return workerCommand(ctx)
 	default:
 		return errors.New(usage)
 	}

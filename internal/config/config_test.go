@@ -31,6 +31,18 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 	require.Equal(t, "tracking:dead", cfg.Queue.DeadStream)
 	require.Equal(t, "tracking-workers", cfg.Queue.ConsumerGroup)
 	require.Equal(t, 72*time.Hour, cfg.Queue.PublishDedupTTL)
+	require.Equal(t, 8, cfg.Worker.Concurrency)
+	require.Equal(t, 5, cfg.Worker.MaxDeliveries)
+	require.Equal(t, 30*time.Second, cfg.Worker.ReclaimIdle)
+	require.Equal(t, 30*time.Second, cfg.Worker.DrainTimeout)
+}
+
+func TestLoadRejectsInvalidWorkerConcurrency(t *testing.T) {
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_WORKER_CONCURRENCY", "0")
+	_, err := Load(context.Background())
+	require.ErrorContains(t, err, "GO_DOT_WORKER_CONCURRENCY")
 }
 
 func TestLoadRejectsUnsafeQueuePublishDedupTTL(t *testing.T) {

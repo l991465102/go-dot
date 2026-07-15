@@ -19,3 +19,16 @@ func TestRunDispatchesMigrateCommand(t *testing.T) {
 	require.NoError(t, Run(context.Background(), []string{"migrate"}))
 	require.True(t, called)
 }
+
+func TestRunDispatchesWorkerCommand(t *testing.T) {
+	original := workerCommand
+	t.Cleanup(func() { workerCommand = original })
+	called := false
+	workerCommand = func(context.Context) error {
+		called = true
+		return nil
+	}
+
+	require.NoError(t, Run(context.Background(), []string{"worker"}))
+	require.True(t, called)
+}

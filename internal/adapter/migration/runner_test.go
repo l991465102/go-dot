@@ -60,7 +60,7 @@ func TestRunRetriesAfterPartiallyAppliedDDL(t *testing.T) {
 		wantNames []string
 	}{
 		{name: "mysql", dialect: MySQL, directory: "mysql", wantNames: []string{"0001_metadata.sql"}},
-		{name: "clickhouse", dialect: ClickHouse, directory: "clickhouse", wantNames: []string{"0001_events.sql", "0002_hourly_stats.sql"}},
+		{name: "clickhouse", dialect: ClickHouse, directory: "clickhouse", wantNames: []string{"0001_events.sql", "0002_hourly_stats.sql", "0003_non_replicated_deduplication.sql"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -74,6 +74,14 @@ func TestRunRetriesAfterPartiallyAppliedDDL(t *testing.T) {
 			require.Equal(t, tt.wantNames, db.AppliedNames())
 		})
 	}
+}
+
+func TestClickHouseMigrationsEnableNonReplicatedDeduplication(t *testing.T) {
+	raw, err := fs.ReadFile(migrationFiles(t, "clickhouse"), "0003_non_replicated_deduplication.sql")
+	require.NoError(t, err)
+	contents := string(raw)
+	require.Contains(t, contents, "ALTER TABLE tracking_event MODIFY SETTING non_replicated_deduplication_window = 1000")
+	require.Contains(t, contents, "ALTER TABLE tracking_invalid_event MODIFY SETTING non_replicated_deduplication_window = 1000")
 }
 
 func migrationFiles(t *testing.T, directory string) fs.FS {

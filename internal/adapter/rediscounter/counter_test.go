@@ -88,6 +88,95 @@ func TestApplyPreflightsUVKeysBeforeIncrementingPV(t *testing.T) {
 	require.False(t, server.Exists(keys.DayPV))
 }
 
+func TestApplyPreflightsEveryPVValueBeforeMutationAndRetriesCleanly(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		key   func(counterKeys) string
+	}{
+		{name: "nonnumeric hour", value: "not-an-integer", key: func(keys counterKeys) string { return keys.HourPV }},
+		{name: "nonnumeric day", value: "not-an-integer", key: func(keys counterKeys) string { return keys.DayPV }},
+		{name: "overflow hour", value: "9223372036854775807", key: func(keys counterKeys) string { return keys.HourPV }},
+		{name: "overflow day", value: "9223372036854775807", key: func(keys counterKeys) string { return keys.DayPV }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := miniredis.RunT(t)
+			client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+			event := countEvent("evt-corrupt-pv")
+			keys := keysFor(event)
+			badKey := tt.key(keys)
+			server.Set(badKey, tt.value)
+
+			applied, err := New(client).Apply(context.Background(), event)
+			require.Error(t, err)
+			require.False(t, applied)
+			require.Equal(t, tt.value, mustGet(t, server, badKey))
+			require.False(t, server.Exists(keys.Completion))
+			for _, key := range []string{keys.HourPV, keys.DayPV, keys.HourUV, keys.DayUV} {
+				if key != badKey {
+					require.False(t, server.Exists(key), key)
+				}
+			}
+
+			server.Del(badKey)
+			first, err := New(client).Apply(context.Background(), event)
+			require.NoError(t, err)
+			second, err := New(client).Apply(context.Background(), event)
+			require.NoError(t, err)
+			require.True(t, first)
+			require.False(t, second)
+			require.Equal(t, "1", mustGet(t, server, keys.HourPV))
+			require.Equal(t, "1", mustGet(t, server, keys.DayPV))
+		})
+	}
+}
+
+func TestApplyPreflightsEveryApproximateUVValueBeforeMutationAndRetriesCleanly(t *testing.T) {
+	tests := []struct {
+		name string
+		key  func(counterKeys) string
+	}{
+		{name: "hour HLL", key: func(keys counterKeys) string { return keys.HourUV }},
+		{name: "day HLL", key: func(keys counterKeys) string { return keys.DayUV }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := miniredis.RunT(t)
+			client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+			event := countEvent("evt-corrupt-hll")
+			keys := keysFor(event)
+			badKey := tt.key(keys)
+			server.Set(badKey, "ordinary-string")
+
+			applied, err := New(client).Apply(context.Background(), event)
+			require.Error(t, err)
+			require.False(t, applied)
+			require.Equal(t, "ordinary-string", mustGet(t, server, badKey))
+			require.False(t, server.Exists(keys.Completion))
+			for _, key := range []string{keys.HourPV, keys.DayPV, keys.HourUV, keys.DayUV} {
+				if key != badKey {
+					require.False(t, server.Exists(key), key)
+				}
+			}
+
+			server.Del(badKey)
+			first, err := New(client).Apply(context.Background(), event)
+			require.NoError(t, err)
+			second, err := New(client).Apply(context.Background(), event)
+			require.NoError(t, err)
+			require.True(t, first)
+			require.False(t, second)
+			hourUV, err := server.PfCount(keys.HourUV)
+			require.NoError(t, err)
+			dayUV, err := server.PfCount(keys.DayUV)
+			require.NoError(t, err)
+			require.Equal(t, 1, hourUV)
+			require.Equal(t, 1, dayUV)
+		})
+	}
+}
+
 func TestApplyRejectsInvalidTimezoneWithoutWriting(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})

@@ -91,36 +91,53 @@ func TestEventStoreClickHouseIntegration(t *testing.T) {
 	require.NoError(t, db.PingContext(ctx))
 
 	suffix := fmt.Sprintf("task7_%d", time.Now().UnixNano())
-	validTable := "tracking_event_" + suffix
+	dedupTable := "tracking_event_dedup_" + suffix
+	replacingTable := "tracking_event_replacing_" + suffix
 	invalidTable := "tracking_invalid_event_" + suffix
-	_, err = db.ExecContext(ctx, `CREATE TABLE `+validTable+` (
+	validColumns := `(
 event_id String,batch_id String,project_id UInt64,point_id UInt64,point_code String,point_version UInt32,
 domain_category_id UInt64,domain_category_code String,module_category_id UInt64,module_category_code String,
 scene_category_id UInt64,scene_category_code String,visitor_hash FixedString(64),platform String,channel String,
 app_version String,session_hash String,client_event_at DateTime64(3,'UTC'),received_at DateTime64(3,'UTC'),
 statistic_at DateTime64(3,'UTC'),statistic_date Date,time_corrected Bool,properties_json String,version UInt64
-) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,event_id)`)
+)`
+	_, err = db.ExecContext(ctx, `CREATE TABLE `+dedupTable+` `+validColumns+`
+ENGINE=MergeTree ORDER BY (project_id,event_id)
+SETTINGS non_replicated_deduplication_window = 1000`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE `+replacingTable+` `+validColumns+`
+ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,event_id)
+SETTINGS non_replicated_deduplication_window = 1000`)
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, `CREATE TABLE `+invalidTable+` (
 project_id UInt64,batch_id String,event_id String,point_code String,platform String,channel String,error_code String,
 error_message String,raw_json String,received_at DateTime64(3,'UTC'),version UInt64
-) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,event_id,error_code)`)
+) ENGINE=ReplacingMergeTree(version) ORDER BY (project_id,event_id,error_code)
+SETTINGS non_replicated_deduplication_window = 1000`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+validTable)
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+dedupTable)
+		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+replacingTable)
 		_, _ = db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+invalidTable)
 	})
 
-	store := newWithTables(db, validTable, invalidTable)
 	event := validEvent()
-	require.NoError(t, store.SaveValid(ctx, "batch-integration", []ports.StoredEvent{event}))
-	require.NoError(t, store.SaveValid(ctx, "batch-integration", []ports.StoredEvent{event}))
+	dedupStore := newWithTables(db, dedupTable, invalidTable)
+	require.NoError(t, dedupStore.SaveValid(ctx, "batch-dedup", []ports.StoredEvent{event}))
+	require.NoError(t, dedupStore.SaveValid(ctx, "batch-dedup", []ports.StoredEvent{event}))
+	var physicalCount uint64
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT count() FROM "+dedupTable+" WHERE event_id = ?", event.EventID).Scan(&physicalCount))
+	require.EqualValues(t, 1, physicalCount, "stable token must deduplicate on plain MergeTree without FINAL")
+
+	replacingStore := newWithTables(db, replacingTable, invalidTable)
+	require.NoError(t, replacingStore.SaveValid(ctx, "batch-replacing", []ports.StoredEvent{event}))
+	require.NoError(t, replacingStore.SaveValid(ctx, "batch-replacing", []ports.StoredEvent{event}))
 	var validCount uint64
-	require.NoError(t, db.QueryRowContext(ctx, "SELECT count() FROM "+validTable+" FINAL WHERE event_id = ?", event.EventID).Scan(&validCount))
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT count() FROM "+replacingTable+" FINAL WHERE event_id = ?", event.EventID).Scan(&validCount))
 	require.EqualValues(t, 1, validCount)
 
 	invalid := ports.InvalidEvent{ProjectID: 7, EventID: "bad-1", PointCode: "view", ErrorCode: "PROPERTY_REQUIRED", ErrorMessage: "required", Original: json.RawMessage(`{"z":2,"a":1}`), ReceivedAt: time.Now().UTC()}
-	require.NoError(t, store.SaveInvalid(ctx, "invalid-integration", []ports.InvalidEvent{invalid}))
+	require.NoError(t, replacingStore.SaveInvalid(ctx, "invalid-integration", []ports.InvalidEvent{invalid}))
 	var errorCode, raw string
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT error_code,raw_json FROM "+invalidTable+" FINAL WHERE event_id = ?", invalid.EventID).Scan(&errorCode, &raw))
 	require.Equal(t, "PROPERTY_REQUIRED", errorCode)

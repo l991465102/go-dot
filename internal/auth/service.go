@@ -21,7 +21,7 @@ type Repository interface {
 	UpdatePassword(context.Context, uint64, string) error
 	TouchLogin(context.Context, uint64, time.Time) error
 	StoreRefreshToken(context.Context, RefreshToken) error
-	RotateRefreshToken(context.Context, string, RefreshToken, time.Time) (RefreshToken, error)
+	RotateRefreshToken(context.Context, string, RefreshToken, time.Time) (User, error)
 	RevokeRefreshToken(context.Context, string, time.Time) error
 }
 
@@ -99,22 +99,12 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
-	token, err := s.repo.RotateRefreshToken(ctx, tokenHash(raw), successor, now)
+	user, err := s.repo.RotateRefreshToken(ctx, tokenHash(raw), successor, now)
 	if err != nil {
 		if errors.Is(err, ErrInvalidToken) {
 			return Session{}, ErrInvalidToken
 		}
 		return Session{}, fmt.Errorf("rotate refresh token: %w", err)
-	}
-	user, err := s.repo.FindUserByID(ctx, token.UserID)
-	if errors.Is(err, ErrUserNotFound) {
-		return Session{}, ErrInvalidToken
-	}
-	if err != nil {
-		return Session{}, fmt.Errorf("find refreshed user: %w", err)
-	}
-	if user.Status != "ACTIVE" {
-		return Session{}, ErrInvalidToken
 	}
 	return s.buildSession(user, refresh, now)
 }

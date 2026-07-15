@@ -68,39 +68,44 @@ func (r *AuthRepository) StoreRefreshToken(ctx context.Context, t auth.RefreshTo
 	_, err := r.db.ExecContext(ctx, `INSERT INTO refresh_token(user_id,token_hash,expires_at) VALUES(?,?,?)`, t.UserID, t.Hash, t.ExpiresAt)
 	return err
 }
-func (r *AuthRepository) RotateRefreshToken(ctx context.Context, hash string, successor auth.RefreshToken, now time.Time) (token auth.RefreshToken, err error) {
+func (r *AuthRepository) RotateRefreshToken(ctx context.Context, hash string, successor auth.RefreshToken, now time.Time) (user auth.User, err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return token, err
+		return user, err
 	}
 	defer func() {
 		if err != nil {
 			_ = tx.Rollback()
 		}
 	}()
+	var token auth.RefreshToken
 	var revoked sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT user_id,token_hash,expires_at,revoked_at FROM refresh_token WHERE token_hash=? FOR UPDATE`, hash).Scan(&token.UserID, &token.Hash, &token.ExpiresAt, &revoked)
+	var lastLogin sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT rt.user_id,rt.token_hash,rt.expires_at,rt.revoked_at,u.username,u.password_hash,u.display_name,u.must_change_password,u.status,u.last_login_at
+FROM refresh_token rt JOIN user_account u ON u.id=rt.user_id WHERE rt.token_hash=? FOR UPDATE`, hash).Scan(&user.ID, &token.Hash, &token.ExpiresAt, &revoked, &user.Username, &user.PasswordHash, &user.DisplayName, &user.MustChangePassword, &user.Status, &lastLogin)
 	if errors.Is(err, sql.ErrNoRows) {
-		return token, auth.ErrInvalidToken
+		return user, auth.ErrInvalidToken
 	}
 	if err != nil {
-		return token, err
+		return user, err
 	}
-	if revoked.Valid || !token.ExpiresAt.After(now) {
-		return token, auth.ErrInvalidToken
+	if revoked.Valid || !token.ExpiresAt.After(now) || user.Status != "ACTIVE" {
+		return user, auth.ErrInvalidToken
+	}
+	if lastLogin.Valid {
+		user.LastLoginAt = lastLogin.Time
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE refresh_token SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`, now, hash); err != nil {
-		return token, err
+		return user, err
 	}
-	successor.UserID = token.UserID
+	successor.UserID = user.ID
 	if _, err = tx.ExecContext(ctx, `INSERT INTO refresh_token(user_id,token_hash,expires_at) VALUES(?,?,?)`, successor.UserID, successor.Hash, successor.ExpiresAt); err != nil {
-		return token, err
+		return user, err
 	}
 	if err = tx.Commit(); err != nil {
-		return token, err
+		return user, err
 	}
-	token.RevokedAt = &now
-	return token, nil
+	return user, nil
 }
 func (r *AuthRepository) RevokeRefreshToken(ctx context.Context, hash string, now time.Time) error {
 	result, err := r.db.ExecContext(ctx, `UPDATE refresh_token SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`, now, hash)

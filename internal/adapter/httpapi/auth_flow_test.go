@@ -157,6 +157,47 @@ func TestProjectAuthorizationInfrastructureFailureReturnsGeneric500(t *testing.T
 	require.NotContains(t, response.Body.String(), "secret")
 }
 
+func TestLogoutInfrastructureFailureKeepsRefreshCookie(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	handler := httpapi.NewHandler(authSvc, project.NewService(newProjectRepo()), false)
+	login := performJSON(t, handler, http.MethodPost, "/api/v1/auth/login", map[string]string{"username": "admin", "password": "admin"}, "")
+	var session struct {
+		AccessToken string `json:"access_token"`
+	}
+	require.NoError(t, json.Unmarshal(login.Body.Bytes(), &session))
+	cookies := login.Result().Cookies()
+	require.Len(t, cookies, 1)
+	authRepo.revokeErr = errors.New("driver unavailable secret-detail")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	req.AddCookie(cookies[0])
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.Empty(t, response.Header().Values("Set-Cookie"))
+	require.JSONEq(t, `{"error":"authentication service unavailable"}`, response.Body.String())
+	require.NotContains(t, response.Body.String(), "secret-detail")
+}
+
+func TestLogoutAlreadyInvalidTokenIsIdempotent(t *testing.T) {
+	authRepo := newAuthRepo()
+	authSvc := auth.NewService(authRepo, []byte("http-test-secret-that-is-long-enough"), 15*time.Minute, 7*24*time.Hour)
+	require.NoError(t, authSvc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	session, err := authSvc.Login(context.Background(), "admin", "admin")
+	require.NoError(t, err)
+	handler := httpapi.NewHandler(authSvc, project.NewService(newProjectRepo()), false)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+session.AccessToken)
+	req.AddCookie(&http.Cookie{Name: "go_dot_refresh", Value: "already-invalid"})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	require.Equal(t, http.StatusNoContent, response.Code)
+}
+
 func performJSON(t *testing.T, handler http.Handler, method, path string, body any, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
@@ -182,6 +223,7 @@ type testAuthRepo struct {
 	findByNameErr     error
 	findByIDErr       error
 	updatePasswordErr error
+	revokeErr         error
 }
 
 func newAuthRepo() *testAuthRepo {
@@ -242,22 +284,32 @@ func (r *testAuthRepo) StoreRefreshToken(_ context.Context, t auth.RefreshToken)
 	r.tokens[t.Hash] = t
 	return nil
 }
-func (r *testAuthRepo) RotateRefreshToken(_ context.Context, h string, successor auth.RefreshToken, n time.Time) (auth.RefreshToken, error) {
+func (r *testAuthRepo) RotateRefreshToken(_ context.Context, h string, successor auth.RefreshToken, n time.Time) (auth.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t, ok := r.tokens[h]
 	if !ok || t.RevokedAt != nil || !t.ExpiresAt.After(n) {
-		return auth.RefreshToken{}, auth.ErrInvalidToken
+		return auth.User{}, auth.ErrInvalidToken
+	}
+	if r.findByIDErr != nil {
+		return auth.User{}, r.findByIDErr
+	}
+	user, ok := r.users[t.UserID]
+	if !ok || user.Status != "ACTIVE" {
+		return auth.User{}, auth.ErrInvalidToken
 	}
 	t.RevokedAt = &n
 	r.tokens[h] = t
 	successor.UserID = t.UserID
 	r.tokens[successor.Hash] = successor
-	return t, nil
+	return user, nil
 }
 func (r *testAuthRepo) RevokeRefreshToken(_ context.Context, h string, n time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.revokeErr != nil {
+		return r.revokeErr
+	}
 	t, ok := r.tokens[h]
 	if !ok {
 		return auth.ErrInvalidToken

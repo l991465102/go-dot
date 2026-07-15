@@ -63,7 +63,10 @@ func (c AuthController) refresh(w http.ResponseWriter, r *http.Request) {
 }
 func (c AuthController) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(refreshCookieName); err == nil {
-		_ = c.service.Logout(r.Context(), cookie.Value)
+		if err := c.service.Logout(r.Context(), cookie.Value); err != nil && !errors.Is(err, auth.ErrInvalidToken) {
+			writeError(w, http.StatusInternalServerError, "authentication service unavailable")
+			return
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: refreshCookieName, Value: "", Path: "/api/v1/auth", MaxAge: -1, HttpOnly: true, Secure: c.secureCookie, SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusNoContent)

@@ -91,6 +91,20 @@ func TestConcurrentRefreshCreatesOnlyOneSuccessor(t *testing.T) {
 	require.EqualValues(t, 7, invalid.Load())
 }
 
+func TestRefreshUserLookupFailureLeavesOldTokenUsable(t *testing.T) {
+	svc, repo := newAuthFixture(t)
+	require.NoError(t, svc.EnsureInitialAdmin(context.Background(), "admin", "admin"))
+	session, err := svc.Login(context.Background(), "admin", "admin")
+	require.NoError(t, err)
+	repo.findUserByIDErr = errors.New("user lookup failed")
+
+	_, err = svc.Refresh(context.Background(), session.RefreshToken)
+	require.ErrorContains(t, err, "user lookup failed")
+	repo.findUserByIDErr = nil
+	_, err = svc.Refresh(context.Background(), session.RefreshToken)
+	require.NoError(t, err)
+}
+
 func TestPasswordEncodingContainsExplicitArgon2idParameters(t *testing.T) {
 	encoded, err := auth.HashPassword("secret")
 	require.NoError(t, err)
@@ -113,6 +127,7 @@ type authMemoryRepository struct {
 	names            map[string]uint64
 	tokens           map[string]auth.RefreshToken
 	failNextRotation error
+	findUserByIDErr  error
 }
 
 func (r *authMemoryRepository) CreateInitialUser(_ context.Context, user auth.User) (auth.User, error) {
@@ -138,6 +153,9 @@ func (r *authMemoryRepository) FindUserByUsername(_ context.Context, username st
 func (r *authMemoryRepository) FindUserByID(_ context.Context, id uint64) (auth.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.findUserByIDErr != nil {
+		return auth.User{}, r.findUserByIDErr
+	}
 	u, ok := r.users[id]
 	if !ok {
 		return auth.User{}, auth.ErrUserNotFound
@@ -159,24 +177,31 @@ func (r *authMemoryRepository) StoreRefreshToken(_ context.Context, token auth.R
 	r.tokens[token.Hash] = token
 	return nil
 }
-func (r *authMemoryRepository) RotateRefreshToken(_ context.Context, hash string, successor auth.RefreshToken, now time.Time) (auth.RefreshToken, error) {
+func (r *authMemoryRepository) RotateRefreshToken(_ context.Context, hash string, successor auth.RefreshToken, now time.Time) (auth.User, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t, ok := r.tokens[hash]
 	if !ok || t.RevokedAt != nil || !t.ExpiresAt.After(now) {
-		return auth.RefreshToken{}, auth.ErrInvalidToken
+		return auth.User{}, auth.ErrInvalidToken
 	}
 	if r.failNextRotation != nil {
 		err := r.failNextRotation
 		r.failNextRotation = nil
-		return auth.RefreshToken{}, err
+		return auth.User{}, err
+	}
+	if r.findUserByIDErr != nil {
+		return auth.User{}, r.findUserByIDErr
+	}
+	user, ok := r.users[t.UserID]
+	if !ok || user.Status != "ACTIVE" {
+		return auth.User{}, auth.ErrInvalidToken
 	}
 	n := now
 	t.RevokedAt = &n
 	r.tokens[hash] = t
 	successor.UserID = t.UserID
 	r.tokens[successor.Hash] = successor
-	return t, nil
+	return user, nil
 }
 func (r *authMemoryRepository) RevokeRefreshToken(_ context.Context, hash string, now time.Time) error {
 	r.mu.Lock()

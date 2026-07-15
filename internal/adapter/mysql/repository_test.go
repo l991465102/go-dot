@@ -32,7 +32,7 @@ func TestProjectRepositoryRejectsRotationDuringGraceUnderRowLock(t *testing.T) {
 
 func TestAuthRepositorySuccessorInsertFailureRollsBackOldRevocation(t *testing.T) {
 	now := time.Now().UTC()
-	script, db := openScriptedDB(t, []driver.Value{uint64(7), "old-hash", now.Add(time.Hour), nil})
+	script, db := openScriptedDB(t, []driver.Value{uint64(7), "old-hash", now.Add(time.Hour), nil, "admin", "password-hash", "Admin", false, "ACTIVE", nil})
 	script.execErrors = []error{nil, errors.New("insert successor failed")}
 	repo := NewAuthRepository(db)
 	successor := auth.RefreshToken{Hash: "new-hash", ExpiresAt: now.Add(7 * 24 * time.Hour)}
@@ -44,6 +44,23 @@ func TestAuthRepositorySuccessorInsertFailureRollsBackOldRevocation(t *testing.T
 
 	// The scripted database presents the old row as unrevoked again, matching
 	// the state a real transactional rollback preserves.
+	_, err = repo.RotateRefreshToken(context.Background(), "old-hash", successor, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, script.commits)
+}
+
+func TestAuthRepositoryUserLookupFailureRollsBackAndOldTokenRemainsUsable(t *testing.T) {
+	now := time.Now().UTC()
+	script, db := openScriptedDB(t, []driver.Value{uint64(7), "old-hash", now.Add(time.Hour), nil, "admin", "password-hash", "Admin", false, "ACTIVE", nil})
+	script.queryErrors = []error{errors.New("user lookup failed")}
+	repo := NewAuthRepository(db)
+	successor := auth.RefreshToken{Hash: "new-hash", ExpiresAt: now.Add(7 * 24 * time.Hour)}
+
+	_, err := repo.RotateRefreshToken(context.Background(), "old-hash", successor, now)
+	require.ErrorContains(t, err, "user lookup failed")
+	require.Equal(t, 1, script.rollbacks)
+	require.Empty(t, script.execQueries)
+
 	_, err = repo.RotateRefreshToken(context.Background(), "old-hash", successor, now)
 	require.NoError(t, err)
 	require.Equal(t, 1, script.commits)
@@ -72,6 +89,7 @@ type dbScript struct {
 	mu          sync.Mutex
 	row         []driver.Value
 	execErrors  []error
+	queryErrors []error
 	queries     []string
 	execQueries []string
 	commits     int
@@ -102,6 +120,13 @@ func (c *scriptedConn) QueryContext(_ context.Context, query string, _ []driver.
 	c.script.mu.Lock()
 	defer c.script.mu.Unlock()
 	c.script.queries = append(c.script.queries, query)
+	if len(c.script.queryErrors) > 0 {
+		err := c.script.queryErrors[0]
+		c.script.queryErrors = c.script.queryErrors[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &scriptedRows{row: append([]driver.Value(nil), c.script.row...)}, nil
 }
 func (c *scriptedConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {

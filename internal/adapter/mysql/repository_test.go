@@ -96,7 +96,7 @@ func TestTrackingDraftCreationRollsBackWhenAuditInsertFails(t *testing.T) {
 	script, db := openScriptedDB(t, nil)
 	script.execErrors = []error{nil, errors.New("audit unavailable")}
 	script.execResults = []driver.Result{scriptResult{lastID: 7, affected: 1}}
-	p := tracking.Point{ProjectID: 9, CategoryID: 3, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: "APPROXIMATE", TimeBasis: "EVENT_TIME", SupportedPlatforms: []string{"web"}, CreatedBy: 1, UpdatedBy: 1}
+	p := tracking.Point{ProjectID: 9, CategoryID: 3, Code: "product_detail_view", Name: "Product detail", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, CreatedBy: 1, UpdatedBy: 1}
 	_, err := NewTrackingRepository(db).CreateDraft(context.Background(), p)
 	require.ErrorContains(t, err, "audit unavailable")
 	require.Equal(t, 1, script.rollbacks)
@@ -168,8 +168,38 @@ func TestTrackingPublicationRejectsCrossProjectCategoryUnderLock(t *testing.T) {
 	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
 }
 
+func TestTrackingDraftUpdateLocksAndRollsBackAuditWithBeforeAfter(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("DRAFT"), {}}
+	script.execErrors = []error{nil, nil, errors.New("audit unavailable")}
+	script.execResults = []driver.Result{scriptResult{affected: 1}, scriptResult{affected: 1}}
+	p := tracking.Point{ID: 7, ProjectID: 9, CategoryID: 3, Category: tracking.Category{ID: 3, ProjectID: 9, Level: tracking.Scene, Active: true}, Code: "product_detail_view", Name: "Renamed", BehaviorType: tracking.PageView, State: tracking.Draft, DevelopmentState: tracking.Pending, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, UpdatedBy: 1}
+	_, err := NewTrackingRepository(db).UpdateDraft(context.Background(), p)
+	require.ErrorContains(t, err, "audit unavailable")
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Equal(t, 1, script.rollbacks)
+	require.Zero(t, script.commits)
+	var before, after map[string]any
+	require.NoError(t, json.Unmarshal(script.execArgs[2][5].Value.([]byte), &before))
+	require.NoError(t, json.Unmarshal(script.execArgs[2][6].Value.([]byte), &after))
+	require.Equal(t, "Product detail", before["name"])
+	require.Equal(t, "Renamed", after["name"])
+}
+
+func TestTrackingDevelopmentStateTransitionAuditsPublishedPoint(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{trackingPointRow("PUBLISHED"), {}}
+	script.execResults = []driver.Result{scriptResult{affected: 1}, scriptResult{affected: 1}}
+	p, err := NewTrackingRepository(db).UpdateDevelopmentState(context.Background(), 9, 7, 1, tracking.Online)
+	require.NoError(t, err)
+	require.Equal(t, tracking.Online, p.DevelopmentState)
+	require.Contains(t, strings.ToUpper(script.queries[0]), "FOR UPDATE")
+	require.Equal(t, "UPDATE_DEVELOPMENT_STATE", script.execArgs[1][2].Value)
+	require.Equal(t, 1, script.commits)
+}
+
 func trackingPointRow(state string) []driver.Value {
-	return []driver.Value{uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "PAGE_VIEW", state, "PENDING", nil, nil, nil, nil, true, true, "APPROXIMATE", "EVENT_TIME", []byte(`["web"]`), []byte(`[]`), nil, nil, nil, uint64(1), nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true, "detail", "Detail", uint64(2)}
+	return []driver.Value{uint64(7), uint64(9), uint64(3), "product_detail_view", "Product detail", nil, "PAGE_VIEW", state, "PENDING", nil, nil, nil, nil, true, true, "APPROXIMATE", "CLIENT", []byte(`["web"]`), []byte(`[]`), nil, nil, nil, uint64(1), nil, nil, uint64(1), uint64(1), uint64(3), uint64(9), "SCENE", true, "detail", "Detail", uint64(2)}
 }
 func trackingReplacementRow(state string) []driver.Value {
 	row := trackingPointRow(state)

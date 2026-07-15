@@ -12,3 +12,6 @@ type DeprecateReq struct {
 	Reason        string  `json:"reason"`
 	ReplacementID *uint64 `json:"replacement_id,omitempty"`
 }
+type DevelopmentStateReq struct {
+	State tracking.DevelopmentState `json:"state"`
+}

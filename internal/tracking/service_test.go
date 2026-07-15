@@ -115,9 +115,64 @@ func TestPointGovernanceValuesAreValidated(t *testing.T) {
 	require.ErrorContains(t, p.ValidateForPublication(), "PLATFORM_INVALID")
 }
 
+func TestEarlyStepDraftCanBeSavedButCannotBePublished(t *testing.T) {
+	svc, repo := newTrackingFixture(t)
+	draft, err := svc.SaveDraft(context.Background(), 1, DraftInput{ProjectID: 2, CategoryID: 3})
+	require.NoError(t, err)
+	require.Empty(t, draft.Code)
+	_, err = svc.Publish(context.Background(), 1, draft.ID)
+	require.ErrorContains(t, err, "POINT_INVALID")
+	require.Equal(t, Draft, repo.points[draft.ID].State)
+}
+
+func TestDraftRejectsGovernanceTyposWhenPresent(t *testing.T) {
+	svc, _ := newTrackingFixture(t)
+	in := DraftInput{ProjectID: 2, CategoryID: 3, UVMode: "APPROXIMAT", TimeBasis: Client}
+	_, err := svc.SaveDraft(context.Background(), 1, in)
+	require.ErrorContains(t, err, "UV_MODE_INVALID")
+	in.UVMode = Approximate
+	in.TimeBasis = "DEVICE"
+	_, err = svc.SaveDraft(context.Background(), 1, in)
+	require.ErrorContains(t, err, "TIME_BASIS_INVALID")
+	in.TimeBasis = Client
+	in.SupportedPlatforms = []string{"desktop"}
+	_, err = svc.SaveDraft(context.Background(), 1, in)
+	require.ErrorContains(t, err, "PLATFORM_INVALID")
+	in.SupportedPlatforms = nil
+	in.Properties = []PropertyInput{{ArrayItemType: "OBJECT"}}
+	_, err = svc.SaveDraft(context.Background(), 1, in)
+	require.ErrorContains(t, err, "PROPERTY_SCHEMA_INVALID")
+}
+
+func TestForeignCategoryIsIndistinguishableFromMissing(t *testing.T) {
+	svc, repo := newTrackingFixture(t)
+	repo.categories[4] = Category{ID: 4, ProjectID: 99, Level: Scene, Active: true}
+	in := DraftInput{ProjectID: 2, CategoryID: 4}
+	_, err := svc.SaveDraft(context.Background(), 1, in)
+	require.ErrorIs(t, err, ErrCategoryNotFound)
+	parent := uint64(4)
+	_, err = svc.CreateCategory(context.Background(), 1, CreateCategory{ProjectID: 2, ParentID: &parent, Code: "child", Name: "Child", Level: Module})
+	require.ErrorIs(t, err, ErrCategoryNotFound)
+}
+
+func TestDevelopmentStateCanChangeAfterPublicationWithoutChangingContract(t *testing.T) {
+	svc, repo := newTrackingFixture(t)
+	p := validDraft()
+	p.State = Published
+	p.DevelopmentState = Testing
+	repo.points[p.ID] = p
+	before := p.Snapshot(1, 1)
+	updated, err := svc.UpdateDevelopmentState(context.Background(), 1, p.ProjectID, p.ID, Online)
+	require.NoError(t, err)
+	require.Equal(t, Online, updated.DevelopmentState)
+	require.Equal(t, before, repo.points[p.ID].Snapshot(1, 1))
+	_, err = svc.UpdateDevelopmentState(context.Background(), 1, p.ProjectID, p.ID, "DONE")
+	require.ErrorContains(t, err, "DEVELOPMENT_STATE_INVALID")
+}
+
 func validDraft() Point {
 	in := validDraftInput()
-	return Point{ID: 7, ProjectID: in.ProjectID, CategoryID: in.CategoryID, Category: Category{ID: in.CategoryID, ProjectID: in.ProjectID, Level: Scene, Active: true}, Code: in.Code, Name: in.Name, BehaviorType: in.BehaviorType, DevelopmentState: Pending, State: Draft, SupportedPlatforms: in.SupportedPlatforms, Properties: in.Properties}
+	return Point{ID: 7, ProjectID: in.ProjectID, CategoryID: in.CategoryID, Category: Category{ID: in.CategoryID, ProjectID: in.ProjectID, Level: Scene, Active: true}, Code: in.Code, Name: in.Name, BehaviorType: in.BehaviorType, DevelopmentState: Pending, State: Draft, UVMode: Approximate, TimeBasis: Client, SupportedPlatforms: in.SupportedPlatforms, Properties: in.Properties}
 }
 
 func validDraftInput() DraftInput {
@@ -157,6 +212,13 @@ func (r *fakeRepository) CreateCategory(_ context.Context, c Category) (Category
 func (r *fakeRepository) FindCategory(_ context.Context, id uint64) (Category, error) {
 	c, ok := r.categories[id]
 	if !ok {
+		return Category{}, ErrCategoryNotFound
+	}
+	return c, nil
+}
+func (r *fakeRepository) FindCategoryInProject(ctx context.Context, projectID, id uint64) (Category, error) {
+	c, err := r.FindCategory(ctx, id)
+	if err != nil || c.ProjectID != projectID {
 		return Category{}, ErrCategoryNotFound
 	}
 	return c, nil
@@ -226,4 +288,13 @@ func (r *fakeRepository) Deprecate(_ context.Context, projectID, id, actorID uin
 	p.ReplacementPointID = replacementID
 	r.points[id] = p
 	return nil
+}
+func (r *fakeRepository) UpdateDevelopmentState(_ context.Context, projectID, id, actor uint64, state DevelopmentState) (Point, error) {
+	p, ok := r.points[id]
+	if !ok || p.ProjectID != projectID {
+		return Point{}, ErrPointNotFound
+	}
+	p.DevelopmentState = state
+	r.points[id] = p
+	return p, nil
 }

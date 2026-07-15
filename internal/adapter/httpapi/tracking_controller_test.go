@@ -29,6 +29,8 @@ func TestTrackingHTTPFullLifecycle(t *testing.T) {
 	draft := requestJSON[tracking.Point](t, mux, http.MethodPost, "/api/v1/projects/9/points", in, http.StatusCreated)
 	require.Equal(t, uint64(9), draft.ProjectID)
 	requestJSON[tracking.Snapshot](t, mux, http.MethodPost, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10)+"/publish", nil, http.StatusOK)
+	transitioned := requestJSON[tracking.Point](t, mux, http.MethodPatch, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10)+"/development-state", map[string]any{"state": "ONLINE"}, http.StatusOK)
+	require.Equal(t, tracking.Online, transitioned.DevelopmentState)
 	requestJSON[map[string]string](t, mux, http.MethodPatch, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10), in, http.StatusConflict)
 	requestJSON[map[string]string](t, mux, http.MethodDelete, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10), nil, http.StatusConflict)
 	replacement := requestJSON[tracking.Point](t, mux, http.MethodPost, "/api/v1/projects/9/points/"+strconv.FormatUint(draft.ID, 10)+"/copy", map[string]any{"code": "product_detail_view_v2"}, http.StatusCreated)
@@ -52,6 +54,8 @@ func TestViewerCannotDeleteOrDeprecateAndStateIsUnchanged(t *testing.T) {
 	repo.points[7] = p
 	requestJSON[map[string]string](t, mux, http.MethodPost, "/api/v1/projects/9/points/7/deprecate", map[string]any{"reason": "old"}, http.StatusForbidden)
 	require.Equal(t, tracking.Published, repo.points[7].State)
+	requestJSON[map[string]string](t, mux, http.MethodPatch, "/api/v1/projects/9/points/7/development-state", map[string]any{"state": "ONLINE"}, http.StatusForbidden)
+	require.NotEqual(t, tracking.Online, repo.points[7].DevelopmentState)
 }
 
 func TestProjectScopedPointLookupHidesForeignPoint(t *testing.T) {
@@ -60,6 +64,15 @@ func TestProjectScopedPointLookupHidesForeignPoint(t *testing.T) {
 	mux := http.NewServeMux()
 	NewTrackingController(svc).Register(mux)
 	requestJSON[map[string]string](t, mux, http.MethodGet, "/api/v1/projects/10/points/7", nil, http.StatusNotFound)
+}
+
+func TestProjectScopedDraftHidesForeignCategory(t *testing.T) {
+	repo := &memoryTrackingRepo{categories: map[uint64]tracking.Category{3: {ID: 3, ProjectID: 9, Level: tracking.Scene, Active: true}}, points: map[uint64]tracking.Point{}}
+	svc := tracking.NewService(repo, trackingAllowAll{})
+	mux := http.NewServeMux()
+	NewTrackingController(svc).Register(mux)
+	body := requestJSON[map[string]string](t, mux, http.MethodPost, "/api/v1/projects/10/points", map[string]any{"category_id": 3}, http.StatusNotFound)
+	require.Equal(t, "CATEGORY_NOT_FOUND", body["error"])
 }
 
 func TestTrackingErrorsAreExplicitAndInfrastructureIsGeneric(t *testing.T) {
@@ -141,6 +154,13 @@ func (r *memoryTrackingRepo) FindCategory(_ context.Context, id uint64) (trackin
 	}
 	return c, nil
 }
+func (r *memoryTrackingRepo) FindCategoryInProject(ctx context.Context, projectID, id uint64) (tracking.Category, error) {
+	c, err := r.FindCategory(ctx, id)
+	if err != nil || c.ProjectID != projectID {
+		return tracking.Category{}, tracking.ErrCategoryNotFound
+	}
+	return c, nil
+}
 func (r *memoryTrackingRepo) CreateDraft(_ context.Context, p tracking.Point) (tracking.Point, error) {
 	r.next++
 	p.ID = r.next
@@ -205,4 +225,13 @@ func (r *memoryTrackingRepo) Deprecate(_ context.Context, projectID, id, actor u
 	p.ReplacementPointID = replacement
 	r.points[id] = p
 	return nil
+}
+func (r *memoryTrackingRepo) UpdateDevelopmentState(_ context.Context, projectID, id, actor uint64, state tracking.DevelopmentState) (tracking.Point, error) {
+	p, ok := r.points[id]
+	if !ok || p.ProjectID != projectID {
+		return tracking.Point{}, tracking.ErrPointNotFound
+	}
+	p.DevelopmentState = state
+	r.points[id] = p
+	return p, nil
 }

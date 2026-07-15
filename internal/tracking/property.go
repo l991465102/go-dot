@@ -76,6 +76,43 @@ func validatePropertySchema(properties []Property) error {
 func validPropertyType(t PropertyType) bool {
 	return t == String || t == Integer || t == Decimal || t == Boolean || t == Datetime || t == Enum || t == Array
 }
+
+func validateDraftPropertySchema(properties []Property) error {
+	seen := map[string]struct{}{}
+	for _, p := range properties {
+		if p.Code != "" {
+			if _, ok := seen[p.Code]; ok {
+				return coded("PROPERTY_SCHEMA_INVALID", "duplicate property %s", p.Code)
+			}
+			seen[p.Code] = struct{}{}
+		}
+		if p.Type != "" && !validPropertyType(p.Type) {
+			return coded("PROPERTY_SCHEMA_INVALID", "invalid type for %s", p.Code)
+		}
+		if len(p.EnumValues) > 0 {
+			if p.Type != Enum {
+				return coded("PROPERTY_SCHEMA_INVALID", "enum values only apply to ENUM")
+			}
+			values := map[string]struct{}{}
+			for _, v := range p.EnumValues {
+				if v == "" {
+					return coded("PROPERTY_SCHEMA_INVALID", "enum values cannot be empty")
+				}
+				if _, ok := values[v]; ok {
+					return coded("PROPERTY_SCHEMA_INVALID", "enum values must be unique")
+				}
+				values[v] = struct{}{}
+			}
+		}
+		if p.ArrayItemType != "" && !validArrayItemType(p.ArrayItemType) {
+			return coded("PROPERTY_SCHEMA_INVALID", "unsupported array item type")
+		}
+		if p.Type != "" && p.Type != Array && p.ArrayItemType != "" {
+			return coded("PROPERTY_SCHEMA_INVALID", "array item type is only valid for arrays")
+		}
+	}
+	return nil
+}
 func validArrayItemType(t PropertyType) bool {
 	return t == String || t == Integer || t == Decimal || t == Boolean || t == Datetime
 }

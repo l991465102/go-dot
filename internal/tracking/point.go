@@ -11,6 +11,8 @@ var pointCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,127}$`)
 type DefinitionState string
 type DevelopmentState string
 type BehaviorType string
+type UVMode string
+type TimeBasis string
 
 const (
 	Draft          DefinitionState  = "DRAFT"
@@ -26,6 +28,10 @@ const (
 	BusinessAction BehaviorType     = "BUSINESS_ACTION"
 	BusinessResult BehaviorType     = "BUSINESS_RESULT"
 	Custom         BehaviorType     = "CUSTOM"
+	Approximate    UVMode           = "APPROXIMATE"
+	Exact          UVMode           = "EXACT"
+	Client         TimeBasis        = "CLIENT"
+	Server         TimeBasis        = "SERVER"
 )
 
 var (
@@ -53,8 +59,8 @@ type Point struct {
 	AbnormalTriggerRule string           `json:"abnormal_trigger_rule,omitempty"`
 	CountPV             bool             `json:"count_pv"`
 	CountUV             bool             `json:"count_uv"`
-	UVMode              string           `json:"uv_mode"`
-	TimeBasis           string           `json:"time_basis"`
+	UVMode              UVMode           `json:"uv_mode"`
+	TimeBasis           TimeBasis        `json:"time_basis"`
 	SupportedPlatforms  []string         `json:"supported_platforms"`
 	SupportedChannels   []string         `json:"supported_channels"`
 	ProductOwner        string           `json:"product_owner,omitempty"`
@@ -83,8 +89,8 @@ type DraftInput struct {
 	AbnormalTriggerRule string           `json:"abnormal_trigger_rule,omitempty"`
 	CountPV             bool             `json:"count_pv"`
 	CountUV             bool             `json:"count_uv"`
-	UVMode              string           `json:"uv_mode,omitempty"`
-	TimeBasis           string           `json:"time_basis,omitempty"`
+	UVMode              UVMode           `json:"uv_mode,omitempty"`
+	TimeBasis           TimeBasis        `json:"time_basis,omitempty"`
 	SupportedPlatforms  []string         `json:"supported_platforms"`
 	SupportedChannels   []string         `json:"supported_channels"`
 	ProductOwner        string           `json:"product_owner,omitempty"`
@@ -110,8 +116,8 @@ type Snapshot struct {
 	AbnormalTriggerRule string        `json:"abnormal_trigger_rule,omitempty"`
 	CountPV             bool          `json:"count_pv"`
 	CountUV             bool          `json:"count_uv"`
-	UVMode              string        `json:"uv_mode"`
-	TimeBasis           string        `json:"time_basis"`
+	UVMode              UVMode        `json:"uv_mode"`
+	TimeBasis           TimeBasis     `json:"time_basis"`
 	SupportedPlatforms  []string      `json:"supported_platforms"`
 	SupportedChannels   []string      `json:"supported_channels"`
 	ProductOwner        string        `json:"product_owner,omitempty"`
@@ -135,12 +141,48 @@ func (p Point) ValidateForPublication() error {
 	if !validDevelopmentState(p.DevelopmentState) {
 		return coded("DEVELOPMENT_STATE_INVALID", "unsupported development state")
 	}
+	if !validUVMode(p.UVMode) {
+		return coded("UV_MODE_INVALID", "unsupported UV mode")
+	}
+	if !validTimeBasis(p.TimeBasis) {
+		return coded("TIME_BASIS_INVALID", "unsupported time basis")
+	}
 	for _, platform := range p.SupportedPlatforms {
 		if !validPlatform(platform) {
 			return coded("PLATFORM_INVALID", "unsupported platform %s", platform)
 		}
 	}
 	return validatePropertySchema(p.Properties)
+}
+
+func (p Point) ValidateDraft() error {
+	if p.ProjectID == 0 || p.CategoryID == 0 {
+		return coded("POINT_INVALID", "project and category are required")
+	}
+	if p.Category.Level != Scene || !p.Category.Active || p.Category.ProjectID != p.ProjectID {
+		return coded("CATEGORY_INVALID", "point requires an active same-project SCENE category")
+	}
+	if p.Code != "" && !pointCodePattern.MatchString(p.Code) {
+		return coded("POINT_INVALID", "invalid point code")
+	}
+	if p.BehaviorType != "" && !validBehaviorType(p.BehaviorType) {
+		return coded("BEHAVIOR_TYPE_INVALID", "unsupported behavior type")
+	}
+	if p.DevelopmentState != "" && !validDevelopmentState(p.DevelopmentState) {
+		return coded("DEVELOPMENT_STATE_INVALID", "unsupported development state")
+	}
+	if p.UVMode != "" && !validUVMode(p.UVMode) {
+		return coded("UV_MODE_INVALID", "unsupported UV mode")
+	}
+	if p.TimeBasis != "" && !validTimeBasis(p.TimeBasis) {
+		return coded("TIME_BASIS_INVALID", "unsupported time basis")
+	}
+	for _, platform := range p.SupportedPlatforms {
+		if !validPlatform(platform) {
+			return coded("PLATFORM_INVALID", "unsupported platform %s", platform)
+		}
+	}
+	return validateDraftPropertySchema(p.Properties)
 }
 
 func (p Point) Snapshot(actorID uint64, version uint, publishedAt ...time.Time) Snapshot {
@@ -206,3 +248,5 @@ func validBehaviorType(v BehaviorType) bool {
 func validPlatform(v string) bool {
 	return v == "web" || v == "ios" || v == "android" || v == "server" || v == "mini_program"
 }
+func validUVMode(v UVMode) bool       { return v == Approximate || v == Exact }
+func validTimeBasis(v TimeBasis) bool { return v == Client || v == Server }

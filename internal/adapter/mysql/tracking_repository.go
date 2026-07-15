@@ -44,10 +44,22 @@ func (r *TrackingRepository) CreateCategory(ctx context.Context, c tracking.Cate
 }
 
 func (r *TrackingRepository) FindCategory(ctx context.Context, id uint64) (tracking.Category, error) {
+	return findCategory(ctx, r.db, 0, id)
+}
+func (r *TrackingRepository) FindCategoryInProject(ctx context.Context, projectID, id uint64) (tracking.Category, error) {
+	return findCategory(ctx, r.db, projectID, id)
+}
+func findCategory(ctx context.Context, q queryer, projectID, id uint64) (tracking.Category, error) {
 	var c tracking.Category
 	var parent sql.NullInt64
 	var description sql.NullString
-	err := r.db.QueryRowContext(ctx, `SELECT id,project_id,parent_id,code,name,level,description,sort_order,is_active,created_by FROM tracking_category WHERE id=?`, id).Scan(&c.ID, &c.ProjectID, &parent, &c.Code, &c.Name, &c.Level, &description, &c.SortOrder, &c.Active, &c.CreatedBy)
+	query := `SELECT id,project_id,parent_id,code,name,level,description,sort_order,is_active,created_by FROM tracking_category WHERE id=?`
+	args := []any{id}
+	if projectID != 0 {
+		query += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	err := q.QueryRowContext(ctx, query, args...).Scan(&c.ID, &c.ProjectID, &parent, &c.Code, &c.Name, &c.Level, &description, &c.SortOrder, &c.Active, &c.CreatedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, tracking.ErrCategoryNotFound
 	}
@@ -206,9 +218,16 @@ func (r *TrackingRepository) UpdateDraft(ctx context.Context, p tracking.Point) 
 		return updated, err
 	}
 	defer rollbackOnError(tx, &err)
+	beforePoint, err := findPoint(ctx, tx, p.ID, true, p.ProjectID)
+	if err != nil {
+		return updated, err
+	}
+	if beforePoint.State != tracking.Draft {
+		return updated, tracking.ErrImmutable
+	}
 	platforms, _ := json.Marshal(nonNilStrings(p.SupportedPlatforms))
 	channels, _ := json.Marshal(nonNilStrings(p.SupportedChannels))
-	result, err := tx.ExecContext(ctx, `UPDATE tracking_point SET category_id=?,code=?,name=?,description=?,behavior_type=?,development_state=?,trigger_page=?,trigger_timing=?,trigger_count_rule=?,abnormal_trigger_rule=?,count_pv=?,count_uv=?,uv_mode=?,time_basis=?,supported_platforms=?,supported_channels=?,product_owner=?,developer_owner=?,requirement_url=?,updated_by=? WHERE id=? AND definition_state='DRAFT'`, p.CategoryID, p.Code, p.Name, nullable(p.Description), p.BehaviorType, p.DevelopmentState, nullable(p.TriggerPage), nullable(p.TriggerTiming), nullable(p.TriggerCountRule), nullable(p.AbnormalTriggerRule), p.CountPV, p.CountUV, p.UVMode, p.TimeBasis, platforms, channels, nullable(p.ProductOwner), nullable(p.DeveloperOwner), nullable(p.RequirementURL), p.UpdatedBy, p.ID)
+	result, err := tx.ExecContext(ctx, `UPDATE tracking_point SET category_id=?,code=?,name=?,description=?,behavior_type=?,development_state=?,trigger_page=?,trigger_timing=?,trigger_count_rule=?,abnormal_trigger_rule=?,count_pv=?,count_uv=?,uv_mode=?,time_basis=?,supported_platforms=?,supported_channels=?,product_owner=?,developer_owner=?,requirement_url=?,updated_by=? WHERE project_id=? AND id=? AND definition_state='DRAFT'`, p.CategoryID, p.Code, p.Name, nullable(p.Description), p.BehaviorType, p.DevelopmentState, nullable(p.TriggerPage), nullable(p.TriggerTiming), nullable(p.TriggerCountRule), nullable(p.AbnormalTriggerRule), p.CountPV, p.CountUV, p.UVMode, p.TimeBasis, platforms, channels, nullable(p.ProductOwner), nullable(p.DeveloperOwner), nullable(p.RequirementURL), p.UpdatedBy, p.ProjectID, p.ID)
 	if err != nil {
 		return updated, translateConflict(err)
 	}
@@ -222,8 +241,43 @@ func (r *TrackingRepository) UpdateDraft(ctx context.Context, p tracking.Point) 
 	if err = insertProperties(ctx, tx, p.ID, p.Properties); err != nil {
 		return updated, err
 	}
+	before, _ := json.Marshal(beforePoint)
 	after, _ := json.Marshal(p)
-	if err = insertAudit(ctx, tx, p.ProjectID, p.UpdatedBy, "UPDATE_DRAFT", "TRACKING_POINT", p.ID, nil, after); err != nil {
+	if err = insertAudit(ctx, tx, p.ProjectID, p.UpdatedBy, "UPDATE_DRAFT", "TRACKING_POINT", p.ID, before, after); err != nil {
+		return updated, err
+	}
+	if err = tx.Commit(); err != nil {
+		return updated, err
+	}
+	return p, nil
+}
+
+func (r *TrackingRepository) UpdateDevelopmentState(ctx context.Context, projectID, id, actorID uint64, state tracking.DevelopmentState) (updated tracking.Point, err error) {
+	tx, e := r.db.BeginTx(ctx, nil)
+	if e != nil {
+		return updated, e
+	}
+	defer rollbackOnError(tx, &err)
+	p, e := findPoint(ctx, tx, id, true, projectID)
+	if e != nil {
+		return updated, e
+	}
+	if p.State != tracking.Draft && p.State != tracking.Published {
+		return updated, tracking.NewCodedError("POINT_STATE_INVALID", "development state can only change for draft or published points")
+	}
+	before, _ := json.Marshal(p)
+	result, e := tx.ExecContext(ctx, `UPDATE tracking_point SET development_state=?,updated_by=? WHERE project_id=? AND id=? AND definition_state IN ('DRAFT','PUBLISHED')`, state, actorID, projectID, id)
+	if e != nil {
+		return updated, e
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return updated, tracking.ErrPointNotFound
+	}
+	p.DevelopmentState = state
+	p.UpdatedBy = actorID
+	after, _ := json.Marshal(p)
+	if err = insertAudit(ctx, tx, projectID, actorID, "UPDATE_DEVELOPMENT_STATE", "TRACKING_POINT", id, before, after); err != nil {
 		return updated, err
 	}
 	if err = tx.Commit(); err != nil {

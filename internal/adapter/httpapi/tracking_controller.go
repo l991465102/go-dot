@@ -24,6 +24,7 @@ func (c TrackingController) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/publish", c.publish)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/copy", c.copyPoint)
 	mux.HandleFunc("POST /api/v1/projects/{projectID}/points/{id}/deprecate", c.deprecate)
+	mux.HandleFunc("PATCH /api/v1/projects/{projectID}/points/{id}/development-state", c.updateDevelopmentState)
 }
 func principalAndID(w http.ResponseWriter, r *http.Request) (uint64, uint64, uint64, bool) {
 	p, ok := PrincipalFromContext(r.Context())
@@ -171,6 +172,22 @@ func (c TrackingController) deprecate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+func (c TrackingController) updateDevelopmentState(w http.ResponseWriter, r *http.Request) {
+	actor, projectID, id, ok := principalAndID(w, r)
+	if !ok {
+		return
+	}
+	var req v1.DevelopmentStateReq
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	p, err := c.service.UpdateDevelopmentState(r.Context(), actor, projectID, id, req.State)
+	if err != nil {
+		trackingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 func trackingError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError

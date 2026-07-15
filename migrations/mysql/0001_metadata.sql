@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS tracking_point (
     count_pv BOOLEAN NOT NULL DEFAULT TRUE,
     count_uv BOOLEAN NOT NULL DEFAULT TRUE,
     uv_mode VARCHAR(32) NOT NULL DEFAULT 'APPROXIMATE',
-    time_basis VARCHAR(32) NOT NULL DEFAULT 'EVENT_TIME',
+    time_basis VARCHAR(32) NOT NULL DEFAULT 'CLIENT',
     supported_platforms JSON NOT NULL,
     supported_channels JSON NOT NULL,
     product_owner VARCHAR(128) NULL,

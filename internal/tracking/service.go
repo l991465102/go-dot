@@ -10,6 +10,7 @@ import (
 type Repository interface {
 	CreateCategory(context.Context, Category) (Category, error)
 	FindCategory(context.Context, uint64) (Category, error)
+	FindCategoryInProject(context.Context, uint64, uint64) (Category, error)
 	CreateDraft(context.Context, Point) (Point, error)
 	FindPoint(context.Context, uint64) (Point, error)
 	FindPointInProject(context.Context, uint64, uint64) (Point, error)
@@ -17,6 +18,7 @@ type Repository interface {
 	DeleteDraft(context.Context, uint64, uint64, uint64) error
 	Publish(context.Context, uint64, uint64, uint64) (Snapshot, error)
 	Deprecate(context.Context, uint64, uint64, uint64, string, *uint64) error
+	UpdateDevelopmentState(context.Context, uint64, uint64, uint64, DevelopmentState) (Point, error)
 }
 
 type Authorizer interface {
@@ -36,7 +38,7 @@ func (s *Service) CreateCategory(ctx context.Context, actorID uint64, in CreateC
 	}
 	var parent *Category
 	if in.ParentID != nil {
-		p, err := s.repo.FindCategory(ctx, *in.ParentID)
+		p, err := s.repo.FindCategoryInProject(ctx, in.ProjectID, *in.ParentID)
 		if err != nil {
 			return Category{}, err
 		}
@@ -52,7 +54,7 @@ func (s *Service) SaveDraft(ctx context.Context, actorID uint64, in DraftInput) 
 	if err := s.auth.RequireRole(ctx, actorID, in.ProjectID, project.Admin); err != nil {
 		return Point{}, err
 	}
-	category, err := s.repo.FindCategory(ctx, in.CategoryID)
+	category, err := s.repo.FindCategoryInProject(ctx, in.ProjectID, in.CategoryID)
 	if err != nil {
 		return Point{}, err
 	}
@@ -68,7 +70,7 @@ func (s *Service) SaveDraft(ctx context.Context, actorID uint64, in DraftInput) 
 	p.CreatedBy = actorID
 	p.UpdatedBy = actorID
 	p.AuditAction = "CREATE_DRAFT"
-	if err := p.ValidateForPublication(); err != nil {
+	if err := p.ValidateDraft(); err != nil {
 		return Point{}, err
 	}
 	return s.repo.CreateDraft(ctx, p)
@@ -93,7 +95,7 @@ func (s *Service) updateDraftAuthorized(ctx context.Context, actorID uint64, exi
 		return Point{}, coded("POINT_INVALID", "project cannot be changed")
 	}
 	in.ProjectID = existing.ProjectID
-	category, err := s.repo.FindCategory(ctx, in.CategoryID)
+	category, err := s.repo.FindCategoryInProject(ctx, existing.ProjectID, in.CategoryID)
 	if err != nil {
 		return Point{}, err
 	}
@@ -110,7 +112,7 @@ func (s *Service) updateDraftAuthorized(ctx context.Context, actorID uint64, exi
 	p.CreatedBy = existing.CreatedBy
 	p.UpdatedBy = actorID
 	p.AuditAction = "UPDATE_DRAFT"
-	if err := p.ValidateForPublication(); err != nil {
+	if err := p.ValidateDraft(); err != nil {
 		return Point{}, err
 	}
 	return s.repo.UpdateDraft(ctx, p)
@@ -292,21 +294,35 @@ func (s *Service) Get(ctx context.Context, actorID, pointID uint64) (Point, erro
 	return p, nil
 }
 
-func pointFromInput(in DraftInput) (Point, error) {
-	if in.ProjectID == 0 || in.CategoryID == 0 || in.Code == "" || in.Name == "" {
-		return Point{}, coded("POINT_INVALID", "project_id, category_id, code and name are required")
-	}
-	if err := validatePropertySchema(in.Properties); err != nil {
+func (s *Service) UpdateDevelopmentState(ctx context.Context, actorID, projectID, pointID uint64, state DevelopmentState) (Point, error) {
+	if err := s.auth.RequireRole(ctx, actorID, projectID, project.Admin); err != nil {
 		return Point{}, err
 	}
+	if !validDevelopmentState(state) {
+		return Point{}, coded("DEVELOPMENT_STATE_INVALID", "unsupported development state")
+	}
+	p, err := s.repo.FindPointInProject(ctx, projectID, pointID)
+	if err != nil {
+		return Point{}, err
+	}
+	if p.State != Draft && p.State != Published {
+		return Point{}, coded("POINT_STATE_INVALID", "development state can only change for draft or published points")
+	}
+	return s.repo.UpdateDevelopmentState(ctx, projectID, pointID, actorID, state)
+}
+
+func pointFromInput(in DraftInput) (Point, error) {
+	if in.ProjectID == 0 || in.CategoryID == 0 {
+		return Point{}, coded("POINT_INVALID", "project_id and category_id are required")
+	}
 	if in.DevelopmentState == "" {
-		in.DevelopmentState = "PENDING"
+		in.DevelopmentState = Pending
 	}
 	if in.UVMode == "" {
-		in.UVMode = "APPROXIMATE"
+		in.UVMode = Approximate
 	}
 	if in.TimeBasis == "" {
-		in.TimeBasis = "EVENT_TIME"
+		in.TimeBasis = Client
 	}
 	return Point{ProjectID: in.ProjectID, CategoryID: in.CategoryID, Code: in.Code, Name: in.Name, Description: in.Description, BehaviorType: in.BehaviorType, DevelopmentState: in.DevelopmentState, TriggerPage: in.TriggerPage, TriggerTiming: in.TriggerTiming, TriggerCountRule: in.TriggerCountRule, AbnormalTriggerRule: in.AbnormalTriggerRule, CountPV: in.CountPV, CountUV: in.CountUV, UVMode: in.UVMode, TimeBasis: in.TimeBasis, SupportedPlatforms: in.SupportedPlatforms, SupportedChannels: in.SupportedChannels, ProductOwner: in.ProductOwner, DeveloperOwner: in.DeveloperOwner, RequirementURL: in.RequirementURL, Properties: in.Properties}, nil
 }

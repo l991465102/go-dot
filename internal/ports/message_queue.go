@@ -30,7 +30,3 @@ type MessageQueue interface {
 	MoveToDLQ(ctx context.Context, sourceStream, group string, msg Message, cause error) error
 	ReclaimStale(ctx context.Context, stream, group, consumer string, idle time.Duration, count int) ([]Message, error)
 }
-
-func DLQStream(string) string {
-	return DeadLetterStream
-}

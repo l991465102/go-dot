@@ -11,9 +11,10 @@ import (
 )
 
 type QueueFixture struct {
-	Queue   ports.MessageQueue
-	Reset   func(context.Context) error
-	Pending func(context.Context, string, string) (int64, error)
+	Queue      ports.MessageQueue
+	Reset      func(context.Context) error
+	Pending    func(context.Context, string, string) (int64, error)
+	DeadStream string
 }
 
 type Factory func() QueueFixture
@@ -104,7 +105,7 @@ func RunMessageQueueContract(t *testing.T, factory Factory) {
 		require.NoError(t, fixture.Queue.MoveToDLQ(ctx, stream, "workers", messages[0], fmt.Errorf("permanent")))
 		require.Equal(t, int64(0), mustPending(t, fixture.Pending, stream, "workers"))
 
-		dlqMessages, err := fixture.Queue.Consume(ctx, ports.DLQStream(stream), "dlq-readers", "reader", 1, 10*time.Millisecond)
+		dlqMessages, err := fixture.Queue.Consume(ctx, fixture.DeadStream, "dlq-readers", "reader", 1, 10*time.Millisecond)
 		require.NoError(t, err)
 		require.Len(t, dlqMessages, 1)
 		require.Equal(t, payload, dlqMessages[0].Payload)
@@ -117,6 +118,7 @@ func resetFixture(t *testing.T, factory Factory) QueueFixture {
 	fixture := factory()
 	require.NotNil(t, fixture.Queue)
 	require.NotNil(t, fixture.Pending)
+	require.NotEmpty(t, fixture.DeadStream)
 	require.NoError(t, fixture.Reset(context.Background()))
 	return fixture
 }

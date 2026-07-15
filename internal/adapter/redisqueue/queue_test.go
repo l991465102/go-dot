@@ -32,7 +32,8 @@ func runContract(t *testing.T, client *redis.Client) {
 	t.Helper()
 	contracttest.RunMessageQueueContract(t, func() contracttest.QueueFixture {
 		return contracttest.QueueFixture{
-			Queue: redisqueue.New(client),
+			Queue:      redisqueue.New(client),
+			DeadStream: ports.DeadLetterStream,
 			Reset: func(ctx context.Context) error {
 				return client.FlushDB(ctx).Err()
 			},
@@ -86,6 +87,32 @@ func TestMoveToDLQIsIdempotentAfterLostResponse(t *testing.T) {
 	require.Equal(t, int64(1), dlq)
 }
 
+func TestMoveToDLQUsesConfiguredStream(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	queue := redisqueue.New(client, redisqueue.WithDeadStream("custom:dead"))
+	ctx := context.Background()
+	_, err := queue.PublishBatch(ctx, "tracking:events", ports.BatchEnvelope{
+		BatchID: "batch-1", Payload: []byte(`{"ok":true}`), CreatedAt: time.Now(),
+	})
+	require.NoError(t, err)
+	messages, err := queue.Consume(ctx, "tracking:events", "workers", "consumer", 1, time.Millisecond)
+	require.NoError(t, err)
+	require.NoError(t, queue.MoveToDLQ(ctx, "tracking:events", "workers", messages[0], context.DeadlineExceeded))
+
+	require.Equal(t, int64(1), client.XLen(ctx, "custom:dead").Val())
+	require.Equal(t, int64(0), client.XLen(ctx, ports.DeadLetterStream).Val())
+}
+
+func TestRejectsPositiveSubMillisecondDurations(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	queue := redisqueue.New(client)
+	ctx := context.Background()
+	_, err := queue.Consume(ctx, "tracking:events", "workers", "consumer", 1, 500*time.Microsecond)
+	require.ErrorContains(t, err, "block duration")
+	_, err = queue.ReclaimStale(ctx, "tracking:events", "workers", "consumer", 500*time.Microsecond, 1)
+	require.ErrorContains(t, err, "idle duration")
+}
+
 func TestPublishStoresRequiredEnvelopeFields(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)
@@ -133,7 +160,7 @@ func liveRedisClient(t *testing.T, address string) *redis.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		t.Skipf("Redis integration test requires GO_DOT_REDIS_TEST_ADDRESS: %v", err)
+		t.Fatalf("GO_DOT_REDIS_TEST_ADDRESS is set but Redis ping failed: %v", err)
 	}
 	return client
 }

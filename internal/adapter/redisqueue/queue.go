@@ -36,11 +36,26 @@ return new_id
 `)
 
 type Queue struct {
-	client redis.UniversalClient
+	client     redis.UniversalClient
+	deadStream string
 }
 
-func New(client redis.UniversalClient) *Queue {
-	return &Queue{client: client}
+type Option func(*Queue)
+
+func WithDeadStream(stream string) Option {
+	return func(queue *Queue) {
+		if stream != "" {
+			queue.deadStream = stream
+		}
+	}
+}
+
+func New(client redis.UniversalClient, options ...Option) *Queue {
+	queue := &Queue{client: client, deadStream: ports.DeadLetterStream}
+	for _, option := range options {
+		option(queue)
+	}
+	return queue
 }
 
 func (q *Queue) PublishBatch(ctx context.Context, stream string, batch ports.BatchEnvelope) (string, error) {
@@ -65,8 +80,8 @@ func (q *Queue) Consume(ctx context.Context, stream, group, consumer string, cou
 	if err := validateConsumer(stream, group, consumer, count); err != nil {
 		return nil, err
 	}
-	if block < 0 {
-		return nil, errors.New("block duration must not be negative")
+	if err := validateRedisDuration("block", block); err != nil {
+		return nil, err
 	}
 	if err := q.ensureGroup(ctx, stream, group); err != nil {
 		return nil, err
@@ -125,7 +140,7 @@ func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg p
 	if err != nil {
 		return err
 	}
-	_, err = moveScript.Run(ctx, q.client, []string{ports.DLQStream(sourceStream), sourceStream},
+	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream},
 		group, msg.ID, msg.BatchID, string(msg.Payload), max(msg.Deliveries, 1), firstSeen, errorText(cause),
 	).Result()
 	if err != nil {
@@ -138,8 +153,8 @@ func (q *Queue) ReclaimStale(ctx context.Context, stream, group, consumer string
 	if err := validateConsumer(stream, group, consumer, count); err != nil {
 		return nil, err
 	}
-	if idle < 0 {
-		return nil, errors.New("idle duration must not be negative")
+	if err := validateRedisDuration("idle", idle); err != nil {
+		return nil, err
 	}
 	if err := q.ensureGroup(ctx, stream, group); err != nil {
 		return nil, err
@@ -299,6 +314,16 @@ func validateConsumer(stream, group, consumer string, count int) error {
 func validateMove(stream, group string, msg ports.Message) error {
 	if stream == "" || group == "" || msg.ID == "" || msg.BatchID == "" || len(msg.Payload) == 0 {
 		return errors.New("stream, group, message ID, batch ID, and payload are required")
+	}
+	return nil
+}
+
+func validateRedisDuration(name string, duration time.Duration) error {
+	if duration < 0 {
+		return fmt.Errorf("%s duration must not be negative", name)
+	}
+	if duration > 0 && duration < time.Millisecond {
+		return fmt.Errorf("%s duration must be zero or at least 1ms", name)
 	}
 	return nil
 }

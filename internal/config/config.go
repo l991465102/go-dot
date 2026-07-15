@@ -48,10 +48,11 @@ type TrackingConfig struct {
 }
 
 type QueueConfig struct {
-	EventStream   string
-	InvalidStream string
-	DeadStream    string
-	ConsumerGroup string
+	EventStream     string
+	InvalidStream   string
+	DeadStream      string
+	ConsumerGroup   string
+	PublishDedupTTL time.Duration
 }
 
 func Load(ctx context.Context) (Config, error) {
@@ -68,11 +69,19 @@ func Load(ctx context.Context) (Config, error) {
 		},
 		Tracking: TrackingConfig{MaxBatchEvents: 100, MaxBodyBytes: 256 << 10},
 		Queue: QueueConfig{
-			EventStream:   envOr("GO_DOT_QUEUE_EVENT_STREAM", "tracking:events"),
-			InvalidStream: envOr("GO_DOT_QUEUE_INVALID_STREAM", "tracking:invalid"),
-			DeadStream:    envOr("GO_DOT_QUEUE_DEAD_STREAM", "tracking:dead"),
-			ConsumerGroup: envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
+			EventStream:     envOr("GO_DOT_QUEUE_EVENT_STREAM", "tracking:events"),
+			InvalidStream:   envOr("GO_DOT_QUEUE_INVALID_STREAM", "tracking:invalid"),
+			DeadStream:      envOr("GO_DOT_QUEUE_DEAD_STREAM", "tracking:dead"),
+			ConsumerGroup:   envOr("GO_DOT_QUEUE_CONSUMER_GROUP", "tracking-workers"),
+			PublishDedupTTL: 72 * time.Hour,
 		},
+	}
+	if raw := os.Getenv("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL"); raw != "" {
+		ttl, err := time.ParseDuration(raw)
+		if err != nil || ttl < time.Hour || ttl > 7*24*time.Hour {
+			return Config{}, errors.New("GO_DOT_QUEUE_PUBLISH_DEDUP_TTL must be a duration between 1h and 168h")
+		}
+		cfg.Queue.PublishDedupTTL = ttl
 	}
 	if cfg.Auth.JWTSecret == "" {
 		return Config{}, errors.New("GO_DOT_JWT_SECRET is required")

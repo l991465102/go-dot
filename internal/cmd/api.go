@@ -50,7 +50,7 @@ func runAPI(ctx context.Context) error {
 	trackingService := tracking.NewService(trackingRepo, projectService, snapshotCache)
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Address})
 	defer redisClient.Close()
-	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream))
+	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL))
 	collector := ingestion.NewCollector(snapshotCache, queue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
 	collectHandler := httpapi.NewCollectHandler(
 		httpapi.NewCollectController(collector, cfg.Tracking.MaxBodyBytes),

@@ -52,7 +52,12 @@ func (c CollectController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+		}
 		return
 	}
 	p, ok := CollectionProjectFromContext(r.Context())

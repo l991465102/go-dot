@@ -45,6 +45,25 @@ func RunMessageQueueContract(t *testing.T, factory Factory) {
 		require.GreaterOrEqual(t, time.Since(started), 20*time.Millisecond)
 	})
 
+	t.Run("publishing the same stream batch is idempotent", func(t *testing.T) {
+		fixture := resetFixture(t, factory)
+		ctx := context.Background()
+		stream := unique("contract:idempotent-publish")
+		batch := ports.BatchEnvelope{BatchID: "batch-1", Payload: []byte(`{"n":1}`), CreatedAt: time.Unix(10, 0).UTC()}
+		firstID, err := fixture.Queue.PublishBatch(ctx, stream, batch)
+		require.NoError(t, err)
+		retry := batch
+		retry.Payload = []byte(`{"n":2,"retry_metadata_changed":true}`)
+		retry.CreatedAt = time.Unix(20, 0).UTC()
+		secondID, err := fixture.Queue.PublishBatch(ctx, stream, retry)
+		require.NoError(t, err)
+		require.Equal(t, firstID, secondID)
+		messages, err := fixture.Queue.Consume(ctx, stream, "workers", "consumer-a", 10, 10*time.Millisecond)
+		require.NoError(t, err)
+		require.Len(t, messages, 1)
+		require.Equal(t, batch.Payload, messages[0].Payload)
+	})
+
 	t.Run("ack removes pending message", func(t *testing.T) {
 		fixture := resetFixture(t, factory)
 		ctx := context.Background()

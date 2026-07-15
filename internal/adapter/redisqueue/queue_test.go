@@ -132,6 +132,20 @@ func TestPublishStoresRequiredEnvelopeFields(t *testing.T) {
 	require.Equal(t, "", messages[0].Values["last_error"])
 }
 
+func TestPublishDeduplicationTTLIsConfigurable(t *testing.T) {
+	client := inMemoryRedisClient(t)
+	queue := redisqueue.New(client, redisqueue.WithPublishDedupTTL(5*time.Minute))
+	_, err := queue.PublishBatch(context.Background(), "tracking:events", ports.BatchEnvelope{BatchID: "batch-ttl", Payload: []byte(`{"ok":true}`)})
+	require.NoError(t, err)
+	keys, err := client.Keys(context.Background(), "queue:publish:*").Result()
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	ttl, err := client.TTL(context.Background(), keys[0]).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, 4*time.Minute)
+	require.LessOrEqual(t, ttl, 5*time.Minute)
+}
+
 func TestConsumeCreatesGroupAndStreamWhenAbsent(t *testing.T) {
 	client := inMemoryRedisClient(t)
 	queue := redisqueue.New(client)

@@ -2,6 +2,8 @@ package redisqueue
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -35,9 +37,33 @@ redis.call('XACK', KEYS[2], ARGV[1], ARGV[2])
 return new_id
 `)
 
+var publishScript = redis.NewScript(`
+local existing = redis.call('GET', KEYS[2])
+if existing then
+  return existing
+end
+local id = redis.call('XADD', KEYS[1], '*',
+  'batch_id', ARGV[1],
+  'payload', ARGV[2],
+  'deliveries', ARGV[3],
+  'first_seen', ARGV[4],
+  'last_error', ARGV[5])
+redis.call('SET', KEYS[2], id, 'EX', ARGV[6])
+return id
+`)
+
 type Queue struct {
-	client     redis.UniversalClient
-	deadStream string
+	client          redis.UniversalClient
+	deadStream      string
+	publishDedupTTL time.Duration
+}
+
+func WithPublishDedupTTL(ttl time.Duration) Option {
+	return func(queue *Queue) {
+		if ttl > 0 {
+			queue.publishDedupTTL = ttl
+		}
+	}
 }
 
 type Option func(*Queue)
@@ -51,7 +77,7 @@ func WithDeadStream(stream string) Option {
 }
 
 func New(client redis.UniversalClient, options ...Option) *Queue {
-	queue := &Queue{client: client, deadStream: ports.DeadLetterStream}
+	queue := &Queue{client: client, deadStream: ports.DeadLetterStream, publishDedupTTL: 72 * time.Hour}
 	for _, option := range options {
 		option(queue)
 	}
@@ -66,14 +92,21 @@ func (q *Queue) PublishBatch(ctx context.Context, stream string, batch ports.Bat
 	if createdAt.IsZero() {
 		createdAt = time.Now().UTC()
 	}
-	id, err := q.client.XAdd(ctx, &redis.XAddArgs{
-		Stream: stream,
-		Values: messageValues(batch.BatchID, batch.Payload, 1, createdAt, ""),
-	}).Result()
+	dedupTTLSeconds := int64(q.publishDedupTTL / time.Second)
+	if dedupTTLSeconds < 1 {
+		dedupTTLSeconds = 1
+	}
+	values := messageValues(batch.BatchID, batch.Payload, 1, createdAt, "")
+	id, err := publishScript.Run(ctx, q.client, []string{stream, publishDedupKey(stream, batch.BatchID)}, values[fieldBatchID], values[fieldPayload], values[fieldDeliveries], values[fieldFirstSeen], values[fieldLastError], dedupTTLSeconds).Text()
 	if err != nil {
 		return "", fmt.Errorf("publish Redis Stream %q: %w", stream, err)
 	}
 	return id, nil
+}
+
+func publishDedupKey(stream, batchID string) string {
+	sum := sha256.Sum256([]byte(stream + "\x00" + batchID))
+	return "queue:publish:" + hex.EncodeToString(sum[:])
 }
 
 func (q *Queue) Consume(ctx context.Context, stream, group, consumer string, count int, block time.Duration) ([]ports.Message, error) {

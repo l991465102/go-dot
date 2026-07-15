@@ -82,6 +82,25 @@ func TestCollectReturnsSnapshotInfrastructureFailureWithoutInvalidPublishing(t *
 	require.Empty(t, queue.byStream)
 }
 
+func TestCollectRetryAfterSecondStreamFailureHasOneEffectiveBatchPerStream(t *testing.T) {
+	now := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	queue := &partialFailureIdempotentQueue{recordingQueue: recordingQueue{}}
+	collector := NewCollector(snapshotMap{"product_detail_view": productSnapshot()}, queue, Config{Now: func() time.Time { return now }})
+	req := CollectRequest{Events: []Event{
+		{EventID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", PointCode: "product_detail_view", EventTime: now.UnixMilli(), AnonymousID: "device-1", Platform: "web", Properties: map[string]any{"source_page": "search"}},
+		{EventID: "0190b9a8-7000-7000-8000-000000000001", PointCode: "missing", EventTime: now.UnixMilli(), AnonymousID: "device-1", Platform: "web"},
+	}}
+	p := project.Project{ID: 42, Active: true, Timezone: "UTC"}
+	_, err := collector.Collect(context.Background(), p, req)
+	require.ErrorContains(t, err, "publish invalid batch")
+	result, err := collector.Collect(context.Background(), p, req)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Accepted)
+	require.Equal(t, 1, result.Rejected)
+	require.Len(t, queue.byStream[EventStream], 1)
+	require.Len(t, queue.byStream[InvalidEventStream], 1)
+}
+
 func productSnapshot() tracking.Snapshot {
 	return tracking.Snapshot{ID: 123, ProjectID: 42, PointID: 10, CategoryID: 3, CategoryCode: "product_detail", CategoryPath: []tracking.CategoryRef{{ID: 1, Code: "mall", Level: tracking.Domain}, {ID: 2, Code: "product", Level: tracking.Module}, {ID: 3, Code: "product_detail", Level: tracking.Scene}}, PointCode: "product_detail_view", Version: 1, CountPV: true, CountUV: true, UVMode: tracking.Approximate, TimeBasis: tracking.Client, SupportedPlatforms: []string{"web"}, Properties: []tracking.Property{{Code: "source_page", Name: "source", Type: tracking.Enum, Required: true, EnumValues: []string{"search", "home"}}}}
 }
@@ -125,4 +144,29 @@ func (*recordingQueue) MoveToDLQ(context.Context, string, string, ports.Message,
 }
 func (*recordingQueue) ReclaimStale(context.Context, string, string, string, time.Duration, int) ([]ports.Message, error) {
 	panic("unused")
+}
+
+type partialFailureIdempotentQueue struct {
+	recordingQueue
+	failed bool
+	seen   map[string]string
+}
+
+func (q *partialFailureIdempotentQueue) PublishBatch(ctx context.Context, stream string, batch ports.BatchEnvelope) (string, error) {
+	if q.seen == nil {
+		q.seen = map[string]string{}
+	}
+	key := stream + ":" + batch.BatchID
+	if id, ok := q.seen[key]; ok {
+		return id, nil
+	}
+	if stream == InvalidEventStream && !q.failed {
+		q.failed = true
+		return "", errors.New("redis unavailable")
+	}
+	id, err := q.recordingQueue.PublishBatch(ctx, stream, batch)
+	if err == nil {
+		q.seen[key] = id
+	}
+	return id, err
 }

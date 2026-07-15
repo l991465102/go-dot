@@ -62,6 +62,20 @@ func TestCollectHTTPRejectsOversizedBodyBeforeDecode(t *testing.T) {
 	require.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
 }
 
+func TestCollectHTTPMapsTrailingMaxBytesErrorTo413(t *testing.T) {
+	collector := &collectServiceFake{}
+	key := httpapi.HashWriteKey("write-key")
+	repo := &keyRepoFake{expectedHash: key, project: project.Project{ID: 42, Active: true}}
+	handler := httpapi.NewCollectHandler(httpapi.NewCollectController(collector, 64), httpapi.NewWriteKeyMiddleware(repo, time.Now), httpapi.NewRateLimitMiddleware(&limitFake{allowed: true}))
+	body := append([]byte(`{"events":[]}`), bytes.Repeat([]byte(" "), 100)...)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/collect/events", bytes.NewReader(body))
+	req.ContentLength = -1
+	req.Header.Set("X-Write-Key", "write-key")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
+}
+
 func TestCollectHTTPReturnsRetryAfterWhenRateLimited(t *testing.T) {
 	handler := collectHandler(&collectServiceFake{}, &limitFake{allowed: false, retry: 3 * time.Second})
 	response := collectRequest(t, handler, []byte(`{"events":[{}]}`), "write-key", "")

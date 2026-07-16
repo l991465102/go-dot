@@ -17,7 +17,6 @@ import (
 )
 
 const overviewReconcileBatchSize = 100
-const retryReconcileRewindEvery = 4
 
 var reconcileStreamCandidateScript = redis.NewScript(`
 local function finish(value)
@@ -62,7 +61,7 @@ return finish(1)
 
 var reconcileRetryCandidateScript = redis.NewScript(`
 local function finish(value)
-  redis.call('HSET', KEYS[6], ARGV[7], ARGV[8])
+  redis.call('ZREM', KEYS[6], ARGV[1])
   return value
 end
 if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then return finish(0) end
@@ -78,6 +77,21 @@ redis.call('HSET', KEYS[2], ARGV[1], cjson.encode(record))
 redis.call('HINCRBY', KEYS[4], ARGV[2], 1)
 redis.call('ZADD', KEYS[5], ARGV[4], ARGV[5] .. '|' .. ARGV[3])
 return finish(1)
+`)
+
+var fillRetryOverviewBufferScript = redis.NewScript(`
+local cursor = redis.call('HGET', KEYS[3], ARGV[1]) or '0'
+local scanned = redis.call('ZSCAN', KEYS[1], cursor, 'COUNT', ARGV[3])
+local entries = scanned[2]
+for i = 1, #entries, 2 do
+  local member = entries[i]
+  if not redis.call('ZSCORE', KEYS[2], member) then
+    local sequence = redis.call('HINCRBY', KEYS[3], ARGV[2], 1)
+    redis.call('ZADD', KEYS[2], sequence, member)
+  end
+end
+redis.call('HSET', KEYS[3], ARGV[1], scanned[1])
+return #entries / 2
 `)
 
 var reconcileDeadCandidateScript = redis.NewScript(`
@@ -274,59 +288,83 @@ func (q *Queue) reconcileStreamCandidate(ctx context.Context, stream string, mes
 }
 
 func (q *Queue) reconcileRetryCandidates(ctx context.Context, stream string, limit int) (int, error) {
-	field := q.cursorField("retry", stream)
-	start, err := q.client.HGet(ctx, q.overviewCursorKey(), field).Int64()
-	if err != nil && err != redis.Nil {
-		return 0, err
+	limit = min(limit, overviewReconcileBatchSize)
+	processed, err := q.processRetryOverviewBuffer(ctx, stream, limit)
+	if err != nil || processed == limit {
+		return processed, err
 	}
-	pass, err := q.client.HIncrBy(ctx, q.overviewCursorKey(), q.cursorField("retry-pass", stream), 1).Result()
+	if _, err := q.fillRetryOverviewBuffer(ctx, stream, limit-processed); err != nil {
+		return processed, err
+	}
+	more, err := q.processRetryOverviewBuffer(ctx, stream, limit-processed)
+	return processed + more, err
+}
+
+func (q *Queue) fillRetryOverviewBuffer(ctx context.Context, stream string, count int) (int, error) {
+	if count < 1 {
+		return 0, nil
+	}
+	result, err := fillRetryOverviewBufferScript.Run(ctx, q.client,
+		[]string{retryScheduleKey(stream), q.retryOverviewBufferKey(stream), q.overviewCursorKey()},
+		q.cursorField("retry", stream), q.cursorField("retry-sequence", stream), count,
+	).Int()
 	if err != nil {
-		return 0, fmt.Errorf("advance Redis retry reconciliation pass: %w", err)
+		return 0, fmt.Errorf("persist Redis retry scan for %q: %w", stream, err)
 	}
-	if pass%retryReconcileRewindEvery == 0 {
-		start = 0
+	return result, nil
+}
+
+func (q *Queue) processRetryOverviewBuffer(ctx context.Context, stream string, limit int) (int, error) {
+	if limit < 1 {
+		return 0, nil
 	}
-	items, err := q.client.ZRange(ctx, retryScheduleKey(stream), start, start+int64(min(limit, overviewReconcileBatchSize))-1).Result()
+	items, err := q.client.ZRange(ctx, q.retryOverviewBufferKey(stream), 0, int64(limit-1)).Result()
 	if err != nil && err != redis.Nil {
-		return 0, fmt.Errorf("scan Redis retry schedule %q for overview: %w", stream, err)
+		return 0, fmt.Errorf("read Redis retry overview buffer for %q: %w", stream, err)
 	}
-	for i, member := range items {
-		next := strconv.FormatInt(start+int64(i)+1, 10)
-		raw, err := q.client.HGet(ctx, retryDataKey(stream), member).Bytes()
-		if err == redis.Nil {
-			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
-			continue
+	for _, member := range items {
+		if err := q.processRetryOverviewMember(ctx, stream, member); err != nil {
+			return 0, err
 		}
-		if err != nil {
-			return 0, fmt.Errorf("read Redis retry %q overview record: %w", member, err)
-		}
-		var record retryOverviewRecord
-		if json.Unmarshal(raw, &record) != nil || record.BatchID == "" {
-			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
-			continue
-		}
-		firstSeen, err := strconv.ParseInt(strings.Trim(string(record.FirstSeen), `"`), 10, 64)
-		if err != nil || firstSeen <= 0 {
-			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
-			continue
-		}
-		projectID := payloadProjectID([]byte(record.Payload))
-		if projectID == "" {
-			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
-			continue
-		}
-		_, err = reconcileRetryCandidateScript.Run(ctx, q.client,
-			[]string{retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID), q.overviewCursorKey()},
-			member, projectID, record.BatchID, firstSeen, stream, retryIndexField(stream, member), field, next,
-		).Result()
-		if err != nil {
-			return 0, fmt.Errorf("reconcile Redis retry %q overview: %w", member, err)
-		}
-	}
-	if len(items) == 0 && start > 0 {
-		_ = q.client.HSet(ctx, q.overviewCursorKey(), field, 0).Err()
 	}
 	return len(items), nil
+}
+
+func (q *Queue) processRetryOverviewMember(ctx context.Context, stream, member string) error {
+	remove := func() error { return q.client.ZRem(ctx, q.retryOverviewBufferKey(stream), member).Err() }
+	raw, err := q.client.HGet(ctx, retryDataKey(stream), member).Bytes()
+	if err == redis.Nil {
+		return remove()
+	}
+	if err != nil {
+		return fmt.Errorf("read Redis retry %q overview record: %w", member, err)
+	}
+	var record retryOverviewRecord
+	if json.Unmarshal(raw, &record) != nil || record.BatchID == "" {
+		return remove()
+	}
+	firstSeen, err := strconv.ParseInt(strings.Trim(string(record.FirstSeen), `"`), 10, 64)
+	if err != nil || firstSeen <= 0 {
+		return remove()
+	}
+	projectID := payloadProjectID([]byte(record.Payload))
+	if projectID == "" {
+		return remove()
+	}
+	_, err = reconcileRetryCandidateScript.Run(ctx, q.client,
+		[]string{retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID), q.retryOverviewBufferKey(stream)},
+		member, projectID, record.BatchID, firstSeen, stream, retryIndexField(stream, member),
+	).Result()
+	if err != nil {
+		return fmt.Errorf("reconcile Redis retry %q overview: %w", member, err)
+	}
+	return nil
+}
+
+func (q *Queue) retryOverviewBufferKey(stream string) string {
+	tag, _ := redisHashTag(stream)
+	sum := sha256.Sum256([]byte(q.overviewGroup + "\x00" + strings.Join(q.overviewStreams, "\x00") + "\x00" + q.deadStream + "\x00" + stream))
+	return "queue:{" + tag + "}:overview:retry-buffer:" + hex.EncodeToString(sum[:8])
 }
 
 func (q *Queue) reconcileDeadCandidates(ctx context.Context, limit int) (int, error) {

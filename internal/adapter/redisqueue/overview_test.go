@@ -2,6 +2,9 @@ package redisqueue
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +13,220 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
+
+type redisCommandHook struct {
+	commands atomic.Int64
+	failEval atomic.Bool
+}
+
+func (h *redisCommandHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h *redisCommandHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h *redisCommandHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.commands.Add(1)
+		if h.failEval.Load() && (cmd.Name() == "eval" || cmd.Name() == "evalsha") {
+			return errors.New("injected reconciliation interruption")
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestReconcileOverviewIsBoundedAndPersistentAcrossRestart(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	record := func(stream, batch string, project int) {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{
+			fieldBatchID: batch, fieldPayload: fmt.Sprintf(`{"project_id":%d}`, project),
+			fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(),
+		}}).Err())
+	}
+	for i := 0; i < 7; i++ {
+		record(stream, fmt.Sprintf("event-%d", i), 9)
+	}
+	for i := 0; i < 5; i++ {
+		record(dead, fmt.Sprintf("dead-%d", i), 9)
+	}
+	require.NoError(t, client.XGroupCreate(ctx, stream, group, "0").Err())
+
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
+	require.NoError(t, q.ReconcileOverview(ctx))
+	first, err := q.Snapshot(ctx, 9)
+	require.NoError(t, err)
+	require.LessOrEqual(t, first.Pending+first.DeadLetters, int64(2), "one invocation must share one item budget across scan kinds")
+	require.NotEmpty(t, client.HGetAll(ctx, q.overviewCursorKey()).Val(), "progress must live in Redis, not process memory")
+
+	// A new Queue instance resumes the persisted cursor and every bounded pass
+	// eventually covers both the source stream and the configured DLQ.
+	q = New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
+	for i := 0; i < 20; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	got, err := q.Snapshot(ctx, 9)
+	require.NoError(t, err)
+	require.EqualValues(t, 7, got.Pending)
+	require.EqualValues(t, 5, got.DeadLetters)
+}
+
+func TestReconcileOverviewRoundRobinDoesNotStarveDLQDuringStreamGrowth(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	for i := 0; i < 4; i++ {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: dead, Values: map[string]any{
+			fieldBatchID: fmt.Sprintf("dead-%d", i), fieldPayload: `{"project_id":8}`,
+			fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(),
+		}}).Err())
+	}
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	for i := 0; i < 16; i++ {
+		_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{
+			fieldBatchID: fmt.Sprintf("growing-%d", i), fieldPayload: `{"project_id":9}`,
+			fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(),
+		}}).Result()
+		require.NoError(t, err)
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	snapshot, err := q.Snapshot(ctx, 8)
+	require.NoError(t, err)
+	require.EqualValues(t, 4, snapshot.DeadLetters, "round-robin passes must service DLQ despite a continuously growing source")
+}
+
+func TestReconcileOverviewRebuildsDLQCountsExactlyOncePerMessageAndProject(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	for i, payload := range []string{`{"project_id":7}`, `{"project_id":8}`, `{"project_id":7}`, `not-json`, `{"project_id":0}`} {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: dead, Values: map[string]any{
+			fieldBatchID: fmt.Sprintf("dead-%d", i), fieldPayload: payload,
+			fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(),
+		}}).Err())
+	}
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	seven, err := q.Snapshot(ctx, 7)
+	require.NoError(t, err)
+	eight, err := q.Snapshot(ctx, 8)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, seven.DeadLetters)
+	require.EqualValues(t, 1, eight.DeadLetters)
+
+	for i := 0; i < 12; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	seven, _ = q.Snapshot(ctx, 7)
+	eight, _ = q.Snapshot(ctx, 8)
+	require.EqualValues(t, 2, seven.DeadLetters, "repeated full scans must be idempotent")
+	require.EqualValues(t, 1, eight.DeadLetters)
+}
+
+func TestMoveToDLQAndReconcileSharePerMessageIdempotencyMapping(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	_, err := q.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "moved", Payload: []byte(`{"project_id":7}`), CreatedAt: time.Now()})
+	require.NoError(t, err)
+	messages, err := q.Consume(ctx, stream, group, "worker", 1, 0)
+	require.NoError(t, err)
+	require.NoError(t, q.MoveToDLQ(ctx, stream, group, messages[0], errors.New("poison")))
+	for i := 0; i < 8; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	snapshot, err := q.Snapshot(ctx, 7)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, snapshot.DeadLetters, "reconciliation must not recount a DLQ message indexed by MoveToDLQ")
+
+	// Losing the complete derived DLQ overview can be repaired from the stream.
+	require.NoError(t, client.Del(ctx, q.deadLetterCountKey(), q.deadLetterIndexKey(), q.overviewCursorKey()).Err())
+	for i := 0; i < 8; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	snapshot, err = q.Snapshot(ctx, 7)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, snapshot.DeadLetters)
+}
+
+func TestReconcileOverviewFairlyRotatesAcrossConfiguredStreams(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	events, invalid, dead, group := "tracking:{queue}:events", "tracking:{queue}:invalid", "tracking:{queue}:dead", "workers"
+	for _, stream := range []string{events, invalid} {
+		require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	}
+	require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: dead, Values: map[string]any{fieldBatchID: "d", fieldPayload: `{"project_id":7}`, fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli()}}).Err())
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{events, invalid}, group), WithOverviewReconcileLimit(1))
+	for i := 0; i < 24; i++ {
+		for _, stream := range []string{events, invalid} {
+			require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: map[string]any{fieldBatchID: fmt.Sprintf("%s-%d", stream, i), fieldPayload: `{"project_id":9}`, fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli()}}).Err())
+		}
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	snapshot, err := q.Snapshot(ctx, 9)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, snapshot.Pending, int64(6), "both growing streams must receive repeated turns")
+	deadSnapshot, err := q.Snapshot(ctx, 7)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, deadSnapshot.DeadLetters)
+}
+
+func TestReconcileOverviewDoesNotAdvanceCandidateCursorWhenAtomicProcessingIsInterrupted(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	hook := &redisCommandHook{}
+	client.AddHook(hook)
+	ctx := context.Background()
+	stream, group := "tracking:{queue}:events", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	q := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	_, err := q.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "crash", Payload: []byte(`{"project_id":9}`), CreatedAt: time.Now()})
+	require.NoError(t, err)
+	_, err = q.Consume(ctx, stream, group, "worker", 1, 0)
+	require.NoError(t, err)
+	require.NoError(t, client.Del(ctx, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")).Err())
+
+	hook.failEval.Store(true)
+	require.ErrorContains(t, q.ReconcileOverview(ctx), "injected reconciliation interruption")
+	require.Empty(t, client.HGet(ctx, q.overviewCursorKey(), q.cursorField("pending", stream)).Val(), "failed candidate processing must not skip the candidate")
+	hook.failEval.Store(false)
+	require.NoError(t, q.ReconcileOverview(ctx))
+	snapshot, err := q.Snapshot(ctx, 9)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, snapshot.Pending)
+}
+
+func TestReconcileOverviewHasBoundedCommandCountAndKeepsExhaustedDLQCursor(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	hook := &redisCommandHook{}
+	client.AddHook(hook)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	id, err := client.XAdd(ctx, &redis.XAddArgs{Stream: dead, Values: map[string]any{fieldBatchID: "one", fieldPayload: `{"project_id":7}`, fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli()}}).Result()
+	require.NoError(t, err)
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	for i := 0; i < 12; i++ {
+		before := hook.commands.Load()
+		require.NoError(t, q.ReconcileOverview(ctx))
+		require.LessOrEqual(t, hook.commands.Load()-before, int64(20), "each pass must have a bounded Redis command count")
+	}
+	require.NoError(t, ctx.Err())
+	require.Equal(t, id, client.HGet(ctx, q.overviewCursorKey(), q.cursorField("dead", dead)).Val(), "an exhausted forward cursor must not rewind and rescan history")
+}
 
 func TestOverviewSnapshotUsesProjectPendingIndexAndProjectDLQCount(t *testing.T) {
 	m := miniredis.RunT(t)

@@ -37,7 +37,9 @@ local new_id = redis.call('XADD', KEYS[1], '*',
   'first_seen', ARGV[6],
   'last_error', ARGV[7])
 if ARGV[8] ~= '' then
-  redis.call('HINCRBY', KEYS[3], ARGV[8], 1)
+  if redis.call('HSETNX', KEYS[7], KEYS[1] .. '|' .. new_id, ARGV[8]) == 1 then
+    redis.call('HINCRBY', KEYS[3], ARGV[8], 1)
+  end
   local mapping = redis.call('HGET', KEYS[4], ARGV[9])
   if mapping == ARGV[8] .. '|' .. ARGV[10] then
     redis.call('HDEL', KEYS[4], ARGV[9])
@@ -131,12 +133,13 @@ return promoted
 `)
 
 type Queue struct {
-	client              redis.UniversalClient
-	deadStream          string
-	publishDedupTTL     time.Duration
-	deadLetterScanLimit int
-	overviewStreams     []string
-	overviewGroup       string
+	client                 redis.UniversalClient
+	deadStream             string
+	publishDedupTTL        time.Duration
+	deadLetterScanLimit    int
+	overviewStreams        []string
+	overviewGroup          string
+	overviewReconcileLimit int
 }
 
 func WithPublishDedupTTL(ttl time.Duration) Option {
@@ -167,8 +170,18 @@ func WithOverviewStreams(streams []string, group string) Option {
 	return func(q *Queue) { q.overviewStreams = append([]string(nil), streams...); q.overviewGroup = group }
 }
 
+// WithOverviewReconcileLimit bounds the total number of candidates inspected
+// by one ReconcileOverview invocation across all configured sources.
+func WithOverviewReconcileLimit(limit int) Option {
+	return func(q *Queue) {
+		if limit > 0 && limit <= 10000 {
+			q.overviewReconcileLimit = limit
+		}
+	}
+}
+
 func New(client redis.UniversalClient, options ...Option) *Queue {
-	queue := &Queue{client: client, deadStream: ports.DeadLetterStream, publishDedupTTL: 72 * time.Hour, deadLetterScanLimit: 1000}
+	queue := &Queue{client: client, deadStream: ports.DeadLetterStream, publishDedupTTL: 72 * time.Hour, deadLetterScanLimit: 1000, overviewReconcileLimit: 100}
 	for _, option := range options {
 		option(queue)
 	}
@@ -329,7 +342,7 @@ func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg p
 	}
 	batchID, payload := messageBody(msg)
 	projectID := payloadProjectID(payload)
-	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID)},
+	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID), q.deadLetterIndexKey()},
 		group, msg.ID, batchID, string(payload), max(msg.Deliveries, 1), firstSeen, errorText(cause), projectID, sourceStream+"|"+msg.ID, sourceStream+"|"+batchID,
 	).Result()
 	if err != nil {
@@ -350,6 +363,10 @@ func payloadProjectID(payload []byte) string {
 func (q *Queue) deadLetterCountKey() string {
 	tag, _ := redisHashTag(q.deadStream)
 	return "queue:{" + tag + "}:dead:project-counts"
+}
+func (q *Queue) deadLetterIndexKey() string {
+	tag, _ := redisHashTag(q.deadStream)
+	return "queue:{" + tag + "}:dead:index"
 }
 func (q *Queue) pendingIndexKey() string {
 	tag, _ := redisHashTag(q.deadStream)

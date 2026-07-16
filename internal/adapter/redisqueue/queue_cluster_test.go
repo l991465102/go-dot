@@ -16,9 +16,10 @@ func TestEveryMultiKeyScriptUsesOneRedisClusterSlot(t *testing.T) {
 		"ACK indexed":          {stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
 		"schedule retry":       {stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()},
 		"promote retry":        {stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()},
-		"move DLQ":             {dead, stream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
-		"reconcile stream":     {stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
-		"reconcile retry data": {retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
+		"move DLQ":             {dead, stream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9"), q.deadLetterIndexKey()},
+		"reconcile stream":     {stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9"), q.overviewCursorKey()},
+		"reconcile retry data": {retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9"), q.overviewCursorKey()},
+		"reconcile dead":       {q.deadLetterIndexKey(), q.deadLetterCountKey(), q.overviewCursorKey()},
 	}
 	for name, keys := range sets {
 		t.Run(name, func(t *testing.T) {

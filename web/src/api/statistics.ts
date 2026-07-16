@@ -43,20 +43,29 @@ export function completedHourRange(hours: number, timezone: string) {
 }
 export function completedDayRange(days: number, timezone: string) {
   const end = zonedBoundary(new Date(), timezone, 'day')
-  const start = zonedBoundary(new Date(end.getTime() - days * 86_400_000), timezone, 'day')
+  const endDate = zonedParts(end, timezone)
+  const startDate = new Date(Date.UTC(endDate.year, endDate.month - 1, endDate.day - days))
+  const start = resolveZonedBoundary(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate()), timezone)
   return { start: start.toISOString(), end: end.toISOString() }
 }
 
 function zonedBoundary(value: Date, timezone: string, granularity: 'hour'|'day') {
+  const parts = zonedParts(value, timezone)
+  const desired = Date.UTC(parts.year, parts.month - 1, parts.day, granularity === 'hour' ? parts.hour : 0)
+  return resolveZonedBoundary(desired, timezone)
+}
+
+function zonedParts(value: Date, timezone: string) {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(value)
   const get = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value)
-  const desired = Date.UTC(get('year'), get('month') - 1, get('day'), granularity === 'hour' ? get('hour') : 0)
+  return { year: get('year'), month: get('month'), day: get('day'), hour: get('hour') }
+}
+
+function resolveZonedBoundary(desired: number, timezone: string) {
   let candidate = desired
   for (let i = 0; i < 2; i += 1) {
-    const at = new Date(candidate)
-    const actual = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(at)
-    const part = (type: Intl.DateTimeFormatPartTypes) => Number(actual.find((item) => item.type === type)?.value)
-    const represented = Date.UTC(part('year'), part('month') - 1, part('day'), part('hour'))
+    const actual = zonedParts(new Date(candidate), timezone)
+    const represented = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour)
     candidate += desired - represented
   }
   return new Date(candidate)

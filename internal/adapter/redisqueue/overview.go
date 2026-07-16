@@ -2,6 +2,8 @@ package redisqueue
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,10 @@ import (
 const overviewReconcileBatchSize = 100
 
 var reconcileStreamCandidateScript = redis.NewScript(`
+local function finish(value)
+  redis.call('HSET', KEYS[5], ARGV[7], ARGV[8])
+  return value
+end
 local groups = redis.call('XINFO', 'GROUPS', KEYS[1])
 local last_delivered = nil
 for _, info in ipairs(groups) do
@@ -30,32 +36,38 @@ for _, info in ipairs(groups) do
     break
   end
 end
-if not last_delivered then return 0 end
+if not last_delivered then return finish(0) end
 
 local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
 local function id_after(left, right)
   local ldash = string.find(left, '-')
   local rdash = string.find(right, '-')
-  local lms = tonumber(string.sub(left, 1, ldash - 1))
-  local rms = tonumber(string.sub(right, 1, rdash - 1))
+  local lms = tonumber(ldash and string.sub(left, 1, ldash - 1) or left) or 0
+  local rms = tonumber(rdash and string.sub(right, 1, rdash - 1) or right) or 0
   if lms ~= rms then return lms > rms end
-  return tonumber(string.sub(left, ldash + 1)) > tonumber(string.sub(right, rdash + 1))
+  local lseq = tonumber(ldash and string.sub(left, ldash + 1) or '0') or 0
+  local rseq = tonumber(rdash and string.sub(right, rdash + 1) or '0') or 0
+  return lseq > rseq
 end
-if #pending == 0 and not id_after(ARGV[2], last_delivered) then return 0 end
+if #pending == 0 and not id_after(ARGV[2], last_delivered) then return finish(0) end
 if redis.call('HSETNX', KEYS[2], ARGV[6], ARGV[3] .. '|' .. KEYS[1] .. '|' .. ARGV[4]) == 0 then
-  return 0
+  return finish(0)
 end
 redis.call('HINCRBY', KEYS[3], ARGV[3], 1)
 redis.call('ZADD', KEYS[4], ARGV[5], KEYS[1] .. '|' .. ARGV[4])
-return 1
+return finish(1)
 `)
 
 var reconcileRetryCandidateScript = redis.NewScript(`
-if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then return 0 end
+local function finish(value)
+  redis.call('HSET', KEYS[6], ARGV[7], ARGV[8])
+  return value
+end
+if not redis.call('ZSCORE', KEYS[1], ARGV[1]) then return finish(0) end
 local raw = redis.call('HGET', KEYS[2], ARGV[1])
-if not raw then return 0 end
+if not raw then return finish(0) end
 if redis.call('HSETNX', KEYS[3], ARGV[6], ARGV[2] .. '|' .. ARGV[5] .. '|' .. ARGV[3]) == 0 then
-  return 0
+  return finish(0)
 end
 local record = cjson.decode(raw)
 record.pending_mapping = ARGV[2] .. '|' .. ARGV[5] .. '|' .. ARGV[3]
@@ -63,6 +75,14 @@ record.pending_field = ARGV[6]
 redis.call('HSET', KEYS[2], ARGV[1], cjson.encode(record))
 redis.call('HINCRBY', KEYS[4], ARGV[2], 1)
 redis.call('ZADD', KEYS[5], ARGV[4], ARGV[5] .. '|' .. ARGV[3])
+return finish(1)
+`)
+
+var reconcileDeadCandidateScript = redis.NewScript(`
+if ARGV[1] ~= '' and redis.call('HSETNX', KEYS[1], ARGV[2], ARGV[1]) == 1 then
+  redis.call('HINCRBY', KEYS[2], ARGV[1], 1)
+end
+redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
 return 1
 `)
 
@@ -72,6 +92,11 @@ type retryOverviewRecord struct {
 	FirstSeen json.RawMessage `json:"first_seen"`
 }
 
+type overviewSource struct {
+	kind   string
+	stream string
+}
+
 // ReconcileOverview discovers outstanding messages that predate or outlive the
 // derived project overview index. Eligibility and insertion are checked in one
 // Redis script so a concurrent ACK cannot resurrect completed work.
@@ -79,25 +104,66 @@ func (q *Queue) ReconcileOverview(ctx context.Context) error {
 	if q == nil || q.client == nil || q.overviewGroup == "" || len(q.overviewStreams) == 0 {
 		return errors.New("Redis overview queue is not configured")
 	}
-	for _, stream := range q.overviewStreams {
-		if err := q.ensureGroup(ctx, stream, q.overviewGroup); err != nil {
+	sources := q.overviewSources()
+	turn, err := q.overviewTurn(ctx, len(sources))
+	if err != nil {
+		return err
+	}
+	remaining, visited := q.overviewReconcileLimit, 0
+	for remaining > 0 && visited < len(sources) {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		lastDelivered, err := q.groupLastDeliveredID(ctx, stream)
+		source := sources[turn]
+		var inspected int
+		switch source.kind {
+		case "pending":
+			if err := q.ensureGroup(ctx, source.stream, q.overviewGroup); err != nil {
+				return err
+			}
+			inspected, err = q.reconcilePendingCandidates(ctx, source.stream, remaining)
+		case "undelivered":
+			if err := q.ensureGroup(ctx, source.stream, q.overviewGroup); err != nil {
+				return err
+			}
+			inspected, err = q.reconcileUndeliveredCandidates(ctx, source.stream, remaining)
+		case "retry":
+			inspected, err = q.reconcileRetryCandidates(ctx, source.stream, remaining)
+		case "dead":
+			inspected, err = q.reconcileDeadCandidates(ctx, remaining)
+		}
 		if err != nil {
 			return err
 		}
-		if err := q.reconcilePendingCandidates(ctx, stream); err != nil {
-			return err
-		}
-		if err := q.reconcileUndeliveredCandidates(ctx, stream, lastDelivered); err != nil {
-			return err
-		}
-		if err := q.reconcileRetryCandidates(ctx, stream); err != nil {
-			return err
+		remaining -= inspected
+		visited++
+		turn = (turn + 1) % len(sources)
+		if err := q.client.HSet(ctx, q.overviewCursorKey(), q.cursorField("turn", ""), turn).Err(); err != nil {
+			return fmt.Errorf("persist Redis overview reconciliation turn: %w", err)
 		}
 	}
 	return nil
+}
+
+func (q *Queue) overviewSources() []overviewSource {
+	out := make([]overviewSource, 0, len(q.overviewStreams)*3+1)
+	for _, stream := range q.overviewStreams {
+		for _, kind := range []string{"pending", "undelivered", "retry"} {
+			out = append(out, overviewSource{kind: kind, stream: stream})
+		}
+	}
+	return append(out, overviewSource{kind: "dead", stream: q.deadStream})
+}
+
+func (q *Queue) overviewTurn(ctx context.Context, sourceCount int) (int, error) {
+	value, err := q.client.HGet(ctx, q.overviewCursorKey(), q.cursorField("turn", "")).Int()
+	if err != nil && err != redis.Nil {
+		return 0, fmt.Errorf("read Redis overview reconciliation turn: %w", err)
+	}
+	if value < 0 || value >= sourceCount {
+		return 0, nil
+	}
+	return value, nil
 }
 
 func (q *Queue) groupLastDeliveredID(ctx context.Context, stream string) (string, error) {
@@ -113,69 +179,91 @@ func (q *Queue) groupLastDeliveredID(ctx context.Context, stream string) (string
 	return "", fmt.Errorf("Redis Stream %q overview group %q does not exist", stream, q.overviewGroup)
 }
 
-func (q *Queue) reconcilePendingCandidates(ctx context.Context, stream string) error {
-	start := "-"
-	for {
-		pending, err := q.client.XPendingExt(ctx, &redis.XPendingExtArgs{
-			Stream: stream, Group: q.overviewGroup, Start: start, End: "+", Count: overviewReconcileBatchSize,
-		}).Result()
-		if err != nil && err != redis.Nil {
-			return fmt.Errorf("scan Redis Stream %q PEL for overview: %w", stream, err)
-		}
-		for _, item := range pending {
-			messages, err := q.client.XRangeN(ctx, stream, item.ID, item.ID, 1).Result()
-			if err != nil && err != redis.Nil {
-				return fmt.Errorf("read Redis Stream %q PEL message %q: %w", stream, item.ID, err)
-			}
-			if len(messages) == 1 {
-				if err := q.reconcileStreamCandidate(ctx, stream, messages[0]); err != nil {
-					return err
-				}
-			}
-		}
-		if len(pending) < overviewReconcileBatchSize {
-			return nil
-		}
-		start = "(" + pending[len(pending)-1].ID
+func (q *Queue) reconcilePendingCandidates(ctx context.Context, stream string, limit int) (int, error) {
+	field := q.cursorField("pending", stream)
+	start, err := q.client.HGet(ctx, q.overviewCursorKey(), field).Result()
+	if err == redis.Nil || start == "" {
+		start = "-"
+	} else if err != nil {
+		return 0, err
+	} else {
+		start = nextStreamID(start)
 	}
+	pending, err := q.client.XPendingExt(ctx, &redis.XPendingExtArgs{Stream: stream, Group: q.overviewGroup, Start: start, End: "+", Count: int64(min(limit, overviewReconcileBatchSize))}).Result()
+	if err != nil && err != redis.Nil {
+		return 0, fmt.Errorf("scan Redis Stream %q PEL for overview: %w", stream, err)
+	}
+	for _, item := range pending {
+		messages, readErr := q.client.XRangeN(ctx, stream, item.ID, item.ID, 1).Result()
+		if readErr != nil && readErr != redis.Nil {
+			return 0, fmt.Errorf("read Redis Stream %q PEL message %q: %w", stream, item.ID, readErr)
+		}
+		next := item.ID
+		if len(messages) == 1 {
+			if err := q.reconcileStreamCandidate(ctx, stream, messages[0], field, next); err != nil {
+				return 0, err
+			}
+		} else if err := q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err(); err != nil {
+			return 0, err
+		}
+	}
+	return len(pending), nil
 }
 
-func (q *Queue) reconcileUndeliveredCandidates(ctx context.Context, stream, lastDelivered string) error {
-	start := "(" + lastDelivered
-	for {
-		messages, err := q.client.XRangeN(ctx, stream, start, "+", overviewReconcileBatchSize).Result()
-		if err != nil && err != redis.Nil {
-			return fmt.Errorf("scan Redis Stream %q undelivered messages for overview: %w", stream, err)
-		}
-		for _, message := range messages {
-			if err := q.reconcileStreamCandidate(ctx, stream, message); err != nil {
-				return err
-			}
-		}
-		if len(messages) < overviewReconcileBatchSize {
-			return nil
-		}
-		start = "(" + messages[len(messages)-1].ID
+func nextStreamID(id string) string {
+	parts := strings.SplitN(id, "-", 2)
+	if len(parts) != 2 {
+		return id
 	}
+	seq, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || seq == ^uint64(0) {
+		return id
+	}
+	return parts[0] + "-" + strconv.FormatUint(seq+1, 10)
 }
 
-func (q *Queue) reconcileStreamCandidate(ctx context.Context, stream string, message redis.XMessage) error {
+func (q *Queue) reconcileUndeliveredCandidates(ctx context.Context, stream string, limit int) (int, error) {
+	field := q.cursorField("undelivered", stream)
+	start, err := q.client.HGet(ctx, q.overviewCursorKey(), field).Result()
+	if err == redis.Nil || start == "" {
+		last, lastErr := q.groupLastDeliveredID(ctx, stream)
+		if lastErr != nil {
+			return 0, lastErr
+		}
+		start = "(" + last
+	} else if err != nil {
+		return 0, err
+	}
+	messages, err := q.client.XRangeN(ctx, stream, start, "+", int64(min(limit, overviewReconcileBatchSize))).Result()
+	if err != nil && err != redis.Nil {
+		return 0, fmt.Errorf("scan Redis Stream %q undelivered messages for overview: %w", stream, err)
+	}
+	for _, message := range messages {
+		next := "(" + message.ID
+		if err := q.reconcileStreamCandidate(ctx, stream, message, field, next); err != nil {
+			return 0, err
+		}
+	}
+	return len(messages), nil
+}
+
+func (q *Queue) reconcileStreamCandidate(ctx context.Context, stream string, message redis.XMessage, cursorField, cursorValue string) error {
 	payload := []byte(valueString(message.Values[fieldPayload]))
 	projectID := payloadProjectID(payload)
 	if projectID == "" {
-		return nil
+		return q.client.HSet(ctx, q.overviewCursorKey(), cursorField, cursorValue).Err()
 	}
 	batchID := valueString(message.Values[fieldBatchID])
 	if batchID == "" {
-		return nil
+		return q.client.HSet(ctx, q.overviewCursorKey(), cursorField, cursorValue).Err()
 	}
 	firstSeen, err := strconv.ParseInt(valueString(message.Values[fieldFirstSeen]), 10, 64)
 	if err != nil || firstSeen <= 0 {
-		return nil
+		return q.client.HSet(ctx, q.overviewCursorKey(), cursorField, cursorValue).Err()
 	}
 	_, err = reconcileStreamCandidateScript.Run(ctx, q.client,
-		[]string{stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID)},
-		q.overviewGroup, message.ID, projectID, batchID, firstSeen, stream+"|"+message.ID,
+		[]string{stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID), q.overviewCursorKey()},
+		q.overviewGroup, message.ID, projectID, batchID, firstSeen, stream+"|"+message.ID, cursorField, cursorValue,
 	).Result()
 	if err != nil {
 		return fmt.Errorf("reconcile Redis Stream %q message %q overview: %w", stream, message.ID, err)
@@ -183,47 +271,87 @@ func (q *Queue) reconcileStreamCandidate(ctx context.Context, stream string, mes
 	return nil
 }
 
-func (q *Queue) reconcileRetryCandidates(ctx context.Context, stream string) error {
-	var cursor uint64
-	for {
-		items, next, err := q.client.ZScan(ctx, retryScheduleKey(stream), cursor, "*", overviewReconcileBatchSize).Result()
-		if err != nil && err != redis.Nil {
-			return fmt.Errorf("scan Redis retry schedule %q for overview: %w", stream, err)
-		}
-		for i := 0; i+1 < len(items); i += 2 {
-			member := items[i]
-			raw, err := q.client.HGet(ctx, retryDataKey(stream), member).Bytes()
-			if err == redis.Nil {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("read Redis retry %q overview record: %w", member, err)
-			}
-			var record retryOverviewRecord
-			if json.Unmarshal(raw, &record) != nil || record.BatchID == "" {
-				continue
-			}
-			firstSeen, err := strconv.ParseInt(strings.Trim(string(record.FirstSeen), `"`), 10, 64)
-			if err != nil || firstSeen <= 0 {
-				continue
-			}
-			projectID := payloadProjectID([]byte(record.Payload))
-			if projectID == "" {
-				continue
-			}
-			_, err = reconcileRetryCandidateScript.Run(ctx, q.client,
-				[]string{retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID)},
-				member, projectID, record.BatchID, firstSeen, stream, retryIndexField(stream, member),
-			).Result()
-			if err != nil {
-				return fmt.Errorf("reconcile Redis retry %q overview: %w", member, err)
-			}
-		}
-		if next == 0 {
-			return nil
-		}
-		cursor = next
+func (q *Queue) reconcileRetryCandidates(ctx context.Context, stream string, limit int) (int, error) {
+	field := q.cursorField("retry", stream)
+	start, err := q.client.HGet(ctx, q.overviewCursorKey(), field).Int64()
+	if err != nil && err != redis.Nil {
+		return 0, err
 	}
+	items, err := q.client.ZRange(ctx, retryScheduleKey(stream), start, start+int64(min(limit, overviewReconcileBatchSize))-1).Result()
+	if err != nil && err != redis.Nil {
+		return 0, fmt.Errorf("scan Redis retry schedule %q for overview: %w", stream, err)
+	}
+	for i, member := range items {
+		next := strconv.FormatInt(start+int64(i)+1, 10)
+		raw, err := q.client.HGet(ctx, retryDataKey(stream), member).Bytes()
+		if err == redis.Nil {
+			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read Redis retry %q overview record: %w", member, err)
+		}
+		var record retryOverviewRecord
+		if json.Unmarshal(raw, &record) != nil || record.BatchID == "" {
+			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
+			continue
+		}
+		firstSeen, err := strconv.ParseInt(strings.Trim(string(record.FirstSeen), `"`), 10, 64)
+		if err != nil || firstSeen <= 0 {
+			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
+			continue
+		}
+		projectID := payloadProjectID([]byte(record.Payload))
+		if projectID == "" {
+			_ = q.client.HSet(ctx, q.overviewCursorKey(), field, next).Err()
+			continue
+		}
+		_, err = reconcileRetryCandidateScript.Run(ctx, q.client,
+			[]string{retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID), q.overviewCursorKey()},
+			member, projectID, record.BatchID, firstSeen, stream, retryIndexField(stream, member), field, next,
+		).Result()
+		if err != nil {
+			return 0, fmt.Errorf("reconcile Redis retry %q overview: %w", member, err)
+		}
+	}
+	if len(items) == 0 && start > 0 {
+		_ = q.client.HSet(ctx, q.overviewCursorKey(), field, 0).Err()
+	}
+	return len(items), nil
+}
+
+func (q *Queue) reconcileDeadCandidates(ctx context.Context, limit int) (int, error) {
+	field := q.cursorField("dead", q.deadStream)
+	start, err := q.client.HGet(ctx, q.overviewCursorKey(), field).Result()
+	if err == redis.Nil || start == "" || start == "-" {
+		start = "-"
+	} else if err != nil {
+		return 0, err
+	} else {
+		start = "(" + start
+	}
+	messages, err := q.client.XRangeN(ctx, q.deadStream, start, "+", int64(min(limit, overviewReconcileBatchSize))).Result()
+	if err != nil && err != redis.Nil {
+		return 0, fmt.Errorf("scan Redis DLQ %q for overview: %w", q.deadStream, err)
+	}
+	for _, message := range messages {
+		projectID := payloadProjectID([]byte(valueString(message.Values[fieldPayload])))
+		_, err := reconcileDeadCandidateScript.Run(ctx, q.client, []string{q.deadLetterIndexKey(), q.deadLetterCountKey(), q.overviewCursorKey()}, projectID, q.deadStream+"|"+message.ID, field, message.ID).Result()
+		if err != nil {
+			return 0, fmt.Errorf("reconcile Redis DLQ message %q overview: %w", message.ID, err)
+		}
+	}
+	return len(messages), nil
+}
+
+func (q *Queue) overviewCursorKey() string {
+	tag, _ := redisHashTag(q.deadStream)
+	return "queue:{" + tag + "}:overview:cursors"
+}
+
+func (q *Queue) cursorField(kind, stream string) string {
+	sum := sha256.Sum256([]byte(q.overviewGroup + "\x00" + strings.Join(q.overviewStreams, "\x00") + "\x00" + q.deadStream))
+	return hex.EncodeToString(sum[:8]) + "|" + kind + "|" + stream
 }
 
 func (q *Queue) Snapshot(ctx context.Context, projectID uint64) (overview.QueueSnapshot, error) {

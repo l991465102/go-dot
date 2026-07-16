@@ -80,6 +80,12 @@ end
 return 1
 `)
 
+var ackUnindexedScript = redis.NewScript(`
+if redis.call('HEXISTS', KEYS[2], ARGV[3]) == 1 then return 0 end
+redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+return 1
+`)
+
 var scheduleRetryScript = redis.NewScript(`
 local pending = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[2], ARGV[2], 1)
 if #pending == 0 then
@@ -87,9 +93,14 @@ if #pending == 0 then
 end
 local record = cjson.encode({
   batch_id=ARGV[4], payload=ARGV[5], deliveries=ARGV[6],
-  first_seen=ARGV[7], last_error=ARGV[8], pending_mapping=redis.call('HGET', KEYS[4], ARGV[10])
+  first_seen=ARGV[7], last_error=ARGV[8], pending_mapping=redis.call('HGET', KEYS[4], ARGV[10]),
+  pending_field=ARGV[11]
 })
-redis.call('HDEL', KEYS[4], ARGV[10])
+local mapping = redis.call('HGET', KEYS[4], ARGV[10])
+if mapping then
+  redis.call('HDEL', KEYS[4], ARGV[10])
+  redis.call('HSET', KEYS[4], ARGV[11], mapping)
+end
 redis.call('HSET', KEYS[3], ARGV[3], record)
 redis.call('ZADD', KEYS[2], ARGV[9], ARGV[3])
 redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
@@ -107,7 +118,8 @@ for _, member in ipairs(members) do
       'batch_id', record.batch_id, 'payload', record.payload,
       'deliveries', record.deliveries, 'first_seen', record.first_seen,
       'last_error', record.last_error)
-    if record.pending_mapping then
+    if record.pending_mapping and record.pending_field and redis.call('HGET', KEYS[4], record.pending_field) == record.pending_mapping then
+      redis.call('HDEL', KEYS[4], record.pending_field)
       redis.call('HSET', KEYS[4], ARGV[3] .. '|' .. new_id, record.pending_mapping)
     end
     promoted = promoted + 1
@@ -228,22 +240,29 @@ func (q *Queue) Ack(ctx context.Context, stream, group string, ids ...string) er
 	}
 	for _, id := range ids {
 		field := stream + "|" + id
-		mapping, err := q.client.HGet(ctx, q.pendingIndexKey(), field).Result()
-		if err == redis.Nil {
-			if err := q.client.XAck(ctx, stream, group, id).Err(); err != nil {
-				return fmt.Errorf("ack Redis Stream %q: %w", stream, err)
+		for {
+			mapping, err := q.client.HGet(ctx, q.pendingIndexKey(), field).Result()
+			if err == redis.Nil {
+				acked, err := ackUnindexedScript.Run(ctx, q.client, []string{stream, q.pendingIndexKey()}, group, id, field).Int()
+				if err != nil {
+					return fmt.Errorf("ack unindexed Redis Stream %q: %w", stream, err)
+				}
+				if acked == 1 {
+					break
+				}
+				continue
 			}
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		parts := strings.SplitN(mapping, "|", 2)
-		if len(parts) != 2 {
-			return errors.New("invalid Redis pending index")
-		}
-		if _, err := ackIndexedScript.Run(ctx, q.client, []string{stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(parts[0])}, group, id, field, mapping, parts[0], parts[1]).Result(); err != nil {
-			return fmt.Errorf("ack indexed Redis Stream %q: %w", stream, err)
+			if err != nil {
+				return err
+			}
+			parts := strings.SplitN(mapping, "|", 2)
+			if len(parts) != 2 {
+				return errors.New("invalid Redis pending index")
+			}
+			if _, err := ackIndexedScript.Run(ctx, q.client, []string{stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(parts[0])}, group, id, field, mapping, parts[0], parts[1]).Result(); err != nil {
+				return fmt.Errorf("ack indexed Redis Stream %q: %w", stream, err)
+			}
+			break
 		}
 	}
 	return nil
@@ -270,7 +289,7 @@ func (q *Queue) Retry(ctx context.Context, stream, group string, msg ports.Messa
 	member := group + ":" + msg.ID
 	due := time.Now().Add(delay).UnixMilli()
 	_, err = scheduleRetryScript.Run(ctx, q.client, []string{stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()},
-		group, msg.ID, member, batchID, string(payload), max(msg.Deliveries+1, 2), firstSeen, errorText(cause), due, stream+"|"+msg.ID).Result()
+		group, msg.ID, member, batchID, string(payload), max(msg.Deliveries+1, 2), firstSeen, errorText(cause), due, stream+"|"+msg.ID, retryIndexField(stream, member)).Result()
 	if err != nil {
 		return fmt.Errorf("schedule Redis Stream message %q retry: %w", msg.ID, err)
 	}
@@ -293,6 +312,9 @@ func (q *Queue) PromoteDue(ctx context.Context, stream string, count int) (int, 
 
 func retryScheduleKey(stream string) string { return stream + ":retry:schedule" }
 func retryDataKey(stream string) string     { return stream + ":retry:data" }
+func retryIndexField(stream, member string) string {
+	return "retry|" + stream + "|" + member
+}
 
 func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg ports.Message, cause error) error {
 	if err := validateMove(sourceStream, group, msg); err != nil {

@@ -54,6 +54,7 @@ type MemberInput struct {
 }
 type WriteKeyStatus struct {
 	PreviousKeyExpiresAt *time.Time `json:"previous_key_expires_at,omitempty"`
+	PreviousKeyActive    bool       `json:"previous_key_active"`
 }
 
 func (in SettingsInput) Validate() error {

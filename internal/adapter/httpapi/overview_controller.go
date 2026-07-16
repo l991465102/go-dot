@@ -41,5 +41,5 @@ func (c OverviewController) get(w http.ResponseWriter, r *http.Request) {
 	for _, item := range result.NoReportPoints {
 		items = append(items, v1.OverviewPoint{ID: item.ID, Code: item.Code, Name: item.Name, PublishedAt: item.PublishedAt})
 	}
-	writeJSON(w, 200, v1.OverviewRes{Window: v1.OverviewWindow{Start: result.Window.Start, End: result.Window.End}, InvalidCount: result.InvalidCount, DeadLetterCount: result.DeadLetterCount, Queue: v1.OverviewQueue{Pending: result.Queue.Pending, OldestPendingAgeSeconds: int64(result.Queue.OldestPendingAge / time.Second)}, NoReportPoints: items, NoReportThresholdHours: 24})
+	writeJSON(w, 200, v1.OverviewRes{Window: v1.OverviewWindow{Start: result.Window.Start, End: result.Window.End}, ValidCount: result.ValidCount, InvalidCount: result.InvalidCount, InvalidRate: result.InvalidRate, DeadLetterCount: result.DeadLetterCount, Queue: v1.OverviewQueue{Pending: result.Queue.Pending, OldestPendingAgeSeconds: int64(result.Queue.OldestPendingAge / time.Second)}, NoReportPoints: items, NoReportThresholdHours: 24})
 }

@@ -30,6 +30,25 @@ func TestMembersAreReadableByViewerButMutableByAdmin(t *testing.T) {
 	require.ErrorIs(t, svc.AddMember(context.Background(), 2, 9, MemberInput{Username: "admin", Role: Admin}), ErrForbidden)
 }
 
+func TestWriteKeyStatusIsReadableByViewerAndExpiresAgainstServiceClock(t *testing.T) {
+	expires := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	repo := &settingsRepo{
+		member:    Member{UserID: 2, ProjectID: 9, Role: Viewer, Active: true},
+		keyStatus: WriteKeyStatus{PreviousKeyExpiresAt: &expires},
+	}
+	svc := NewService(repo)
+	svc.now = func() time.Time { return expires.Add(-time.Second) }
+
+	status, err := svc.GetWriteKeyStatus(context.Background(), 2, 9)
+	require.NoError(t, err)
+	require.True(t, status.PreviousKeyActive)
+
+	svc.now = func() time.Time { return expires }
+	status, err = svc.GetWriteKeyStatus(context.Background(), 2, 9)
+	require.NoError(t, err)
+	require.False(t, status.PreviousKeyActive)
+}
+
 func TestSettingsRejectInvalidTimezoneAndNonOriginURL(t *testing.T) {
 	require.ErrorIs(t, (SettingsInput{Timezone: "Missing/Timezone"}).Validate(), ErrInvalidProject)
 	require.ErrorIs(t, (SettingsInput{Timezone: "UTC", AllowedOrigins: []string{"https://example.com/path"}}).Validate(), ErrInvalidProject)
@@ -40,6 +59,7 @@ type settingsRepo struct {
 	member        Member
 	members       []Member
 	settingsActor uint64
+	keyStatus     WriteKeyStatus
 }
 
 func (r *settingsRepo) CreateProject(context.Context, Project, Member) (Project, error) {
@@ -64,5 +84,5 @@ func (r *settingsRepo) AddProjectMember(context.Context, uint64, uint64, MemberI
 }
 func (r *settingsRepo) RemoveProjectMember(context.Context, uint64, uint64, uint64) error { return nil }
 func (r *settingsRepo) WriteKeyStatus(context.Context, uint64) (WriteKeyStatus, error) {
-	return WriteKeyStatus{}, nil
+	return r.keyStatus, nil
 }

@@ -22,7 +22,7 @@ func TestOverviewControllerReturnsProjectScopedOperationalDTO(t *testing.T) {
 	res := httptest.NewRecorder()
 	mux.ServeHTTP(res, req)
 	require.Equal(t, 200, res.Code, res.Body.String())
-	require.JSONEq(t, `{"window":{"start":"2026-07-14T12:00:00Z","end":"2026-07-15T12:00:00Z"},"invalid_count":4,"dead_letter_count":2,"queue":{"pending":3,"oldest_pending_age_seconds":90},"no_report_points":[{"id":12,"code":"silent","name":"Silent","published_at":"0001-01-01T00:00:00Z"}],"no_report_threshold_hours":24}`, res.Body.String())
+	require.JSONEq(t, `{"window":{"start":"2026-07-14T12:00:00Z","end":"2026-07-15T12:00:00Z"},"valid_count":96,"invalid_count":4,"invalid_rate":0.04,"dead_letter_count":2,"queue":{"pending":3,"oldest_pending_age_seconds":90},"no_report_points":[{"id":12,"code":"silent","name":"Silent","published_at":"0001-01-01T00:00:00Z"}],"no_report_threshold_hours":24}`, res.Body.String())
 }
 
 func TestOverviewControllerForbidsCrossProject(t *testing.T) {
@@ -45,6 +45,10 @@ func (a httpOverviewAuth) RequireRole(_ context.Context, _, p uint64, _ ...proje
 }
 
 type httpOverviewQuality struct{}
+
+func (httpOverviewQuality) ValidCount(context.Context, uint64, overview.Window) (int64, error) {
+	return 96, nil
+}
 
 func (httpOverviewQuality) InvalidCount(context.Context, uint64, overview.Window) (int64, error) {
 	return 4, nil

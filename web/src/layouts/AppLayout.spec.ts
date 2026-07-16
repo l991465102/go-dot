@@ -7,7 +7,7 @@ import { useProjectStore } from '@/stores/project'
 import AppLayout from './AppLayout.vue'
 
 describe('management shell permissions', () => {
-  it('shows read navigation but hides project settings from viewers', async () => {
+  it('shows project settings read navigation to viewers', async () => {
     const pinia = createPinia()
     setActivePinia(pinia)
     useAuthStore().setSession({
@@ -25,6 +25,6 @@ describe('management shell permissions', () => {
 
     expect(wrapper.get('nav').text()).toContain('项目概览')
     expect(wrapper.get('nav').text()).toContain('点位管理')
-    expect(wrapper.get('nav').text()).not.toContain('项目设置')
+    expect(wrapper.get('nav').text()).toContain('项目设置')
   })
 })

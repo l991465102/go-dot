@@ -13,6 +13,7 @@ type Authorizer interface {
 	RequireRole(context.Context, uint64, uint64, ...project.Role) error
 }
 type QualityStore interface {
+	ValidCount(context.Context, uint64, Window) (int64, error)
 	InvalidCount(context.Context, uint64, Window) (int64, error)
 	ActivePointIDs(context.Context, uint64, Window) (map[uint64]bool, error)
 }
@@ -40,7 +41,9 @@ type PublishedPoint struct {
 }
 type Result struct {
 	Window          Window
+	ValidCount      int64
 	InvalidCount    int64
+	InvalidRate     float64
 	DeadLetterCount int64
 	Queue           QueueSnapshot
 	NoReportPoints  []PublishedPoint
@@ -66,6 +69,10 @@ func (s *Service) Get(ctx context.Context, actor, projectID uint64) (Result, err
 	}
 	end := s.now().UTC()
 	window := Window{Start: end.Add(-WindowDuration), End: end}
+	valid, err := s.quality.ValidCount(ctx, projectID, window)
+	if err != nil {
+		return Result{}, err
+	}
 	invalid, err := s.quality.InvalidCount(ctx, projectID, window)
 	if err != nil {
 		return Result{}, err
@@ -88,5 +95,9 @@ func (s *Service) Get(ctx context.Context, actor, projectID uint64) (Result, err
 			silent = append(silent, point)
 		}
 	}
-	return Result{Window: window, InvalidCount: invalid, DeadLetterCount: queue.DeadLetters, Queue: queue, NoReportPoints: silent}, nil
+	invalidRate := 0.0
+	if total := valid + invalid; total > 0 {
+		invalidRate = float64(invalid) / float64(total)
+	}
+	return Result{Window: window, ValidCount: valid, InvalidCount: invalid, InvalidRate: invalidRate, DeadLetterCount: queue.DeadLetters, Queue: queue, NoReportPoints: silent}, nil
 }

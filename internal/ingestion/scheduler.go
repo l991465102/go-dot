@@ -38,6 +38,7 @@ func (f ErrorReporterFunc) Report(err error) { f(err) }
 
 type StatisticsRefresher interface{ RefreshCurrentAndPrevious(context.Context) error }
 type QueueObserver interface{ ObserveQueues(context.Context) error }
+type QueueOverviewReconciler interface{ ReconcileQueueOverview(context.Context) error }
 type WriteKeyExpirer interface {
 	ExpirePreviousWriteKeys(context.Context, time.Time) (int64, error)
 }
@@ -68,6 +69,13 @@ func (j SchedulerRuntimeJobs) ObserveQueues(ctx context.Context) error {
 		return nil
 	}
 	return j.Observer.ObserveQueues(ctx)
+}
+func (j SchedulerRuntimeJobs) ReconcileQueueOverview(ctx context.Context) error {
+	reconciler, ok := j.Queue.(interface{ ReconcileOverview(context.Context) error })
+	if !ok || reconciler == nil {
+		return nil
+	}
+	return reconciler.ReconcileOverview(ctx)
 }
 func (j SchedulerRuntimeJobs) ExpirePreviousWriteKeys(ctx context.Context, now time.Time) (int64, error) {
 	return j.Keys.ExpirePreviousWriteKeys(ctx, now)
@@ -137,6 +145,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	if err := s.reconcileQueueOverview(ctx); err != nil {
+		return fmt.Errorf("reconcile queue overview at scheduler startup: %w", err)
+	}
 	type tick struct {
 		job    SchedulerJob
 		ticker *time.Ticker
@@ -197,6 +208,9 @@ func (s *Scheduler) RunJob(ctx context.Context, job SchedulerJob, now time.Time)
 		case SchedulerReclaim:
 			return s.reclaim(leaseCtx)
 		case SchedulerMetrics:
+			if err := s.reconcileQueueOverview(leaseCtx); err != nil {
+				return err
+			}
 			return s.jobs.ObserveQueues(leaseCtx)
 		case SchedulerExpireKeys:
 			_, err := s.jobs.ExpirePreviousWriteKeys(leaseCtx, now.UTC())
@@ -205,6 +219,14 @@ func (s *Scheduler) RunJob(ctx context.Context, job SchedulerJob, now time.Time)
 			return fmt.Errorf("unknown scheduler job %q", job)
 		}
 	})
+}
+
+func (s *Scheduler) reconcileQueueOverview(ctx context.Context) error {
+	reconciler, ok := s.jobs.(QueueOverviewReconciler)
+	if !ok {
+		return nil
+	}
+	return reconciler.ReconcileQueueOverview(ctx)
 }
 func (s *Scheduler) interval(job SchedulerJob) time.Duration {
 	switch job {

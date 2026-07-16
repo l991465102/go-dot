@@ -11,7 +11,9 @@ const projects = useProjectStore()
 const project = computed(() => projects.currentProject)
 const realtime = ref<StatisticsSummary>()
 const trend = ref<TrendPoint[]>([])
+const validCount = ref(0)
 const invalidCount = ref(0)
+const invalidRate = ref(0)
 const deadLetterCount = ref(0)
 const loading = ref(false)
 const error = ref('')
@@ -38,7 +40,9 @@ async function load() {
     if (signal.aborted) return
     trend.value = history.items
     operations.value = overview
+    validCount.value = overview.valid_count
     invalidCount.value = overview.invalid_count
+    invalidRate.value = overview.invalid_rate
     deadLetterCount.value = overview.dead_letter_count
     if (selectedPoint.value) realtime.value = await getRealtime({ ...base, pointCodes: [selectedPoint.value], start: new Date(new Date(range.end).getTime() - 3_600_000).toISOString() }, signal)
   } catch (cause) {
@@ -53,8 +57,8 @@ onBeforeUnmount(() => controller?.abort())
   <section aria-labelledby="overview-title">
     <header class="page-heading"><div><p class="eyebrow">PROJECT OVERVIEW</p><h1 id="overview-title">项目概览</h1><p>快速了解 {{ project?.name }} 的业务数据与质量状态。</p></div><el-tag v-if="project" type="success" effect="light">{{ project.active ? '运行中' : '已停用' }}</el-tag></header>
     <div v-if="error" class="page-error" role="alert">{{ error }} <el-button @click="load">重试</el-button></div>
-    <MetricCards :realtime="realtime" :realtime-point="selectedPoint" :invalid-count="invalidCount" :dead-letter-count="deadLetterCount" :loading="loading" />
-    <article class="overview-card trend-panel"><header><div><p class="eyebrow">CLICKHOUSE TREND</p><h2>项目近 24 小时趋势</h2></div><div><el-tag effect="plain">约 1 分钟延迟</el-tag></div></header><TrendChart v-if="trend.length" :items="trend" /><el-empty v-else-if="!loading" description="暂无已聚合数据" /></article>
+    <MetricCards :realtime="realtime" :realtime-point="selectedPoint" :valid-count="validCount" :invalid-count="invalidCount" :invalid-rate="invalidRate" :dead-letter-count="deadLetterCount" :loading="loading" />
+    <article class="overview-card trend-panel"><header><div><p class="eyebrow">CLICKHOUSE TREND</p><h2>项目近 24 小时趋势</h2></div><div><el-tag effect="plain">约 1 分钟延迟</el-tag></div></header><TrendChart v-if="trend.length" :items="trend" :timezone="project?.timezone ?? 'UTC'" /><el-empty v-else-if="!loading" description="暂无已聚合数据" /></article>
     <div class="operations-grid">
       <article class="overview-card"><p>队列待处理消息</p><strong>{{ operations?.queue.pending ?? '—' }}</strong><small>最老待处理 {{ operations ? operations.queue.oldest_pending_age_seconds + ' 秒' : '—' }}</small></article>
       <article class="overview-card"><p>24 小时未上报点位</p><strong>{{ operations?.no_report_points.length ?? '—' }}</strong><small>{{ operations?.no_report_points.map(item => item.code).join('、') || '无' }}</small></article>

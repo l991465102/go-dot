@@ -8,6 +8,28 @@ import (
 	"github.com/lzw7758/go-dot/internal/overview"
 )
 
+func (s *StatisticsStore) ValidCount(ctx context.Context, projectID uint64, window overview.Window) (int64, error) {
+	if s == nil || s.db == nil || !identifierPattern.MatchString(s.rawTable) {
+		return 0, errors.New("invalid ClickHouse overview store")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT count() FROM `+s.rawTable+` FINAL WHERE project_id=? AND received_at>=? AND received_at<?`, projectID, window.Start, window.End)
+	if err != nil {
+		return 0, fmt.Errorf("count valid events: %w", err)
+	}
+	defer rows.Close()
+	var count int64
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+		return 0, errors.New("valid event count returned no row")
+	}
+	if err := rows.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, rows.Err()
+}
+
 func (s *StatisticsStore) InvalidCount(ctx context.Context, projectID uint64, window overview.Window) (int64, error) {
 	if s == nil || s.db == nil || !identifierPattern.MatchString(s.invalidEventsTable) {
 		return 0, errors.New("invalid ClickHouse overview store")

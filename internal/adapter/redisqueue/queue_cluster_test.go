@@ -9,11 +9,16 @@ import (
 func TestEveryMultiKeyScriptUsesOneRedisClusterSlot(t *testing.T) {
 	stream := "tracking:{queue}:events"
 	dead := "tracking:{queue}:dead"
+	q := New(nil, WithDeadStream(dead))
 	sets := map[string][]string{
-		"publish":        {stream, publishDedupKey(stream, "batch")},
-		"schedule retry": {stream, retryScheduleKey(stream), retryDataKey(stream)},
-		"promote retry":  {stream, retryScheduleKey(stream), retryDataKey(stream)},
-		"move DLQ":       {dead, stream},
+		"publish":              {stream, publishDedupKey(stream, "batch"), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
+		"ACK unindexed":        {stream, q.pendingIndexKey()},
+		"ACK indexed":          {stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
+		"schedule retry":       {stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()},
+		"promote retry":        {stream, retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey()},
+		"move DLQ":             {dead, stream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
+		"reconcile stream":     {stream, q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
+		"reconcile retry data": {retryScheduleKey(stream), retryDataKey(stream), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey("9")},
 	}
 	for name, keys := range sets {
 		t.Run(name, func(t *testing.T) {

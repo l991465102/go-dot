@@ -36,10 +36,12 @@ export interface CreatedProject {
   writeKey: string
 }
 export interface ProjectMember { user_id: number; project_id: number; username: string; display_name?: string; role: ProjectRole; is_active: boolean }
-export interface WriteKeyStatus { previous_key_expires_at?: string }
+export interface WriteKeyStatus { previous_key_active: boolean; previous_key_expires_at?: string }
 export interface ProjectOverview {
   window: { start: string; end: string }
+  valid_count: number
   invalid_count: number
+  invalid_rate: number
   dead_letter_count: number
   queue: { pending: number; oldest_pending_age_seconds: number }
   no_report_points: Array<{ id: number; code: string; name: string; published_at: string }>

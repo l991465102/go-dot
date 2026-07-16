@@ -36,9 +36,28 @@ func TestSchedulerReclaimsAndPromotesWithoutWorkerOwnership(t *testing.T) {
 
 func TestSchedulerRunReturnsOnCancellation(t *testing.T) {
 	s := NewScheduler(&fakeLeaseManager{}, &fakeSchedulerJobs{}, SchedulerConfig{AggregateEvery: time.Hour, ReclaimEvery: time.Hour, MetricsEvery: time.Hour, ExpireKeysEvery: time.Hour})
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
 	cancel()
 	require.NoError(t, s.Run(ctx))
+}
+
+func TestSchedulerReconcilesQueueOverviewOnStartup(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	jobs := &fakeSchedulerJobs{reconcileCancel: cancel}
+	s := NewScheduler(&fakeLeaseManager{}, jobs, SchedulerConfig{
+		AggregateEvery: time.Hour, ReclaimEvery: time.Hour, MetricsEvery: time.Hour, ExpireKeysEvery: time.Hour,
+	})
+	require.NoError(t, s.Run(ctx))
+	require.Equal(t, 1, jobs.reconciles)
+}
+
+func TestSchedulerMetricsReconcilesOverviewBeforeObservation(t *testing.T) {
+	jobs := &fakeSchedulerJobs{}
+	s := NewScheduler(&fakeLeaseManager{}, jobs, SchedulerConfig{MetricsEvery: time.Minute})
+	require.NoError(t, s.RunJob(context.Background(), SchedulerMetrics, time.Now()))
+	require.Equal(t, []string{"reconcile", "observe"}, jobs.overviewCalls)
 }
 
 func TestSchedulerReportsTickErrorsAndContinuesFutureTicks(t *testing.T) {
@@ -109,6 +128,9 @@ type fakeSchedulerJobs struct {
 	retryMessage                   ports.Message
 	dlqMessage                     ports.Message
 	aggregateErr                   error
+	reconciles                     int
+	reconcileCancel                context.CancelFunc
+	overviewCalls                  []string
 }
 
 func (j *fakeSchedulerJobs) RefreshStatistics(context.Context) error {
@@ -143,7 +165,22 @@ func (j *fakeSchedulerJobs) MoveToDLQ(_ context.Context, _, _ string, msg ports.
 	j.dlqMessage = msg
 	return nil
 }
-func (j *fakeSchedulerJobs) ObserveQueues(context.Context) error { return nil }
+func (j *fakeSchedulerJobs) ReconcileQueueOverview(context.Context) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.reconciles++
+	j.overviewCalls = append(j.overviewCalls, "reconcile")
+	if j.reconcileCancel != nil {
+		j.reconcileCancel()
+	}
+	return nil
+}
+func (j *fakeSchedulerJobs) ObserveQueues(context.Context) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.overviewCalls = append(j.overviewCalls, "observe")
+	return nil
+}
 func (j *fakeSchedulerJobs) ExpirePreviousWriteKeys(context.Context, time.Time) (int64, error) {
 	return 0, nil
 }

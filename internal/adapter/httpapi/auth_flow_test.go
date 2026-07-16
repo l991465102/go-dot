@@ -74,6 +74,9 @@ func TestProjectSettingsViewerReadsButCannotMutate(t *testing.T) {
 	handler := httpapi.NewHandler(authSvc, project.NewService(repo), false)
 	read := performJSON(t, handler, http.MethodGet, "/api/v1/projects/9/members", nil, session.AccessToken)
 	require.Equal(t, http.StatusOK, read.Code)
+	keyStatus := performJSON(t, handler, http.MethodGet, "/api/v1/projects/9/write-key-status", nil, session.AccessToken)
+	require.Equal(t, http.StatusOK, keyStatus.Code)
+	require.JSONEq(t, `{"previous_key_active":false}`, keyStatus.Body.String())
 	write := performJSON(t, handler, http.MethodPatch, "/api/v1/projects/9/settings", map[string]any{"timezone": "UTC", "allowed_origins": []string{}}, session.AccessToken)
 	require.Equal(t, http.StatusForbidden, write.Code)
 }

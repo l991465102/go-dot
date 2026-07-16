@@ -36,6 +36,6 @@ watch(() => projects.currentProjectId, load, { immediate: true }); onBeforeUnmou
     </el-form>
     <div v-if="error" class="page-error" role="alert">{{ error }}</div>
     <div class="metric-card-grid"><article class="overview-card"><p>历史 PV</p><strong>{{ summary?.pv ?? '—' }}</strong><small>约 1 分钟延迟</small></article><article class="overview-card"><p>历史 UV{{ summary ? (summary.approximate ? '（近似）':'（精确）'):'' }}</p><strong>{{ summary?.uv ?? '—' }}</strong></article><article class="overview-card"><p>实时 PV</p><strong>{{ realtime?.pv ?? '—' }}</strong><small>{{ filters.point ? 'Redis':'请选择点位' }}</small></article><article class="overview-card"><p>实时 UV{{ realtime ? (realtime.approximate ? '（近似）':'（精确）'):'' }}</p><strong>{{ realtime?.uv ?? '—' }}</strong></article></div>
-    <article class="overview-card"><TrendChart v-if="trend.length" :items="trend"/><el-empty v-else-if="!loading" description="暂无统计数据"/></article>
+    <article class="overview-card"><TrendChart v-if="trend.length" :items="trend" :timezone="project?.timezone ?? 'UTC'"/><el-empty v-else-if="!loading" description="暂无统计数据"/></article>
   </section>
 </template>

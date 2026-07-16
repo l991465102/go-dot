@@ -18,7 +18,9 @@ type OverviewPoint struct {
 }
 type OverviewRes struct {
 	Window                 OverviewWindow  `json:"window"`
+	ValidCount             int64           `json:"valid_count"`
 	InvalidCount           int64           `json:"invalid_count"`
+	InvalidRate            float64         `json:"invalid_rate"`
 	DeadLetterCount        int64           `json:"dead_letter_count"`
 	Queue                  OverviewQueue   `json:"queue"`
 	NoReportPoints         []OverviewPoint `json:"no_report_points"`

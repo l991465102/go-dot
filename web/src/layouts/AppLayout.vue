@@ -16,7 +16,7 @@ const navItems = computed(() => [
   { label: '业务分类', route: 'categories', marker: '类' },
   { label: '统计分析', route: 'statistics', marker: '统' },
   { label: '数据诊断', route: 'diagnostics', marker: '诊' },
-  ...(projects.canMutate ? [{ label: '项目设置', route: 'project-settings', marker: '设' }] : []),
+  { label: '项目设置', route: 'project-settings', marker: '设' },
 ])
 
 async function selectProject(value: number) {

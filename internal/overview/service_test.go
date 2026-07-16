@@ -13,7 +13,7 @@ import (
 func TestServiceReturnsExplicit24HourProjectOverview(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	auth := &fakeAuth{}
-	quality := &fakeQuality{invalid: 7, active: map[uint64]bool{11: true}}
+	quality := &fakeQuality{valid: 93, invalid: 7, active: map[uint64]bool{11: true}}
 	queue := &fakeQueue{snapshot: QueueSnapshot{Pending: 3, OldestPendingAge: 90 * time.Second, DeadLetters: 2}}
 	points := &fakePoints{items: []PublishedPoint{{ID: 11, Code: "reported", Name: "Reported"}, {ID: 12, Code: "silent", Name: "Silent"}}}
 	svc := NewService(auth, quality, queue, points, func() time.Time { return now })
@@ -23,6 +23,8 @@ func TestServiceReturnsExplicit24HourProjectOverview(t *testing.T) {
 	require.Equal(t, now.Add(-24*time.Hour), got.Window.Start)
 	require.Equal(t, now, got.Window.End)
 	require.EqualValues(t, 7, got.InvalidCount)
+	require.EqualValues(t, 93, got.ValidCount)
+	require.InDelta(t, 0.07, got.InvalidRate, 0.000001)
 	require.EqualValues(t, 2, got.DeadLetterCount)
 	require.EqualValues(t, 3, got.Queue.Pending)
 	require.Equal(t, 90*time.Second, got.Queue.OldestPendingAge)
@@ -31,6 +33,13 @@ func TestServiceReturnsExplicit24HourProjectOverview(t *testing.T) {
 	require.EqualValues(t, 9, quality.projectID)
 	require.EqualValues(t, 9, queue.projectID)
 	require.Equal(t, []project.Role{project.Admin, project.Viewer}, auth.roles)
+}
+
+func TestServiceDefinesZeroInvalidRateWhenNoEventsWereReceived(t *testing.T) {
+	svc := NewService(&fakeAuth{}, &fakeQuality{}, &fakeQueue{}, &fakePoints{}, time.Now)
+	got, err := svc.Get(context.Background(), 5, 9)
+	require.NoError(t, err)
+	require.Zero(t, got.InvalidRate)
 }
 
 func TestServiceRejectsCrossProjectBeforeReadingMetrics(t *testing.T) {
@@ -58,11 +67,19 @@ func (f *fakeAuth) RequireRole(_ context.Context, _, _ uint64, roles ...project.
 }
 
 type fakeQuality struct {
+	valid     int64
 	invalid   int64
 	active    map[uint64]bool
 	window    Window
 	projectID uint64
 	calls     int
+}
+
+func (f *fakeQuality) ValidCount(_ context.Context, projectID uint64, window Window) (int64, error) {
+	f.calls++
+	f.projectID = projectID
+	f.window = window
+	return f.valid, nil
 }
 
 func (f *fakeQuality) InvalidCount(_ context.Context, projectID uint64, window Window) (int64, error) {

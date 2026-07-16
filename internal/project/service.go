@@ -176,14 +176,19 @@ func (s *Service) RemoveMember(ctx context.Context, actor, projectID, userID uin
 	return repo.RemoveProjectMember(ctx, projectID, actor, userID)
 }
 func (s *Service) GetWriteKeyStatus(ctx context.Context, actor, projectID uint64) (WriteKeyStatus, error) {
-	if err := s.RequireRole(ctx, actor, projectID, Admin); err != nil {
+	if err := s.RequireRole(ctx, actor, projectID, Admin, Viewer); err != nil {
 		return WriteKeyStatus{}, err
 	}
 	repo, err := s.settingsRepository()
 	if err != nil {
 		return WriteKeyStatus{}, err
 	}
-	return repo.WriteKeyStatus(ctx, projectID)
+	status, err := repo.WriteKeyStatus(ctx, projectID)
+	if err != nil {
+		return WriteKeyStatus{}, err
+	}
+	status.PreviousKeyActive = status.PreviousKeyExpiresAt != nil && status.PreviousKeyExpiresAt.After(s.now().UTC())
+	return status, nil
 }
 
 func newSecret() (string, string, error) {

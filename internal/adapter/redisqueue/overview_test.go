@@ -2,6 +2,7 @@ package redisqueue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -226,6 +227,115 @@ func TestReconcileOverviewHasBoundedCommandCountAndKeepsExhaustedDLQCursor(t *te
 	}
 	require.NoError(t, ctx.Err())
 	require.Equal(t, id, client.HGet(ctx, q.overviewCursorKey(), q.cursorField("dead", dead)).Val(), "an exhausted forward cursor must not rewind and rescan history")
+}
+
+func TestRetryReconciliationPeriodicallyRewindsRankAfterEarlierPromotion(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, group := "tracking:{queue}:events", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	q := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	add := func(member string, score float64) {
+		record := fmt.Sprintf(`{"batch_id":"%s","payload":"{\"project_id\":9}","first_seen":%d}`, member, time.Now().UnixMilli())
+		require.NoError(t, client.HSet(ctx, retryDataKey(stream), member, record).Err())
+		require.NoError(t, client.ZAdd(ctx, retryScheduleKey(stream), redis.Z{Member: member, Score: score}).Err())
+	}
+	add("a", 1)
+	add("b-shifted", 2)
+	add("c", 3)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "a")).Val())
+	require.NoError(t, client.ZRem(ctx, retryScheduleKey(stream), "a").Err())
+	require.NoError(t, client.HDel(ctx, retryDataKey(stream), "a").Err())
+	for i := 0; i < 24 && !client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "b-shifted")).Val(); i++ {
+		add(fmt.Sprintf("later-%02d", i), 100+float64(i))
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "b-shifted")).Val(), "periodic rewind must recover a member shifted below the durable rank even while the set grows")
+}
+
+func TestMalformedMessageProjectIDTrustsOnlyNestedPayload(t *testing.T) {
+	nestedBytes, err := json.Marshal(map[string]any{"payload": []byte(`{"project_id":8}`), "project_id": 99})
+	require.NoError(t, err)
+	for name, msg := range map[string]ports.Message{
+		"nested string ignores spoofed top level": {Malformed: &ports.MalformedMessage{RawEnvelope: []byte(`{"payload":"{\"project_id\":7}","project_id":99}`)}},
+		"nested bytes":           {Malformed: &ports.MalformedMessage{RawEnvelope: nestedBytes}},
+		"other field is ignored": {Malformed: &ports.MalformedMessage{RawEnvelope: []byte(`{"other":"{\"project_id\":7}","project_id":99}`)}},
+		"invalid nested payload": {Malformed: &ports.MalformedMessage{RawEnvelope: []byte(`{"payload":"not-json","project_id":99}`)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := map[string]string{"nested string ignores spoofed top level": "7", "nested bytes": "8"}[name]
+			require.Equal(t, want, messageProjectID(msg))
+		})
+	}
+}
+
+func TestMalformedMoveAndDLQRebuildUseSameNestedPayloadProject(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	for _, values := range []map[string]any{
+		{fieldPayload: `{"project_id":7}`, fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(), "project_id": 99},
+		{fieldBatchID: "missing-payload", fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(), "other": `{"project_id":8}`, "project_id": 99},
+	} {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: stream, Values: values}).Err())
+	}
+	messages, err := q.Consume(ctx, stream, group, "worker", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, messages, 2)
+	for _, msg := range messages {
+		require.NotNil(t, msg.Malformed)
+		require.NoError(t, q.MoveToDLQ(ctx, stream, group, msg, errors.New("malformed")))
+	}
+	seven, _ := q.Snapshot(ctx, 7)
+	eight, _ := q.Snapshot(ctx, 8)
+	spoof, _ := q.Snapshot(ctx, 99)
+	require.EqualValues(t, 1, seven.DeadLetters)
+	require.Zero(t, eight.DeadLetters)
+	require.Zero(t, spoof.DeadLetters)
+
+	require.NoError(t, client.Del(ctx, q.deadLetterCountKey(), q.deadLetterIndexKey(), q.overviewCursorKey()).Err())
+	for i := 0; i < 12; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	seven, _ = q.Snapshot(ctx, 7)
+	eight, _ = q.Snapshot(ctx, 8)
+	spoof, _ = q.Snapshot(ctx, 99)
+	require.EqualValues(t, 1, seven.DeadLetters)
+	require.Zero(t, eight.DeadLetters)
+	require.Zero(t, spoof.DeadLetters)
+}
+
+func TestDLQRebuildSafelyRecognizesLegacyMalformedEnvelopeWithoutMarker(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, dead, group := "tracking:{queue}:events", "tracking:{queue}:dead", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	for _, payload := range []string{
+		`{"payload":"{\"project_id\":7}","project_id":99,"deliveries":"oops"}`,
+		`{"other":"{\"project_id\":8}","project_id":99,"deliveries":"oops"}`,
+	} {
+		require.NoError(t, client.XAdd(ctx, &redis.XAddArgs{Stream: dead, Values: map[string]any{
+			fieldBatchID: "legacy-malformed", fieldPayload: payload, fieldDeliveries: 1, fieldFirstSeen: time.Now().UnixMilli(),
+		}}).Err())
+	}
+	q := New(client, WithDeadStream(dead), WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
+	for i := 0; i < 8; i++ {
+		require.NoError(t, q.ReconcileOverview(ctx))
+	}
+	seven, _ := q.Snapshot(ctx, 7)
+	eight, _ := q.Snapshot(ctx, 8)
+	spoof, _ := q.Snapshot(ctx, 99)
+	require.EqualValues(t, 1, seven.DeadLetters)
+	require.Zero(t, eight.DeadLetters)
+	require.Zero(t, spoof.DeadLetters)
 }
 
 func TestOverviewSnapshotUsesProjectPendingIndexAndProjectDLQCount(t *testing.T) {

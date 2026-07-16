@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ const (
 	fieldDeliveries = "deliveries"
 	fieldFirstSeen  = "first_seen"
 	fieldLastError  = "last_error"
+	fieldMalformed  = "malformed"
 )
 
 var moveScript = redis.NewScript(`
@@ -35,7 +37,8 @@ local new_id = redis.call('XADD', KEYS[1], '*',
   'payload', ARGV[4],
   'deliveries', ARGV[5],
   'first_seen', ARGV[6],
-  'last_error', ARGV[7])
+  'last_error', ARGV[7],
+  'malformed', ARGV[11])
 if ARGV[8] ~= '' then
   if redis.call('HSETNX', KEYS[7], KEYS[1] .. '|' .. new_id, ARGV[8]) == 1 then
     redis.call('HINCRBY', KEYS[3], ARGV[8], 1)
@@ -341,9 +344,13 @@ func (q *Queue) MoveToDLQ(ctx context.Context, sourceStream, group string, msg p
 		return err
 	}
 	batchID, payload := messageBody(msg)
-	projectID := payloadProjectID(payload)
+	projectID := messageProjectID(msg)
+	malformed := "0"
+	if msg.Malformed != nil {
+		malformed = "1"
+	}
 	_, err = moveScript.Run(ctx, q.client, []string{q.deadStream, sourceStream, q.deadLetterCountKey(), q.pendingIndexKey(), q.pendingCountKey(), q.pendingAgeKey(projectID), q.deadLetterIndexKey()},
-		group, msg.ID, batchID, string(payload), max(msg.Deliveries, 1), firstSeen, errorText(cause), projectID, sourceStream+"|"+msg.ID, sourceStream+"|"+batchID,
+		group, msg.ID, batchID, string(payload), max(msg.Deliveries, 1), firstSeen, errorText(cause), projectID, sourceStream+"|"+msg.ID, sourceStream+"|"+batchID, malformed,
 	).Result()
 	if err != nil {
 		return fmt.Errorf("move Redis Stream message %q to DLQ: %w", msg.ID, err)
@@ -359,6 +366,48 @@ func payloadProjectID(payload []byte) string {
 		return ""
 	}
 	return strconv.FormatUint(envelope.ProjectID, 10)
+}
+
+// messageProjectID is the sole project-attribution boundary for live and
+// reconstructed dead letters. A malformed Redis envelope is untrusted: only
+// its nested payload field may carry the canonical event JSON.
+func messageProjectID(msg ports.Message) string {
+	if msg.Malformed == nil {
+		return payloadProjectID(msg.Payload)
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(msg.Malformed.RawEnvelope, &envelope) != nil {
+		return ""
+	}
+	raw, ok := envelope[fieldPayload]
+	if !ok {
+		return ""
+	}
+	var nested string
+	if json.Unmarshal(raw, &nested) != nil {
+		return ""
+	}
+	if projectID := payloadProjectID([]byte(nested)); projectID != "" {
+		return projectID
+	}
+	decoded, err := base64.StdEncoding.DecodeString(nested)
+	if err != nil {
+		return ""
+	}
+	return payloadProjectID(decoded)
+}
+
+func isMalformedRawEnvelope(payload []byte) bool {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(payload, &envelope) != nil {
+		return false
+	}
+	for _, field := range []string{fieldPayload, fieldBatchID, fieldDeliveries, fieldFirstSeen, fieldLastError} {
+		if _, exists := envelope[field]; exists {
+			return true
+		}
+	}
+	return false
 }
 func (q *Queue) deadLetterCountKey() string {
 	tag, _ := redisHashTag(q.deadStream)

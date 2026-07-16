@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/lzw7758/go-dot/internal/overview"
+	"github.com/lzw7758/go-dot/internal/ports"
 	"github.com/redis/go-redis/v9"
 )
 
 const overviewReconcileBatchSize = 100
+const retryReconcileRewindEvery = 4
 
 var reconcileStreamCandidateScript = redis.NewScript(`
 local function finish(value)
@@ -277,6 +279,13 @@ func (q *Queue) reconcileRetryCandidates(ctx context.Context, stream string, lim
 	if err != nil && err != redis.Nil {
 		return 0, err
 	}
+	pass, err := q.client.HIncrBy(ctx, q.overviewCursorKey(), q.cursorField("retry-pass", stream), 1).Result()
+	if err != nil {
+		return 0, fmt.Errorf("advance Redis retry reconciliation pass: %w", err)
+	}
+	if pass%retryReconcileRewindEvery == 0 {
+		start = 0
+	}
 	items, err := q.client.ZRange(ctx, retryScheduleKey(stream), start, start+int64(min(limit, overviewReconcileBatchSize))-1).Result()
 	if err != nil && err != redis.Nil {
 		return 0, fmt.Errorf("scan Redis retry schedule %q for overview: %w", stream, err)
@@ -335,7 +344,12 @@ func (q *Queue) reconcileDeadCandidates(ctx context.Context, limit int) (int, er
 		return 0, fmt.Errorf("scan Redis DLQ %q for overview: %w", q.deadStream, err)
 	}
 	for _, message := range messages {
-		projectID := payloadProjectID([]byte(valueString(message.Values[fieldPayload])))
+		payload := []byte(valueString(message.Values[fieldPayload]))
+		candidate := ports.Message{Payload: payload}
+		if valueString(message.Values[fieldMalformed]) == "1" || isMalformedRawEnvelope(payload) {
+			candidate.Malformed = &ports.MalformedMessage{RawEnvelope: payload}
+		}
+		projectID := messageProjectID(candidate)
 		_, err := reconcileDeadCandidateScript.Run(ctx, q.client, []string{q.deadLetterIndexKey(), q.deadLetterCountKey(), q.overviewCursorKey()}, projectID, q.deadStream+"|"+message.ID, field, message.ID).Result()
 		if err != nil {
 			return 0, fmt.Errorf("reconcile Redis DLQ message %q overview: %w", message.ID, err)

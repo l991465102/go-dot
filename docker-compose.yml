@@ -3,7 +3,7 @@ services:
     image: mysql:8.4
     environment:
       MYSQL_DATABASE: go_dot
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${GO_DOT_MYSQL_ROOT_PASSWORD:?copy .env.example to .env and replace GO_DOT_MYSQL_ROOT_PASSWORD}
       TZ: UTC
     command: ["--default-time-zone=+00:00"]
     ports:
@@ -11,7 +11,7 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -52,11 +52,29 @@ services:
       dockerfile: deploy/Dockerfile.backend
     command: ["migrate"]
     environment: &backend-environment
-      GO_DOT_MYSQL_DSN: root:root@tcp(mysql:3306)/go_dot?parseTime=true
-      GO_DOT_REDIS_ADDRESS: redis:6379
-      GO_DOT_CLICKHOUSE_DSN: clickhouse://default:@clickhouse:9000/go_dot
-      GO_DOT_JWT_SECRET: local-jwt-secret-change-before-production
-      GO_DOT_VISITOR_MASTER_KEY: local-visitor-key-change-before-production
+      GO_DOT_MYSQL_DSN: ${GO_DOT_MYSQL_DSN:?copy .env.example to .env and set GO_DOT_MYSQL_DSN}
+      GO_DOT_REDIS_ADDRESS: ${GO_DOT_REDIS_ADDRESS:?copy .env.example to .env and set GO_DOT_REDIS_ADDRESS}
+      GO_DOT_CLICKHOUSE_DSN: ${GO_DOT_CLICKHOUSE_DSN:?copy .env.example to .env and set GO_DOT_CLICKHOUSE_DSN}
+      GO_DOT_JWT_SECRET: ${GO_DOT_JWT_SECRET:?copy .env.example to .env and replace GO_DOT_JWT_SECRET}
+      GO_DOT_VISITOR_MASTER_KEY: ${GO_DOT_VISITOR_MASTER_KEY:?copy .env.example to .env and replace GO_DOT_VISITOR_MASTER_KEY}
+      GO_DOT_QUEUE_EVENT_STREAM: ${GO_DOT_QUEUE_EVENT_STREAM:-tracking:{queue}:events}
+      GO_DOT_QUEUE_INVALID_STREAM: ${GO_DOT_QUEUE_INVALID_STREAM:-tracking:{queue}:invalid}
+      GO_DOT_QUEUE_DEAD_STREAM: ${GO_DOT_QUEUE_DEAD_STREAM:-tracking:{queue}:dead}
+      GO_DOT_QUEUE_CONSUMER_GROUP: ${GO_DOT_QUEUE_CONSUMER_GROUP:-tracking-workers}
+      GO_DOT_QUEUE_PUBLISH_DEDUP_TTL: ${GO_DOT_QUEUE_PUBLISH_DEDUP_TTL:-72h}
+      GO_DOT_WORKER_CONCURRENCY: ${GO_DOT_WORKER_CONCURRENCY:-8}
+      GO_DOT_WORKER_MAX_DELIVERIES: ${GO_DOT_WORKER_MAX_DELIVERIES:-5}
+      GO_DOT_WORKER_RECLAIM_IDLE: ${GO_DOT_WORKER_RECLAIM_IDLE:-30s}
+      GO_DOT_WORKER_DRAIN_TIMEOUT: ${GO_DOT_WORKER_DRAIN_TIMEOUT:-30s}
+      GO_DOT_WORKER_RETRY_BASE: ${GO_DOT_WORKER_RETRY_BASE:-1s}
+      GO_DOT_WORKER_RETRY_MAX: ${GO_DOT_WORKER_RETRY_MAX:-1m}
+      GO_DOT_SCHEDULER_AGGREGATE_EVERY: ${GO_DOT_SCHEDULER_AGGREGATE_EVERY:-1m}
+      GO_DOT_SCHEDULER_RECLAIM_EVERY: ${GO_DOT_SCHEDULER_RECLAIM_EVERY:-15s}
+      GO_DOT_SCHEDULER_METRICS_EVERY: ${GO_DOT_SCHEDULER_METRICS_EVERY:-1m}
+      GO_DOT_SCHEDULER_EXPIRE_KEYS_EVERY: ${GO_DOT_SCHEDULER_EXPIRE_KEYS_EVERY:-1h}
+      GO_DOT_SCHEDULER_RECLAIM_IDLE: ${GO_DOT_SCHEDULER_RECLAIM_IDLE:-1m}
+      GO_DOT_SCHEDULER_LEASE_TTL: ${GO_DOT_SCHEDULER_LEASE_TTL:-2m}
+      GO_DOT_SCHEDULER_BATCH_SIZE: ${GO_DOT_SCHEDULER_BATCH_SIZE:-100}
       # Set true only when the browser-facing deployment is served through HTTPS.
       GO_DOT_SECURE_COOKIES: ${GO_DOT_SECURE_COOKIES:-false}
       TZ: UTC
@@ -96,7 +114,9 @@ services:
       context: .
       dockerfile: deploy/Dockerfile.backend
     command: ["worker"]
-    environment: *backend-environment
+    environment:
+      <<: *backend-environment
+      GO_DOT_METRICS_ADDRESS: ":9091"
     depends_on: *backend-dependencies
 
   scheduler:
@@ -104,7 +124,9 @@ services:
       context: .
       dockerfile: deploy/Dockerfile.backend
     command: ["scheduler"]
-    environment: *backend-environment
+    environment:
+      <<: *backend-environment
+      GO_DOT_METRICS_ADDRESS: ":9091"
     depends_on: *backend-dependencies
 
   web:

@@ -9,6 +9,7 @@ import (
 )
 
 type QueueSnapshot struct {
+	Lag              int64
 	Pending          int64
 	OldestPendingAge time.Duration
 	DeadLetters      int64
@@ -27,6 +28,16 @@ func NewQueueMonitor(client redis.UniversalClient, streams []string, group, dead
 func (m *QueueMonitor) ObserveQueues(ctx context.Context) error {
 	var snapshot QueueSnapshot
 	for _, stream := range m.streams {
+		groups, err := m.client.XInfoGroups(ctx, stream).Result()
+		if err != nil && err != redis.Nil {
+			return fmt.Errorf("read consumer groups %s: %w", stream, err)
+		}
+		for _, group := range groups {
+			if group.Name == m.group && group.Lag > 0 {
+				snapshot.Lag += group.Lag
+				break
+			}
+		}
 		pending, err := m.client.XPending(ctx, stream, m.group).Result()
 		if err == nil {
 			snapshot.Pending += pending.Count

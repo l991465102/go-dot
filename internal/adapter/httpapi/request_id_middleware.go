@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
-)
 
-type requestIDContextKey struct{}
+	"github.com/lzw7758/go-dot/internal/observability"
+)
 
 func NewRequestIDMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -17,14 +17,13 @@ func NewRequestIDMiddleware(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		r.Header.Set("X-Request-ID", requestID)
-		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		ctx := observability.WithRequestID(r.Context(), requestID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func RequestIDFromContext(ctx context.Context) string {
-	value, _ := ctx.Value(requestIDContextKey{}).(string)
-	return value
+	return observability.RequestIDFromContext(ctx)
 }
 
 func newRequestID() string {

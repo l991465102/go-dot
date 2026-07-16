@@ -32,7 +32,7 @@ func (s ObservedCollectService) Collect(ctx context.Context, p project.Project, 
 			}
 		}
 		fields := map[string]any{"project_id": p.ID, "batch_id": result.BatchID, "event_ids": eventIDs, "accepted": result.Accepted, "rejected": result.Rejected}
-		if requestID, ok := ctx.Value(RequestIDContextKey{}).(string); ok {
+		if requestID := RequestIDFromContext(ctx); requestID != "" {
 			fields["request_id"] = requestID
 		}
 		level, message := "info", "collection completed"
@@ -44,9 +44,38 @@ func (s ObservedCollectService) Collect(ctx context.Context, p project.Project, 
 	return result, err
 }
 
-// RequestIDContextKey is supported for non-HTTP adapters that need correlation.
-// HTTP code should normally use httpapi.RequestIDFromContext.
-type RequestIDContextKey struct{}
+type requestIDContextKey struct{}
+
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDContextKey{}, requestID)
+}
+
+func RequestIDFromContext(ctx context.Context) string {
+	requestID, _ := ctx.Value(requestIDContextKey{}).(string)
+	return requestID
+}
+
+type StatisticsRefresher interface {
+	RefreshCurrentAndPrevious(context.Context) error
+}
+
+type ObservedStatisticsRefresher struct {
+	Next    StatisticsRefresher
+	Metrics *Metrics
+	Now     func() time.Time
+}
+
+func (r ObservedStatisticsRefresher) RefreshCurrentAndPrevious(ctx context.Context) error {
+	err := r.Next.RefreshCurrentAndPrevious(ctx)
+	if err == nil && r.Metrics != nil {
+		now := time.Now()
+		if r.Now != nil {
+			now = r.Now()
+		}
+		r.Metrics.MarkAggregationSuccess(now)
+	}
+	return err
+}
 
 type ObservedEventStore struct {
 	Next    ports.EventStore
@@ -189,7 +218,7 @@ type QueueSnapshotSink struct{ Metrics *Metrics }
 
 func (s QueueSnapshotSink) SetQueueSnapshot(snapshot redisqueue.QueueSnapshot) {
 	if s.Metrics != nil {
-		s.Metrics.SetQueueSnapshot(QueueSnapshot{Lag: snapshot.Pending, Pending: snapshot.Pending, DeadLetters: snapshot.DeadLetters, OldestPendingAge: snapshot.OldestPendingAge})
+		s.Metrics.SetQueueSnapshot(QueueSnapshot{Lag: snapshot.Lag, Pending: snapshot.Pending, DeadLetters: snapshot.DeadLetters, OldestPendingAge: snapshot.OldestPendingAge})
 	}
 }
 

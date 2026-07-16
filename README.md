@@ -27,7 +27,7 @@ Prometheus <- API :8080/metrics
 
 ```bash
 cp .env.example .env
-# 必须先替换 .env 中两个 local-*-change-before-production 密钥
+# 必须同时替换 MySQL root 密码/DSN、JWT secret 和 visitor master key
 docker compose up -d --build
 docker compose ps
 curl -fsS http://127.0.0.1:8080/health/ready
@@ -55,7 +55,7 @@ docker compose down
 
 ```bash
 docker compose up -d mysql redis clickhouse
-export GO_DOT_MYSQL_DSN='root:root@tcp(127.0.0.1:3306)/go_dot?parseTime=true'
+export GO_DOT_MYSQL_DSN='root:<.env中的MySQL密码>@tcp(127.0.0.1:3306)/go_dot?parseTime=true'
 export GO_DOT_REDIS_ADDRESS='127.0.0.1:6379'
 export GO_DOT_CLICKHOUSE_DSN='clickhouse://default:@127.0.0.1:9000/go_dot'
 export GO_DOT_JWT_SECRET='replace-with-at-least-32-random-bytes'
@@ -68,8 +68,8 @@ make migrate
 
 ```bash
 make run-api
-make run-worker
-make run-scheduler
+GO_DOT_METRICS_ADDRESS=:9091 make run-worker
+GO_DOT_METRICS_ADDRESS=:9092 make run-scheduler
 npm --prefix web install
 npm --prefix web run dev
 ```
@@ -185,15 +185,25 @@ docker compose config
 完整验收使用独立 Compose project，从全新 volumes 开始，不删除已有本地数据：
 
 ```bash
-docker compose -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
+cp deploy/acceptance.env.example .env.acceptance
+docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
 GO_DOT_INTEGRATION_BASE_URL=http://127.0.0.1:18080 \
 GO_DOT_REDIS_TEST_ADDRESS=127.0.0.1:16379 \
 GO_DOT_CLICKHOUSE_TEST_DSN='clickhouse://default:@127.0.0.1:19001/go_dot' \
+GO_DOT_INTEGRATION_FIXTURE_FILE=/tmp/go-dot-acceptance-fixture.env \
 make test-integration
-GO_DOT_E2E_BASE_URL=http://127.0.0.1:15173 make test-e2e
+GO_DOT_E2E_BOOTSTRAP=1 \
+GO_DOT_E2E_ENV_FILE=.env.acceptance \
+GO_DOT_E2E_BASE_URL=http://127.0.0.1:15173 \
+GO_DOT_E2E_WORKERS=1 \
+GO_DOT_E2E_ADMIN_PASSWORD='Admin-Changed-2026!' \
+GO_DOT_E2E_FIRST_PASSWORD='Admin-Changed-2026!' \
+GO_DOT_E2E_FIRST_NEW_PASSWORD='First-Changed-2026!' \
+GO_DOT_E2E_VIEWER_PASSWORD='Admin-Changed-2026!' \
+make test-e2e
 ```
 
-故障测试需要预先创建并发布 `product_detail_view`，然后设置 `GO_DOT_FAULT_WRITE_KEY`、`GO_DOT_FAULT_PROJECT_ID` 和 `GO_DOT_FAULT_POINT_ID` 后运行 `make test-fault`。压测还需设置 `GO_DOT_LOAD_WRITE_KEY` 后执行 `make load-test`。详细步骤与记录模板见 [docs/operations.md](docs/operations.md)。
+Integration 会把故障测试所需的一次性 fixture 写入权限为 `0600` 的临时文件。按 [docs/operations.md](docs/operations.md) source 该文件后运行 `make test-fault`。压测还需设置 `GO_DOT_LOAD_WRITE_KEY` 和可访问的 Scheduler `/metrics` 地址后执行 `make load-test`。
 
 ## 生产部署
 

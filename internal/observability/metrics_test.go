@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -14,7 +15,7 @@ func TestMetricsEndpointPublishesRequiredFamilies(t *testing.T) {
 	m.ObserveDuplicate(1)
 	m.SetQueueSnapshot(QueueSnapshot{Lag: 3, Pending: 2, DeadLetters: 1})
 	m.ObserveClickHouseBatch(2, 0, nil)
-	m.SetAggregationDelay(4)
+	m.MarkAggregationSuccess(time.Now().Add(-4 * time.Second))
 	recorder := httptest.NewRecorder()
 	m.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -25,4 +26,18 @@ func TestMetricsEndpointPublishesRequiredFamilies(t *testing.T) {
 	} {
 		require.Contains(t, recorder.Body.String(), name)
 	}
+}
+
+func TestAggregationDelayReportsStalenessSinceLastSuccessfulRefresh(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	m := newMetrics(func() time.Time { return now })
+	m.MarkAggregationSuccess(now.Add(-7 * time.Second))
+	recorder := httptest.NewRecorder()
+	m.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Contains(t, recorder.Body.String(), "go_dot_aggregation_delay_seconds 7")
+
+	now = now.Add(5 * time.Second)
+	recorder = httptest.NewRecorder()
+	m.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Contains(t, recorder.Body.String(), "go_dot_aggregation_delay_seconds 12")
 }

@@ -7,7 +7,8 @@ set -euo pipefail
 API_URL="${GO_DOT_FAULT_API_URL:-http://127.0.0.1:8080}"
 COMPOSE_PROJECT="${GO_DOT_FAULT_COMPOSE_PROJECT:-}"
 COMPOSE_OVERRIDE="${GO_DOT_FAULT_COMPOSE_OVERRIDE:-}"
-compose=(docker compose)
+COMPOSE_ENV_FILE="${GO_DOT_FAULT_ENV_FILE:-.env}"
+compose=(docker compose --env-file "$COMPOSE_ENV_FILE")
 [[ -n "$COMPOSE_PROJECT" ]] && compose+=(-p "$COMPOSE_PROJECT")
 compose+=(-f docker-compose.yml)
 [[ -n "$COMPOSE_OVERRIDE" ]] && compose+=(-f "$COMPOSE_OVERRIDE")
@@ -20,14 +21,23 @@ cleanup() { "${compose[@]}" start clickhouse >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 "${compose[@]}" stop clickhouse
 curl --fail-with-body -sS -H 'Content-Type: application/json' -H "X-Write-Key: ${GO_DOT_FAULT_WRITE_KEY}" --data "$PAYLOAD" "${API_URL}/api/v1/collect/events" >/tmp/go-dot-fault-collect.json
+BATCH_ID=$(sed -n 's/.*"batch_id":"\([^"]*\)".*/\1/p' /tmp/go-dot-fault-collect.json)
+[[ -n "$BATCH_ID" ]] || { echo "collection response did not contain batch_id" >&2; exit 1; }
 
-deadline=$((SECONDS+30)); pending=0
+find_message_id() {
+  "${compose[@]}" exec -T redis redis-cli --raw EVAL "local xs=redis.call('XRANGE',KEYS[1],'-','+'); for _,x in ipairs(xs) do local f=x[2]; local batch=''; local payload=''; for i=1,#f,2 do if f[i]=='batch_id' then batch=f[i+1] elseif f[i]=='payload' then payload=f[i+1] end end; if batch==ARGV[1] and string.find(payload,ARGV[2],1,true) then return x[1] end end; return ''" 1 'tracking:{queue}:events' "$BATCH_ID" "$EVENT_ID"
+}
+
+deadline=$((SECONDS+30)); message_id=''; pending_entry=''
 while (( SECONDS < deadline )); do
-  pending=$("${compose[@]}" exec -T redis redis-cli XPENDING 'tracking:{queue}:events' tracking-workers | head -n1 | tr -d '\r')
-  [[ "${pending:-0}" =~ ^[1-9] ]] && break
+  message_id=$(find_message_id | tr -d '\r')
+  if [[ -n "$message_id" ]]; then
+    pending_entry=$("${compose[@]}" exec -T redis redis-cli --raw XPENDING 'tracking:{queue}:events' tracking-workers "$message_id" "$message_id" 1)
+    [[ "$pending_entry" == *"$message_id"* ]] && break
+  fi
   sleep 1
 done
-[[ "${pending:-0}" =~ ^[1-9] ]] || { echo "expected a Pending message while ClickHouse is unavailable" >&2; exit 1; }
+[[ -n "$message_id" && "$pending_entry" == *"$message_id"* ]] || { echo "submitted batch/event did not become Pending while ClickHouse was unavailable (batch=${BATCH_ID}, event=${EVENT_ID})" >&2; exit 1; }
 
 "${compose[@]}" start clickhouse
 deadline=$((SECONDS+90)); rows=0
@@ -40,4 +50,4 @@ done
 
 pv=$(sum_pv)
 [[ "$pv" -eq $((before_pv+1)) ]] || { echo "expected exactly one PV increment after recovery (before=${before_pv}, after=${pv})" >&2; exit 1; }
-echo "ClickHouse recovery verified: event=${EVENT_ID}, rows=${rows}, project PV=${pv}"
+echo "ClickHouse recovery verified: batch=${BATCH_ID}, message=${message_id}, event=${EVENT_ID}, rows=${rows}, project PV=${pv}"

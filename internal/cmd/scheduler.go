@@ -56,9 +56,10 @@ func runScheduler(ctx context.Context) error {
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
 	metrics := observability.NewMetrics()
 	logger := observability.NewJSONLogger(os.Stdout, "scheduler")
+	observedAggregate := observability.ObservedStatisticsRefresher{Next: aggregate, Metrics: metrics}
 	monitor := redisqueue.NewQueueMonitor(redisClient, []string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup, cfg.Queue.DeadStream, observability.QueueSnapshotSink{Metrics: metrics})
 	host, _ := os.Hostname()
-	jobs := ingestion.SchedulerRuntimeJobs{Statistics: aggregate, Queue: queue, Observer: monitor, Keys: projectRepo}
+	jobs := ingestion.SchedulerRuntimeJobs{Statistics: observedAggregate, Queue: queue, Observer: monitor, Keys: projectRepo}
 	reporter := observability.ErrorLogger{Logger: logger}
 	scheduler := ingestion.NewScheduler(redisqueue.NewLeaseManager(redisClient), jobs, ingestion.SchedulerConfig{EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup, ReclaimConsumer: fmt.Sprintf("scheduler-%s-%d", host, os.Getpid()), AggregateEvery: cfg.Scheduler.AggregateEvery, ReclaimEvery: cfg.Scheduler.ReclaimEvery, MetricsEvery: cfg.Scheduler.MetricsEvery, ExpireKeysEvery: cfg.Scheduler.ExpireKeysEvery, ReclaimIdle: cfg.Scheduler.ReclaimIdle, LeaseTTL: cfg.Scheduler.LeaseTTL, BatchSize: cfg.Scheduler.BatchSize, MaxDeliveries: cfg.Worker.MaxDeliveries, Reporter: reporter})
 	metricsAddress := os.Getenv("GO_DOT_METRICS_ADDRESS")

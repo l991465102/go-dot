@@ -1,5 +1,5 @@
 import http from 'k6/http'
-import { check, sleep } from 'k6'
+import { check, fail, sleep } from 'k6'
 import { Rate, Trend } from 'k6/metrics'
 
 export const acceptedRate = new Rate('accepted_rate')
@@ -30,6 +30,26 @@ export const options = {
   },
 }
 
+function prometheusValue(text, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = text.match(new RegExp(`^${escaped}(?:\\{[^}]*\\})?\\s+(-?[0-9]+(?:\\.[0-9]+)?)$`, 'm'))
+  if (!match) fail(`missing Prometheus metric ${name}`)
+  const value = Number(match[1])
+  if (!Number.isFinite(value)) fail(`invalid Prometheus metric ${name}: ${match[1]}`)
+  return value
+}
+
+function queueSnapshot() {
+  const url = __ENV.GO_DOT_LOAD_QUEUE_METRICS_URL
+  if (!url) fail('GO_DOT_LOAD_QUEUE_METRICS_URL is required')
+  const response = http.get(url)
+  if (response.status !== 200) fail(`queue metrics returned HTTP ${response.status}`)
+  return {
+    lag: prometheusValue(response.body, 'go_dot_queue_lag'),
+    pending: prometheusValue(response.body, 'go_dot_queue_pending'),
+  }
+}
+
 function uuidv7() {
   const timestamp = Date.now().toString(16).padStart(12, '0')
   const random = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0')
@@ -53,26 +73,22 @@ export default function () {
   const accepted = check(response, { accepted: (r) => r.status === 202 && r.json('accepted') === 50 })
   acceptedRate.add(accepted)
   rejectionRate.add(response.status === 202 ? Number(response.json('rejected')) > 0 : true)
-  if (__ENV.GO_DOT_LOAD_QUEUE_LAG_URL && __ITER % 10 === 0) {
-    const lag = http.get(__ENV.GO_DOT_LOAD_QUEUE_LAG_URL)
-    if (lag.status === 200) queueLag.add(Number(lag.json('queue.pending') || 0))
+  if (__ITER % 10 === 0) {
+    const queue = queueSnapshot()
+    queueLag.add(queue.lag + queue.pending)
   }
   sleep(0.01)
 }
 
 export function teardown() {
-  if (!__ENV.GO_DOT_LOAD_QUEUE_LAG_URL) return
   const started = Date.now()
   const timeout = Number(__ENV.GO_DOT_LOAD_DRAIN_TIMEOUT_MS || 120000)
   while (Date.now() - started < timeout) {
-    const response = http.get(__ENV.GO_DOT_LOAD_QUEUE_LAG_URL)
-    if (response.status === 200) {
-      const pending = Number(response.json('queue.pending') || 0)
-      queueLag.add(pending)
-      if (pending === 0) {
-        drainTime.add(Date.now() - started)
-        return
-      }
+    const queue = queueSnapshot()
+    queueLag.add(queue.lag + queue.pending)
+    if (queue.lag === 0 && queue.pending === 0) {
+      drainTime.add(Date.now() - started)
+      return
     }
     sleep(1)
   }

@@ -74,6 +74,10 @@ func TestTrackingFlow(t *testing.T) {
 		"product_owner": "integration", "properties": []any{},
 	}, http.StatusCreated, &point)
 	postJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/points/%d/publish", base, creation.Project.ID, point.ID), session.AccessToken, map[string]any{}, http.StatusOK, nil)
+	if fixtureFile := os.Getenv("GO_DOT_INTEGRATION_FIXTURE_FILE"); fixtureFile != "" {
+		fixture := fmt.Sprintf("GO_DOT_FAULT_WRITE_KEY=%q\nGO_DOT_FAULT_PROJECT_ID=%d\nGO_DOT_FAULT_POINT_ID=%d\n", creation.WriteKey, creation.Project.ID, point.ID)
+		require.NoError(t, os.WriteFile(fixtureFile, []byte(fixture), 0o600))
+	}
 
 	events := []map[string]any{
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0001", "point_code": "product_detail_view", "event_time": time.Now().UnixMilli(), "anonymous_id": "integration-visitor", "platform": "web", "properties": map[string]any{}},
@@ -90,6 +94,7 @@ func TestTrackingFlow(t *testing.T) {
 	ch, err := sql.Open("clickhouse", os.Getenv("GO_DOT_CLICKHOUSE_TEST_DSN"))
 	require.NoError(t, err)
 	defer ch.Close()
+	var lastDiagnostic string
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var rows, uv uint64
 		err := ch.QueryRowContext(ctx, "SELECT count(), uniqExact(visitor_hash) FROM tracking_event FINAL WHERE project_id = ?", creation.Project.ID).Scan(&rows, &uv)
@@ -116,10 +121,24 @@ func TestTrackingFlow(t *testing.T) {
 			}
 		}
 		require.Len(c, members, 1)
-	}, 90*time.Second, time.Second)
 
-	// The hourly scheduler tables are eventually visible; raw FINAL remains the
-	// authoritative duplicate-detail assertion above.
+		var generations uint64
+		err = ch.QueryRowContext(ctx, `SELECT count() FROM business_stat_hour_generation FINAL WHERE project_id = ? AND hour >= now() - INTERVAL 2 HOUR`, creation.Project.ID).Scan(&generations)
+		require.NoError(c, err)
+		require.Greater(c, generations, uint64(0), "scheduler has not committed an hourly generation")
+		var aggregatePV, aggregateUV uint64
+		err = ch.QueryRowContext(ctx, `
+SELECT coalesce(sum(s.pv), 0), uniqExactMerge(s.uv_state)
+FROM business_stat_exact_hourly AS s
+INNER JOIN business_stat_hour_generation AS g FINAL
+  ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation
+WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= now() - INTERVAL 2 HOUR`, creation.Project.ID, point.ID).Scan(&aggregatePV, &aggregateUV)
+		require.NoError(c, err)
+		lastDiagnostic = fmt.Sprintf("raw rows=%d uv=%d redis pv=%d uv=%d generations=%d aggregate pv=%d uv=%d", rows, uv, pv, len(members), generations, aggregatePV, aggregateUV)
+		require.Equal(c, uint64(2), aggregatePV, lastDiagnostic)
+		require.Equal(c, uint64(1), aggregateUV, lastDiagnostic)
+	}, 90*time.Second, time.Second)
+	t.Log("integration convergence: " + lastDiagnostic)
 }
 
 func postJSON(t *testing.T, client *http.Client, url, token string, body any, status int, target any) {

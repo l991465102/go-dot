@@ -11,16 +11,16 @@
 | 项目 | 实测值 |
 |---|---|
 | 测试主机 CPU / 内存 | 开发主机，未作为容量测试机记录 |
-| `go test ./...` 包数量 / 耗时 | 25 个包通过；普通测试约 5.64 秒，`make test` 全栈约 17.25 秒 |
+| `go test ./...` 包数量 / 耗时 | 25 个包通过；最终 `make test` 全栈 7.66 秒（Go build cache 已预热） |
 | Vue / Node 精确版本 | Vue 3.5.39；Compose 构建 Node 24；Vite 8.1.4 |
 | API p95 / accepted rate | 未执行 k6，不代表容量 |
 | 峰值 queue lag / drain time | 未执行 k6 |
-| Integration / E2E / fault | 隔离 Compose：Integration 通过；Playwright 7/7 通过；ClickHouse 恢复和 DLQ 两项通过 |
+| Integration / E2E / fault | 全新隔离 volumes：Integration 6.448 秒通过；Playwright 7/7 通过；精确 ClickHouse 恢复和 DLQ 两项通过 |
 
 Compose 固定使用 MySQL 8.4、Redis 8、ClickHouse 26.3、Go 1.26.5、Node 24，并启用 API、Web 和 Prometheus 健康检查。`docker compose config` 是配置发布门禁。
 
 本次还通过了 `go vet ./...`、全包 `go test -race`、前端 typecheck/build，以及官方 npm registry 的生产依赖审计（0 vulnerabilities）。隔离环境实测 live/ready 正常，原始表 30 天 TTL、聚合表无 TTL，日志 canary 无命中。上述记录证明功能验收通过，不等价于 2,000 events/s 的容量证明。
-Prometheus 的三个进程目标 `api:8080`、`worker:9091`、`scheduler:9091` 已在隔离环境实测均为 `up`。
+Prometheus 的三个进程目标 `api:8080`、`worker:9091`、`scheduler:9091` 已在隔离环境实测均为 `up`。实测停 Worker 后新增一批消息时 `lag=1,pending=0`，恢复并消费后均归零。
 
 ## 2. 标准发布与健康输出
 
@@ -42,42 +42,49 @@ curl -sS http://127.0.0.1:8080/health/ready
 使用唯一 Compose project 和验收端口启动一套全新的环境，避免删除开发者现有 volumes：
 
 ```bash
-docker compose -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
-docker compose -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml ps
+cp deploy/acceptance.env.example .env.acceptance
+docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
+docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml ps
 
 GO_DOT_INTEGRATION_BASE_URL=http://127.0.0.1:18080 \
 GO_DOT_REDIS_TEST_ADDRESS=127.0.0.1:16379 \
 GO_DOT_CLICKHOUSE_TEST_DSN='clickhouse://default:@127.0.0.1:19001/go_dot' \
+GO_DOT_INTEGRATION_FIXTURE_FILE=/tmp/go-dot-acceptance-fixture.env \
 make test-integration
 
+GO_DOT_E2E_BOOTSTRAP=1 \
+GO_DOT_E2E_ENV_FILE=.env.acceptance \
 GO_DOT_E2E_BASE_URL=http://127.0.0.1:15173 \
-GO_DOT_E2E_ADMIN_PASSWORD='<integration-test-new-admin-password>' \
-GO_DOT_E2E_FIRST_USERNAME='<dedicated-first-login-user>' \
-GO_DOT_E2E_FIRST_PASSWORD='<temporary-password>' \
-GO_DOT_E2E_FIRST_NEW_PASSWORD='<new-password>' \
-GO_DOT_E2E_VIEWER_USERNAME='<dedicated-viewer-user>' \
-GO_DOT_E2E_VIEWER_PASSWORD='<viewer-password>' \
+GO_DOT_E2E_WORKERS=1 \
+GO_DOT_E2E_ADMIN_PASSWORD='Admin-Changed-2026!' \
+GO_DOT_E2E_FIRST_PASSWORD='Admin-Changed-2026!' \
+GO_DOT_E2E_FIRST_NEW_PASSWORD='First-Changed-2026!' \
+GO_DOT_E2E_VIEWER_PASSWORD='Admin-Changed-2026!' \
 make test-e2e
 ```
 
-验收后可删除这套隔离环境：`docker compose -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml down -v`；不要对默认项目执行 `down -v`。
+验收后可删除这套隔离环境：`docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml down -v`；不要对默认项目执行 `down -v`。
 
-Integration 环境变量未配置时测试会跳过；一旦配置，依赖不可用必须失败。测试从 `admin/admin` 启动，改密，创建项目和三级分类，发布点位，重复提交同一批事件，最后验证 Redis PV/UV 与 ClickHouse `FINAL` 去重明细。
+Integration 环境变量未配置时测试会跳过；一旦配置，依赖不可用必须失败。测试从 `admin/admin` 启动，改密，创建项目和三级分类，发布点位，重复提交同一批事件，验证 Redis PV=2/UV=1、ClickHouse `FINAL` 两条逻辑明细，并等待 Scheduler 提交 generation 后验证 exact hourly aggregate PV=2/UV=1。超时时会输出最后一组 raw/realtime/generation/aggregate 诊断。
 
-完整 E2E 需要预先创建两个仅用于隔离验收的账号：一个保留首次登录改密标记，一个作为目标项目 Viewer。测试会覆盖首次登录改密、管理员主路径、Viewer 页面只读和管理写接口 403。未配置这些环境变量时，对应 fixture 测试会明确跳过，不能将跳过记录为完整 E2E 通过。
+`GO_DOT_E2E_BOOTSTRAP=1` 会运行已提交的 `tests/e2e/bootstrap.sh`，从当前 admin 密码 hash 创建专用 workflow admin、首次改密账号和 Viewer，不需要手工 SQL。浏览器会通过 UI 创建项目、Domain/Module/Scene、草稿和发布点位，验证发布后不可编辑；随后 Viewer 直接调用项目设置、key、成员、分类和点位管理写接口并逐一断言 403。只有 7 项全部通过才算完整 E2E。
 
 ## 4. 故障恢复
 
-先创建已发布的 `product_detail_view` 并导出：
+Integration 已创建并发布 `product_detail_view`，同时生成临时 fixture：
 
 ```bash
-export GO_DOT_FAULT_WRITE_KEY='<one-time-write-key>'
-export GO_DOT_FAULT_PROJECT_ID='<project-id>'
-export GO_DOT_FAULT_POINT_ID='<point-id>'
+set -a
+source /tmp/go-dot-acceptance-fixture.env
+set +a
+export GO_DOT_FAULT_API_URL=http://127.0.0.1:18080
+export GO_DOT_FAULT_COMPOSE_PROJECT=go-dot-acceptance
+export GO_DOT_FAULT_COMPOSE_OVERRIDE=deploy/docker-compose.acceptance.yml
+export GO_DOT_FAULT_ENV_FILE=.env.acceptance
 make test-fault
 ```
 
-`clickhouse_recovery.sh` 会停 ClickHouse、提交已知事件、确认消息进入 Pending、恢复 ClickHouse，并在 90 秒内确认 `FINAL` 只有一条逻辑明细且 PV 只增加一次。`dlq.sh` 会临时启动一个指向不可达 ClickHouse 的 Worker，确认第五次投递后原始 payload 和失败阶段进入 `tracking:{queue}:dead`，退出时恢复正常 Worker/Scheduler。
+`clickhouse_recovery.sh` 会停 ClickHouse、提交带唯一 batch/event 的事件，通过该二元组定位其确切 Stream message 并确认该 message 进入 Pending，再恢复 ClickHouse，并在 90 秒内确认 `FINAL` 只有一条逻辑明细且 PV 只增加一次。`dlq.sh` 同样停 ClickHouse，定位唯一 DLQ entry，严格确认 `deliveries=5`、batch、原始 event/point payload 和 ClickHouse write failure stage，退出时恢复 ClickHouse/Worker/Scheduler。
 
 不要在生产直接运行这些脚本。
 
@@ -142,11 +149,11 @@ WHERE database = 'go_dot'
 API、Worker、Scheduler 各有独立进程内注册表；Prometheus 分别抓取 `api:8080/metrics`、`worker:9091/metrics` 和 `scheduler:9091/metrics`。可用 `GO_DOT_METRICS_ADDRESS` 修改 Worker/Scheduler 监听地址。主要指标：
 
 - `go_dot_collection_*_total`：接收、接受、拒绝、重复、失败。
-- `go_dot_queue_lag`、`go_dot_queue_pending`、`go_dot_queue_dlq`、`go_dot_queue_oldest_pending_age_seconds`。
+- `go_dot_queue_lag` 来自 `XINFO GROUPS lag`，表示尚未投递给 consumer group 的消息；`go_dot_queue_pending` 来自 `XPENDING`，表示已投递但未 ACK 的消息。另有 `go_dot_queue_dlq`、`go_dot_queue_oldest_pending_age_seconds`。
 - `go_dot_worker_consume_duration_seconds`、`go_dot_worker_retries_total`。
 - `go_dot_redis_operation_duration_seconds`。
 - `go_dot_clickhouse_batch_size`、`go_dot_clickhouse_batch_duration_seconds`、`go_dot_clickhouse_failures_total`。
-- `go_dot_realtime_statistics_delay_seconds`、`go_dot_aggregation_delay_seconds`。
+- `go_dot_realtime_statistics_delay_seconds`；`go_dot_aggregation_delay_seconds` 表示距离最近一次成功小时聚合刷新的秒数，首次成功前为 -1，成功后随时间增长而不是固定为零。
 
 建议对 ready 持续失败、DLQ 增长、Pending 最老年龄增长、拒绝率突增、ClickHouse failure、聚合延迟和采集量骤降告警。指标不得使用 user/event/project ID 等高基数 label。
 
@@ -158,11 +165,11 @@ API、Worker、Scheduler 各有独立进程内注册表；Prometheus 分别抓�
 GO_DOT_LOAD_BASE_URL=http://test-api:8080 \
 GO_DOT_LOAD_WRITE_KEY='<test-write-key>' \
 GO_DOT_LOAD_POINT_CODE=product_detail_view \
-GO_DOT_LOAD_QUEUE_LAG_URL='<authenticated-overview-or-metrics-adapter-url>' \
+GO_DOT_LOAD_QUEUE_METRICS_URL=http://127.0.0.1:19092/metrics \
 k6 run tests/load/collect.js
 ```
 
-记录测试机 CPU/内存、accepted rate、HTTP p95、拒绝率、峰值 queue lag，以及停止发压到 lag 归零的 drain time。开发笔记本结果不能声明为生产容量。
+脚本严格解析 Prometheus 文本中的 `go_dot_queue_lag` 和 `go_dot_queue_pending`；URL 缺失、HTTP 非 200、指标缺失或值非法都会让测试失败。teardown 等待 lag 与 Pending 同时归零并记录 drain time。记录测试机 CPU/内存、accepted rate、HTTP p95、拒绝率、峰值 queue lag 和 drain time。开发笔记本结果不能声明为生产容量。
 
 ## 12. 日志泄露检查
 

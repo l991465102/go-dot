@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/lzw7758/go-dot/internal/observability"
 	"github.com/stretchr/testify/require"
 )
 
@@ -12,6 +13,7 @@ func TestRequestIDPropagatesValidValueAndGeneratesForInvalidValue(t *testing.T) 
 	var seen []string
 	h := NewRequestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, RequestIDFromContext(r.Context()))
+		require.Equal(t, RequestIDFromContext(r.Context()), observability.RequestIDFromContext(r.Context()))
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	for _, supplied := range []string{"client-123", "contains spaces"} {

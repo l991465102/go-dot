@@ -11,4 +11,5 @@ FROM golang:1.26.5
 WORKDIR /app
 COPY --from=build /out/go-dot /app/go-dot
 COPY migrations /app/migrations
+COPY manifest /app/manifest
 ENTRYPOINT ["/app/go-dot"]

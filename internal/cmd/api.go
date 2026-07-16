@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
@@ -21,6 +22,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/auth"
 	"github.com/lzw7758/go-dot/internal/config"
 	"github.com/lzw7758/go-dot/internal/ingestion"
+	"github.com/lzw7758/go-dot/internal/observability"
 	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/statistics"
@@ -66,25 +68,38 @@ func runAPI(ctx context.Context) error {
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.Redis.Address})
 	defer redisClient.Close()
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
+	metrics := observability.NewMetrics()
+	logger := observability.NewJSONLogger(os.Stdout, "api")
+	observedQueue := observability.ObservedQueue{Next: queue, Metrics: metrics}
 	statisticsStore := clickhouseadapter.NewStatisticsStore(chDB)
 	statisticsService := statistics.NewService(projectService, rediscounter.New(redisClient), statisticsStore, snapshotCache,
 		statistics.CompositeDiagnostics{Events: statisticsStore, DeadLetters: queue}, time.Now)
-	collector := ingestion.NewCollector(snapshotCache, queue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
+	collector := ingestion.NewCollector(snapshotCache, observedQueue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
+	observedCollector := observability.ObservedCollectService{Next: collector, Metrics: metrics, Logger: logger}
 	overviewService := overview.NewService(projectService, statisticsStore, queue, trackingRepo, time.Now)
 	collectHandler := httpapi.NewCollectHandler(
-		httpapi.NewCollectController(collector, cfg.Tracking.MaxBodyBytes),
+		httpapi.NewCollectController(observedCollector, cfg.Tracking.MaxBodyBytes),
 		httpapi.NewWriteKeyMiddleware(projectRepo, time.Now),
 		httpapi.NewRateLimitMiddleware(httpapi.NewRedisTokenBucket(redisClient, 200, 100)),
 	)
 	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService, overviewService)
 	handler := http.NewServeMux()
+	health := httpapi.NewHealthHandler(map[string]httpapi.HealthDependency{"mysql": db, "clickhouse": chDB, "redis": redisHealthDependency{client: redisClient}})
+	handler.Handle("/health/", health)
+	handler.Handle("/metrics", metrics.Handler())
 	handler.Handle("/api/v1/collect/events", collectHandler)
 	handler.Handle("/", managementHandler)
+	rootHandler := httpapi.NewRequestIDMiddleware(logger.HTTPMiddleware(handler))
 
 	server := g.Server()
 	server.SetAddr(cfg.HTTP.Address)
-	server.BindHandler("GET:/health/live", httpapi.SystemController{}.Live)
-	server.BindHandler("/*", ghttp.WrapH(handler))
+	server.BindHandler("/*", ghttp.WrapH(rootHandler))
 	server.Run()
 	return nil
+}
+
+type redisHealthDependency struct{ client redis.UniversalClient }
+
+func (d redisHealthDependency) PingContext(ctx context.Context) error {
+	return d.client.Ping(ctx).Err()
 }

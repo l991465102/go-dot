@@ -178,7 +178,7 @@ func (s *StatisticsStore) query(ctx context.Context, f ports.StatisticsFilter, t
 		group = " GROUP BY period"
 		order = " ORDER BY period"
 	}
-	inner := `SELECT s.hour,s.project_id,s.domain_category_id,s.domain_category_code,s.module_category_id,s.module_category_code,s.scene_category_id,s.scene_category_code,s.point_id,s.point_code,s.platform,s.channel,s.version,any(s.pv) AS pv,any(s.uv_state) AS uv_state FROM ` + table + ` AS s INNER JOIN ` + s.generationTable + ` FINAL AS g ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation WHERE s.project_id=? AND s.hour>=? AND s.hour<?`
+	inner := `SELECT s.hour,s.project_id,s.domain_category_id,s.domain_category_code,s.module_category_id,s.module_category_code,s.scene_category_id,s.scene_category_code,s.point_id,s.point_code,s.platform,s.channel,s.version,any(s.pv) AS pv,any(s.uv_state) AS uv_state FROM ` + table + ` AS s INNER JOIN ` + s.generationTable + ` AS g FINAL ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation WHERE s.project_id=? AND s.hour>=? AND s.hour<?`
 	args = append(args, f.ProjectID, f.Start.UTC(), f.End.UTC())
 	for _, item := range []struct {
 		col   string

@@ -15,6 +15,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/adapter/redisqueue"
 	"github.com/lzw7758/go-dot/internal/config"
 	"github.com/lzw7758/go-dot/internal/ingestion"
+	"github.com/lzw7758/go-dot/internal/observability"
 	"github.com/lzw7758/go-dot/internal/statistics"
 )
 
@@ -53,10 +54,16 @@ func runScheduler(ctx context.Context) error {
 	projectRepo := mysqladapter.NewProjectRepository(mysqlDB)
 	aggregate := statistics.NewAggregator(clickhouseadapter.NewStatisticsStore(chDB), projectRepo, nil)
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
-	monitor := redisqueue.NewQueueMonitor(redisClient, []string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup, cfg.Queue.DeadStream, redisqueue.NoopQueueSnapshotSink{})
+	metrics := observability.NewMetrics()
+	logger := observability.NewJSONLogger(os.Stdout, "scheduler")
+	monitor := redisqueue.NewQueueMonitor(redisClient, []string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup, cfg.Queue.DeadStream, observability.QueueSnapshotSink{Metrics: metrics})
 	host, _ := os.Hostname()
 	jobs := ingestion.SchedulerRuntimeJobs{Statistics: aggregate, Queue: queue, Observer: monitor, Keys: projectRepo}
-	reporter := ingestion.ErrorReporterFunc(func(err error) { _, _ = fmt.Fprintf(os.Stderr, "scheduler job failed: %v\n", err) })
+	reporter := observability.ErrorLogger{Logger: logger}
 	scheduler := ingestion.NewScheduler(redisqueue.NewLeaseManager(redisClient), jobs, ingestion.SchedulerConfig{EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup, ReclaimConsumer: fmt.Sprintf("scheduler-%s-%d", host, os.Getpid()), AggregateEvery: cfg.Scheduler.AggregateEvery, ReclaimEvery: cfg.Scheduler.ReclaimEvery, MetricsEvery: cfg.Scheduler.MetricsEvery, ExpireKeysEvery: cfg.Scheduler.ExpireKeysEvery, ReclaimIdle: cfg.Scheduler.ReclaimIdle, LeaseTTL: cfg.Scheduler.LeaseTTL, BatchSize: cfg.Scheduler.BatchSize, MaxDeliveries: cfg.Worker.MaxDeliveries, Reporter: reporter})
-	return scheduler.Run(ctx)
+	metricsAddress := os.Getenv("GO_DOT_METRICS_ADDRESS")
+	if metricsAddress == "" {
+		metricsAddress = ":9091"
+	}
+	return runWithMetrics(ctx, metricsAddress, metrics.Handler(), scheduler.Run)
 }

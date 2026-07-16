@@ -14,6 +14,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/adapter/redisqueue"
 	"github.com/lzw7758/go-dot/internal/config"
 	"github.com/lzw7758/go-dot/internal/ingestion"
+	"github.com/lzw7758/go-dot/internal/observability"
 )
 
 func runWorker(ctx context.Context) error {
@@ -46,11 +47,20 @@ func runWorker(ctx context.Context) error {
 	}
 	consumer := fmt.Sprintf("%s-%d", hostname, os.Getpid())
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
-	worker := ingestion.NewWorker(queue, clickhouseadapter.New(db), rediscounter.New(redisClient), ingestion.WorkerConfig{
+	metrics := observability.NewMetrics()
+	logger := observability.NewJSONLogger(os.Stdout, "worker")
+	observedQueue := observability.ObservedQueue{Next: queue, Metrics: metrics}
+	observedStore := observability.ObservedEventStore{Next: clickhouseadapter.New(db), Metrics: metrics, Logger: logger}
+	observedCounter := observability.ObservedCounter{Next: rediscounter.New(redisClient), Metrics: metrics}
+	worker := ingestion.NewWorker(observedQueue, observedStore, observedCounter, ingestion.WorkerConfig{
 		EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream, Group: cfg.Queue.ConsumerGroup,
 		Consumer: consumer, VisitorMasterKey: []byte(cfg.Auth.VisitorMasterKey), Concurrency: cfg.Worker.Concurrency,
 		MaxDeliveries: cfg.Worker.MaxDeliveries, ReclaimIdle: cfg.Worker.ReclaimIdle, DrainTimeout: cfg.Worker.DrainTimeout,
 		RetryBase: cfg.Worker.RetryBase, RetryMax: cfg.Worker.RetryMax,
 	})
-	return worker.Run(ctx)
+	metricsAddress := os.Getenv("GO_DOT_METRICS_ADDRESS")
+	if metricsAddress == "" {
+		metricsAddress = ":9091"
+	}
+	return runWithMetrics(ctx, metricsAddress, metrics.Handler(), worker.Run)
 }

@@ -49,7 +49,8 @@ func TestQueryTrendMergesExactStatesAcrossProjectLocalDays(t *testing.T) {
 	require.Contains(t, query, "business_stat_exact_hourly AS s")
 	require.Contains(t, query, "uniqExactMerge(uv_state)")
 	require.Contains(t, query, "toStartOfDay(hour, ?)")
-	require.Contains(t, query, "business_stat_hour_generation FINAL")
+	require.Contains(t, query, "business_stat_hour_generation AS g FINAL")
+	require.NotContains(t, query, "business_stat_hour_generation FINAL AS g")
 	require.Contains(t, query, "s.version = g.generation")
 	require.Contains(t, query, "any(s.pv)")
 	require.NotContains(t, query, "business_stat_exact_hourly FINAL")
@@ -65,7 +66,7 @@ func TestRefreshGenerationMarkerFailureLeavesPartialGenerationInvisible(t *testi
 	require.Len(t, db.execs, 3)
 	db.queryErr = errors.New("recorded")
 	_, _ = store.QuerySummary(context.Background(), ports.StatisticsFilter{ProjectID: 9, Start: hour, End: hour.Add(time.Hour)})
-	require.Contains(t, db.queries[0], "business_stat_hour_generation FINAL")
+	require.Contains(t, db.queries[0], "business_stat_hour_generation AS g FINAL")
 }
 
 func TestCommittedGenerationQueryExcludesRemovedDimensionsAndCollapsesSameGenerationRetry(t *testing.T) {
@@ -74,7 +75,7 @@ func TestCommittedGenerationQueryExcludesRemovedDimensionsAndCollapsesSameGenera
 	start := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
 	_, _ = store.QuerySummary(context.Background(), ports.StatisticsFilter{ProjectID: 9, Start: start, End: start.Add(time.Hour)})
 	query := strings.Join(strings.Fields(db.queries[0]), " ")
-	require.Contains(t, query, "INNER JOIN business_stat_hour_generation FINAL")
+	require.Contains(t, query, "INNER JOIN business_stat_hour_generation AS g FINAL")
 	require.Contains(t, query, "s.version = g.generation")
 	require.Contains(t, query, "any(s.pv) AS pv")
 	require.Contains(t, query, "GROUP BY s.hour")

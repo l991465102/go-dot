@@ -191,7 +191,7 @@ func TestReconcileOverviewDoesNotAdvanceCandidateCursorWhenAtomicProcessingIsInt
 	ctx := context.Background()
 	stream, group := "tracking:{queue}:events", "workers"
 	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
-	q := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
+	q := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
 	_, err := q.PublishBatch(ctx, stream, ports.BatchEnvelope{BatchID: "crash", Payload: []byte(`{"project_id":9}`), CreatedAt: time.Now()})
 	require.NoError(t, err)
 	_, err = q.Consume(ctx, stream, group, "worker", 1, 0)
@@ -229,14 +229,14 @@ func TestReconcileOverviewHasBoundedCommandCountAndKeepsExhaustedDLQCursor(t *te
 	require.Equal(t, id, client.HGet(ctx, q.overviewCursorKey(), q.cursorField("dead", dead)).Val(), "an exhausted forward cursor must not rewind and rescan history")
 }
 
-func TestRetryReconciliationDurableScanCoversStaticBacklogLargerThanFourBudgets(t *testing.T) {
+func TestRetryReconciliationCoversStaticBacklogLargerThanTenBudgets(t *testing.T) {
 	m := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
 	ctx := context.Background()
 	stream, group := "tracking:{queue}:events", "workers"
 	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
 	q := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
-	for i := 0; i < 11; i++ {
+	for i := 0; i < 23; i++ {
 		member := fmt.Sprintf("static-%02d", i)
 		record := fmt.Sprintf(`{"batch_id":"%s","payload":"{\"project_id\":9}","first_seen":%d}`, member, time.Now().UnixMilli())
 		require.NoError(t, client.HSet(ctx, retryDataKey(stream), member, record).Err())
@@ -244,18 +244,50 @@ func TestRetryReconciliationDurableScanCoversStaticBacklogLargerThanFourBudgets(
 	}
 	require.NoError(t, q.ReconcileOverview(ctx))
 	require.LessOrEqual(t, client.HLen(ctx, q.pendingIndexKey()).Val(), int64(2), "one call may process at most the shared candidate budget")
-	for i := 0; i < 59; i++ {
+	for i := 0; i < 139; i++ {
 		require.NoError(t, q.ReconcileOverview(ctx))
 	}
-	for i := 0; i < 11; i++ {
+	for i := 0; i < 23; i++ {
 		member := fmt.Sprintf("static-%02d", i)
 		require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, member)).Val(), member)
 	}
 }
 
-func TestRetryScanPersistsOverflowBeforeProcessingAndSurvivesRestart(t *testing.T) {
+func TestRetryReconciliationPersistsIndependentForwardAndRepairState(t *testing.T) {
 	m := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	ctx := context.Background()
+	stream, group := "tracking:{queue}:events", "workers"
+	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
+	q := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(2))
+	for i := 0; i < 6; i++ {
+		member := fmt.Sprintf("state-%d", i)
+		record := fmt.Sprintf(`{"batch_id":"%s","payload":"{\"project_id\":9}","first_seen":%d}`, member, time.Now().UnixMilli())
+		require.NoError(t, client.HSet(ctx, retryDataKey(stream), member, record).Err())
+		require.NoError(t, client.ZAdd(ctx, retryScheduleKey(stream), redis.Z{Member: member, Score: float64(i)}).Err())
+	}
+	processed, err := q.reconcileRetryCandidates(ctx, stream, 2)
+	require.NoError(t, err)
+	require.Equal(t, 2, processed)
+	require.Equal(t, "2", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-forward-rank", stream)).Val())
+	require.Equal(t, "0", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-repair-rank", stream)).Val())
+	require.Equal(t, "1", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-phase", stream)).Val())
+	processed, err = q.reconcileRetryCandidates(ctx, stream, 2)
+	require.NoError(t, err)
+	require.Equal(t, 2, processed)
+	require.Equal(t, "2", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-forward-rank", stream)).Val())
+	require.Equal(t, "2", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-repair-rank", stream)).Val())
+	require.Equal(t, "0", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-phase", stream)).Val())
+	for _, kind := range []string{"retry-forward-rank", "retry-repair-rank", "retry-repair-target", "retry-phase"} {
+		require.True(t, client.HExists(ctx, q.overviewCursorKey(), q.cursorField(kind, stream)).Val(), kind)
+	}
+}
+
+func TestRetryCursorDoesNotAdvanceOnInterruptedCandidateAndSurvivesRestart(t *testing.T) {
+	m := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: m.Addr()})
+	hook := &redisCommandHook{}
+	client.AddHook(hook)
 	ctx := context.Background()
 	stream, group := "tracking:{queue}:events", "workers"
 	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
@@ -266,14 +298,19 @@ func TestRetryScanPersistsOverflowBeforeProcessingAndSurvivesRestart(t *testing.
 		require.NoError(t, client.HSet(ctx, retryDataKey(stream), member, record).Err())
 		require.NoError(t, client.ZAdd(ctx, retryScheduleKey(stream), redis.Z{Member: member, Score: float64(i)}).Err())
 	}
-	_, err := q.fillRetryOverviewBuffer(ctx, stream, 1) // process crashes immediately after durable scan persistence
+	_, _, err := q.loadRetryOverviewBatch(ctx, stream, 1)
 	require.NoError(t, err)
-	require.NotEmpty(t, client.ZRange(ctx, q.retryOverviewBufferKey(stream), 0, -1).Val())
-	require.NotEmpty(t, client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry", stream)).Val())
+	hook.failEval.Store(true)
+	_, err = q.reconcileRetryCandidates(ctx, stream, 1)
+	require.ErrorContains(t, err, "injected reconciliation interruption")
+	require.Equal(t, "0", client.HGet(ctx, q.overviewCursorKey(), q.cursorField("retry-forward-rank", stream)).Val())
+	hook.failEval.Store(false)
 
 	restarted := New(client, WithOverviewStreams([]string{stream}, group), WithOverviewReconcileLimit(1))
 	for i := 0; i < 20; i++ {
-		require.NoError(t, restarted.ReconcileOverview(ctx))
+		processed, err := restarted.reconcileRetryCandidates(ctx, stream, 1)
+		require.NoError(t, err)
+		require.LessOrEqual(t, processed, 1)
 	}
 	for i := 0; i < 3; i++ {
 		require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, fmt.Sprintf("crash-%d", i))).Val())
@@ -292,20 +329,30 @@ func TestRetryReconciliationPersistentScanHandlesEarlierPromotionAndGrowth(t *te
 		require.NoError(t, client.HSet(ctx, retryDataKey(stream), member, record).Err())
 		require.NoError(t, client.ZAdd(ctx, retryScheduleKey(stream), redis.Z{Member: member, Score: score}).Err())
 	}
-	add("a", 1)
-	add("b-shifted", 2)
-	add("c", 3)
-	for i := 0; i < 3; i++ {
-		require.NoError(t, q.ReconcileOverview(ctx))
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("original-%02d", i)
+		if i == 14 {
+			name = "deep-shifted"
+		}
+		add(name, float64(i))
 	}
-	require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "a")).Val())
-	require.NoError(t, client.ZRem(ctx, retryScheduleKey(stream), "a").Err())
-	require.NoError(t, client.HDel(ctx, retryDataKey(stream), "a").Err())
-	for i := 0; i < 40 && !client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "b-shifted")).Val(); i++ {
+	for i := 0; i < 24; i++ {
+		_, err := q.reconcileRetryCandidates(ctx, stream, 1)
+		require.NoError(t, err)
+	}
+	for i := 0; i < 8; i++ {
+		member := fmt.Sprintf("original-%02d", i)
+		require.NoError(t, client.ZRem(ctx, retryScheduleKey(stream), member).Err())
+		require.NoError(t, client.HDel(ctx, retryDataKey(stream), member).Err())
+	}
+	require.NoError(t, client.HDel(ctx, q.pendingIndexKey(), retryIndexField(stream, "deep-shifted")).Err())
+	for i := 0; i < 80 && !client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "deep-shifted")).Val(); i++ {
 		add(fmt.Sprintf("later-%02d", i), 100+float64(i))
-		require.NoError(t, q.ReconcileOverview(ctx))
+		processed, err := q.reconcileRetryCandidates(ctx, stream, 1)
+		require.NoError(t, err)
+		require.LessOrEqual(t, processed, 1)
 	}
-	require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "b-shifted")).Val(), "persistent scan/buffer must recover a shifted member even while the set grows")
+	require.True(t, client.HExists(ctx, q.pendingIndexKey(), retryIndexField(stream, "deep-shifted")).Val(), "exponentially deepening repair must recover a shifted member beyond the initial repair depth while the tail grows")
 }
 
 func TestMalformedMessageProjectIDTrustsOnlyNestedPayload(t *testing.T) {

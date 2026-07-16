@@ -13,7 +13,11 @@ let refreshPromise: Promise<string> | null = null
 let unauthorizedHandler: (() => void) | null = null
 let unauthorizedNotified = false
 
-export const apiClient = axios.create({ baseURL: '/api/v1', withCredentials: true })
+export const apiClient = axios.create({
+  baseURL: '/api/v1',
+  withCredentials: true,
+  paramsSerializer: { indexes: null },
+})
 
 export function setAccessToken(token: string | null) {
   accessToken = token

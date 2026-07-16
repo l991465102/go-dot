@@ -61,3 +61,27 @@ describe('API authentication recovery', () => {
     expect((await import('./client')).getAccessToken()).toBe('fresh')
   })
 })
+
+describe('API query serialization', () => {
+  it('serializes a single array value without square brackets', () => {
+    const uri = apiClient.getUri({
+      url: '/statistics/realtime',
+      params: { point_code: ['android_uv'] },
+    })
+
+    expect(uri).toContain('point_code=android_uv')
+    expect(uri).not.toContain('point_code%5B%5D')
+    expect(uri).not.toContain('point_code[]')
+  })
+
+  it('serializes multiple array values as repeated plain keys', () => {
+    const uri = apiClient.getUri({
+      url: '/diagnostics/recent-events',
+      params: { point_code: ['android_uv', 'web_view'] },
+    })
+
+    const query = uri.split('?')[1] ?? ''
+    const values = new URLSearchParams(query).getAll('point_code')
+    expect(values).toEqual(['android_uv', 'web_view'])
+  })
+})

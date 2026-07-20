@@ -23,6 +23,12 @@ type Service struct {
 }
 
 func NewService(auth Authorizer, repo Repository, daily DailyStore, exporter Exporter, now func() time.Time) *Service {
+	if auth == nil {
+		panic("reporting: nil authorizer")
+	}
+	if repo == nil {
+		panic("reporting: nil repository")
+	}
 	if now == nil {
 		now = time.Now
 	}

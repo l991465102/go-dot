@@ -2,6 +2,7 @@ package reporting
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,18 @@ import (
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
+
+func TestNewServicePanicsWithoutAuthorizer(t *testing.T) {
+	require.PanicsWithValue(t, "reporting: nil authorizer", func() {
+		NewService(nil, newFakeRepository(), nil, nil, time.Now)
+	})
+}
+
+func TestNewServicePanicsWithoutRepository(t *testing.T) {
+	require.PanicsWithValue(t, "reporting: nil repository", func() {
+		NewService(&fakeAuthorizer{role: project.Admin}, nil, nil, nil, time.Now)
+	})
+}
 
 func TestViewerCanListButCannotCreateReport(t *testing.T) {
 	auth := &fakeAuthorizer{role: project.Viewer}
@@ -74,6 +87,32 @@ func TestCreateTrimsNameAndDescription(t *testing.T) {
 	require.Equal(t, "summary", created.Description)
 }
 
+func TestCreateAppliesUnicodeRuneLengthBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		reportName  string
+		description string
+		wantErr     error
+	}{
+		{name: "128 rune name", reportName: strings.Repeat("界", 128)},
+		{name: "129 rune name", reportName: strings.Repeat("界", 129), wantErr: ErrInvalid},
+		{name: "1000 rune description", reportName: "daily", description: strings.Repeat("界", 1000)},
+		{name: "1001 rune description", reportName: "daily", description: strings.Repeat("界", 1001), wantErr: ErrInvalid},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := newAdminServiceForTest()
+			_, err := service.CreateReport(context.Background(), 1, 9, ReportInput{
+				Name: test.reportName, Description: test.description, DefaultDays: 30, PointIDs: []uint64{7},
+			})
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestUpdateRequiresExpectedUpdatedAt(t *testing.T) {
 	service := newAdminServiceForTest()
 	_, err := service.UpdateReport(context.Background(), 1, 9, 7, ReportInput{Name: "daily", DefaultDays: 30, PointIDs: []uint64{3}})
@@ -95,6 +134,30 @@ func TestCreateRejectsPointThatCannotBeResolvedBeforeMutation(t *testing.T) {
 	_, err := service.CreateReport(context.Background(), 1, 9, ReportInput{Name: "daily", DefaultDays: 30, PointIDs: []uint64{2, 99}})
 
 	require.ErrorIs(t, err, ErrInvalid)
+	require.Zero(t, repo.createCalls)
+}
+
+func TestCreateResolvesPointsInRequestedProject(t *testing.T) {
+	service, repo := newAdminServiceWithRepositoryForTest()
+
+	_, err := service.CreateReport(context.Background(), 1, 42, ReportInput{Name: "daily", DefaultDays: 30, PointIDs: []uint64{7}})
+
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), repo.resolvedProjectID)
+}
+
+func TestServicePropagatesAuthorizationAndRepositoryErrors(t *testing.T) {
+	authErr := errors.New("authorization unavailable")
+	service := NewService(&fakeAuthorizer{err: authErr}, newFakeRepository(), nil, nil, time.Now)
+	_, err := service.ListReports(context.Background(), 1, 9)
+	require.ErrorIs(t, err, authErr)
+
+	repoErr := errors.New("point resolver unavailable")
+	repo := newFakeRepository()
+	repo.resolveErr = repoErr
+	service = NewService(&fakeAuthorizer{role: project.Admin}, repo, nil, nil, time.Now)
+	_, err = service.CreateReport(context.Background(), 1, 9, ReportInput{Name: "daily", DefaultDays: 30, PointIDs: []uint64{7}})
+	require.ErrorIs(t, err, repoErr)
 	require.Zero(t, repo.createCalls)
 }
 
@@ -125,11 +188,15 @@ func TestAdminCanDeleteReport(t *testing.T) {
 
 type fakeAuthorizer struct {
 	role  project.Role
+	err   error
 	calls [][]project.Role
 }
 
 func (a *fakeAuthorizer) RequireRole(_ context.Context, _, _ uint64, allowed ...project.Role) error {
 	a.calls = append(a.calls, append([]project.Role(nil), allowed...))
+	if a.err != nil {
+		return a.err
+	}
 	for _, role := range allowed {
 		if role == a.role {
 			return nil
@@ -139,13 +206,15 @@ func (a *fakeAuthorizer) RequireRole(_ context.Context, _, _ uint64, allowed ...
 }
 
 type fakeRepository struct {
-	reports      []Report
-	points       map[uint64]PointRef
-	lastInput    ReportInput
-	lastPointIDs []uint64
-	createCalls  int
-	updateCalls  int
-	deleteCalls  int
+	reports           []Report
+	points            map[uint64]PointRef
+	lastInput         ReportInput
+	lastPointIDs      []uint64
+	createCalls       int
+	updateCalls       int
+	deleteCalls       int
+	resolveErr        error
+	resolvedProjectID uint64
 }
 
 func newFakeRepository() *fakeRepository {
@@ -194,7 +263,11 @@ func (r *fakeRepository) Delete(_ context.Context, _, _ uint64) error {
 	return nil
 }
 
-func (r *fakeRepository) ResolvePoints(_ context.Context, _ uint64, ids []uint64) ([]PointRef, error) {
+func (r *fakeRepository) ResolvePoints(_ context.Context, projectID uint64, ids []uint64) ([]PointRef, error) {
+	r.resolvedProjectID = projectID
+	if r.resolveErr != nil {
+		return nil, r.resolveErr
+	}
 	resolved := make([]PointRef, 0, len(ids))
 	for _, id := range ids {
 		if point, ok := r.points[id]; ok {

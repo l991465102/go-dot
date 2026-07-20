@@ -1,6 +1,18 @@
 import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiClient, setAccessToken, setUnauthorizedHandler } from './client'
+import {
+  createReport,
+  deleteReport,
+  exportDaily,
+  getReport,
+  listReports,
+  queryDaily,
+  updateReport,
+  type DailyExport,
+  type ReportMutation,
+  type SavedReport,
+} from './reports'
 
 const originalAdapter = apiClient.defaults.adapter
 
@@ -83,5 +95,102 @@ describe('API query serialization', () => {
     const query = uri.split('?')[1] ?? ''
     const values = new URLSearchParams(query).getAll('point_code')
     expect(values).toEqual(['android_uv', 'web_view'])
+  })
+})
+
+describe('report API client', () => {
+  afterEach(() => {
+    apiClient.defaults.adapter = originalAdapter
+  })
+
+  it('uses project-scoped endpoints for saved-report CRUD', async () => {
+    const requests: InternalAxiosRequestConfig[] = []
+    const report: SavedReport = {
+      id: 7,
+      project_id: 9,
+      name: '核心日报',
+      description: '核心点位',
+      default_days: 30,
+      points: [],
+      created_by: 1,
+      updated_by: 1,
+      created_at: '2026-07-20T01:00:00Z',
+      updated_at: '2026-07-20T02:00:00Z',
+    }
+    apiClient.defaults.adapter = async (config) => {
+      requests.push(config)
+      return {
+        data: config.method === 'delete' ? undefined : config.method === 'get' && config.url === '/projects/9/reports' ? [report] : report,
+        status: config.method === 'delete' ? 204 : 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    }
+    const input: ReportMutation = { name: '核心日报', description: '核心点位', default_days: 30, point_ids: [3, 2] }
+
+    await expect(listReports(9)).resolves.toEqual([report])
+    await expect(getReport(9, 7)).resolves.toEqual(report)
+    await expect(createReport(9, input)).resolves.toEqual(report)
+    await expect(updateReport(9, 7, { ...input, expected_updated_at: report.updated_at })).resolves.toEqual(report)
+    await expect(deleteReport(9, 7)).resolves.toBeUndefined()
+
+    expect(requests.map(({ method, url }) => [method, url])).toEqual([
+      ['get', '/projects/9/reports'],
+      ['get', '/projects/9/reports/7'],
+      ['post', '/projects/9/reports'],
+      ['patch', '/projects/9/reports/7'],
+      ['delete', '/projects/9/reports/7'],
+    ])
+    expect(JSON.parse(String(requests[2]?.data))).toEqual(input)
+    expect(JSON.parse(String(requests[3]?.data))).toEqual({ ...input, expected_updated_at: report.updated_at })
+  })
+
+  it('posts the daily query and forwards its abort signal', async () => {
+    const controller = new AbortController()
+    let request: InternalAxiosRequestConfig | undefined
+    apiClient.defaults.adapter = async (config) => {
+      request = config
+      return {
+        data: { timezone: 'Asia/Shanghai', start_date: '2026-07-20', end_date: '2026-07-20', point_count: 1, day_count: 1, total_pv: 12, items: [] },
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      }
+    }
+
+    await queryDaily({ project_id: 9, start_date: '2026-07-20', end_date: '2026-07-20', point_ids: [3] }, controller.signal)
+
+    expect(request?.url).toBe('/statistics/daily-by-point/query')
+    expect(request?.method).toBe('post')
+    expect(request?.signal).toBe(controller.signal)
+  })
+
+  it.each([
+    [`attachment; filename="fallback.xlsx"; filename*="UTF-8''%E6%A0%B8%E5%BF%83%E6%97%A5%E6%8A%A5.xlsx"`, '核心日报.xlsx'],
+    [`attachment; filename=fallback.xlsx; filename*=UTF-8''%E6%A0%B8%E5%BF%83.xlsx`, '核心.xlsx'],
+    [`attachment; filename=fallback.xlsx; filename*=UTF-8''not%ZZvalid`, 'custom-report.xlsx'],
+    [`attachment; filename=fallback.xlsx; filename*=UTF-8''..%2Fsecret.xlsx`, 'custom-report.xlsx'],
+  ])('exports an authenticated blob and safely parses %s', async (disposition, expectedFilename) => {
+    const blob = new Blob(['xlsx'])
+    let request: InternalAxiosRequestConfig | undefined
+    apiClient.defaults.adapter = async (config) => {
+      request = config
+      return { data: blob, status: 200, statusText: 'OK', headers: { 'content-disposition': disposition }, config }
+    }
+    const input: DailyExport = {
+      project_id: 9,
+      start_date: '2026-07-20',
+      end_date: '2026-07-20',
+      point_ids: [3],
+      report_name: '核心日报',
+      report_description: '',
+    }
+
+    await expect(exportDaily(input)).resolves.toEqual({ blob, filename: expectedFilename })
+    expect(request?.url).toBe('/statistics/daily-by-point/export')
+    expect(request?.method).toBe('post')
+    expect(request?.responseType).toBe('blob')
   })
 })

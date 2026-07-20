@@ -15,6 +15,7 @@ const navItems = computed(() => [
   { label: '点位管理', route: 'points', marker: '点' },
   { label: '业务分类', route: 'categories', marker: '类' },
   { label: '统计分析', route: 'statistics', marker: '统' },
+  { label: '自定义报表', route: 'custom-reports', marker: '报' },
   { label: '数据诊断', route: 'diagnostics', marker: '诊' },
   { label: '项目设置', route: 'project-settings', marker: '设' },
 ])

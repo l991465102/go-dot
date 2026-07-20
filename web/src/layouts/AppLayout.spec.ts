@@ -25,6 +25,9 @@ describe('management shell permissions', () => {
 
     expect(wrapper.get('nav').text()).toContain('项目概览')
     expect(wrapper.get('nav').text()).toContain('点位管理')
+    expect(wrapper.get('nav').text()).toContain('自定义报表')
     expect(wrapper.get('nav').text()).toContain('项目设置')
+    expect(router.resolve({ name: 'custom-reports', params: { projectId: 9 } }).href).toBe('/projects/9/reports')
+    expect(wrapper.get('nav').findAll('a').find((link) => link.text().includes('自定义报表'))?.attributes('href')).toBe('/projects/9/reports')
   })
 })

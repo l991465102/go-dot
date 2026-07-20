@@ -161,7 +161,7 @@ onBeforeUnmount(() => controller?.abort())
 
     <article class="overview-card">
       <h2>写入密钥</h2>
-      <el-alert v-if="keyStatus.previous_key_active && keyStatus.previous_key_expires_at" type="warning" :closable="false" :title="`旧密钥仍可使用至 ${formatShanghaiDateTime(keyStatus.previous_key_expires_at)}（${DISPLAY_TIMEZONE}，轮换后最多 24 小时）`" />
+      <el-alert v-if="keyStatus.previous_key_active" type="warning" :closable="false" :title="`旧密钥仍可使用至 ${formatShanghaiDateTime(keyStatus.previous_key_expires_at)}（${DISPLAY_TIMEZONE}，轮换后最多 24 小时）`" />
       <p v-else>当前没有处于宽限期的旧密钥。</p>
       <p>服务端只保存哈希，当前密钥无法再次查看。轮换后新密钥只显示一次。</p>
       <el-button v-if="projects.canMutate" data-test="rotate-write-key" type="danger" @click="rotate">轮换写入密钥</el-button>

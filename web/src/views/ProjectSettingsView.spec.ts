@@ -115,4 +115,19 @@ describe('ProjectSettingsView', () => {
     expect(wrapper.text()).toContain('旧密钥仍可使用至 2026-07-20 10:51:03（Asia/Shanghai，轮换后最多 24 小时）')
     expect(wrapper.text()).not.toContain('2026-07-20T02:51:03Z')
   })
+
+  it('shows an active previous key with a missing expiry as a dash', async () => {
+    const { pinia } = setup()
+    vi.mocked(projectsApi.getWriteKeyStatus).mockResolvedValue({ previous_key_active: true })
+    const wrapper = mount(ProjectSettingsView, {
+      global: {
+        plugins: [pinia],
+        stubs: { ElAlert: { props: ['title'], template: '<div>{{ title }}</div>' } },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('旧密钥仍可使用至 -（Asia/Shanghai，轮换后最多 24 小时）')
+    expect(wrapper.text()).not.toContain('当前没有处于宽限期的旧密钥。')
+  })
 })

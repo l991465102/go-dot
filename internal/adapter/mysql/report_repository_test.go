@@ -1,0 +1,124 @@
+package mysql
+
+import (
+	"context"
+	"database/sql/driver"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lzw7758/go-dot/internal/reporting"
+)
+
+func TestReportRepositoryCreateCommitsReportOrderedPointsAndAuditTogether(t *testing.T) {
+	createdAt := time.Date(2026, 7, 20, 8, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(time.Millisecond)
+	script, db := openScriptedDB(t, []driver.Value{createdAt, updatedAt})
+	script.execResults = []driver.Result{
+		scriptResult{lastID: 12, affected: 1},
+		scriptResult{affected: 1},
+		scriptResult{affected: 1},
+		scriptResult{affected: 1},
+	}
+
+	created, err := NewReportRepository(db).Create(context.Background(), 9, 3, reporting.ReportInput{
+		Name: "Conversion", Description: "Daily conversion", DefaultDays: 30, PointIDs: []uint64{7, 5},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(12), created.ID)
+	require.Equal(t, uint64(9), created.ProjectID)
+	require.Equal(t, createdAt, created.CreatedAt)
+	require.Equal(t, updatedAt, created.UpdatedAt)
+	require.Len(t, script.execQueries, 4)
+	require.Contains(t, script.execQueries[0], "INSERT INTO custom_report")
+	require.Contains(t, script.execQueries[1], "INSERT INTO custom_report_point")
+	require.Contains(t, script.execQueries[2], "INSERT INTO custom_report_point")
+	require.Contains(t, script.execQueries[3], "audit_log")
+	require.EqualValues(t, 7, script.execArgs[1][1].Value)
+	require.EqualValues(t, 0, script.execArgs[1][2].Value)
+	require.EqualValues(t, 5, script.execArgs[2][1].Value)
+	require.EqualValues(t, 1, script.execArgs[2][2].Value)
+	require.Equal(t, 1, script.commits)
+	require.Zero(t, script.rollbacks)
+}
+
+func TestReportRepositoryCreateMapsDuplicateNameToConflict(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.execErrors = []error{&mysqldriver.MySQLError{Number: 1062, Message: "duplicate name"}}
+
+	_, err := NewReportRepository(db).Create(context.Background(), 9, 3, reporting.ReportInput{Name: "Conversion"})
+	require.ErrorIs(t, err, reporting.ErrConflict)
+	require.Equal(t, 1, script.rollbacks)
+	require.Zero(t, script.commits)
+}
+
+func TestReportRepositoryUpdateUsesOptimisticTimestampAndMapsNoMatchToConflict(t *testing.T) {
+	expected := time.Date(2026, 7, 20, 8, 30, 0, 123000000, time.UTC)
+	script, db := openScriptedDB(t, nil)
+	script.execResults = []driver.Result{scriptResult{affected: 0}}
+
+	_, err := NewReportRepository(db).Update(context.Background(), 9, 12, 3, reporting.ReportInput{
+		Name: "Conversion", DefaultDays: 14, ExpectedUpdatedAt: &expected,
+	})
+	require.ErrorIs(t, err, reporting.ErrConflict)
+	require.Len(t, script.execQueries, 1)
+	query := strings.Join(strings.Fields(script.execQueries[0]), " ")
+	require.Contains(t, query, "WHERE id=? AND project_id=? AND updated_at=?")
+	require.Equal(t, expected, script.execArgs[0][6].Value)
+	require.Equal(t, 1, script.rollbacks)
+	require.Zero(t, script.commits)
+}
+
+func TestReportRepositoryGetScopesReportAndPointReadsToProject(t *testing.T) {
+	created := time.Date(2026, 7, 20, 7, 0, 0, 0, time.UTC)
+	updated := created.Add(time.Hour)
+	script, db := openScriptedDB(t, nil)
+	script.queryRows = [][]driver.Value{
+		{uint64(12), uint64(9), "Conversion", "Daily conversion", int64(30), uint64(3), uint64(4), created, updated},
+		{uint64(7), "checkout", "Checkout", "PUBLISHED", "EXACT", int64(0)},
+	}
+
+	report, err := NewReportRepository(db).Get(context.Background(), 9, 12)
+	require.NoError(t, err)
+	require.Equal(t, uint64(12), report.ID)
+	require.Len(t, report.Points, 1)
+	require.Len(t, script.queries, 2)
+	for _, query := range script.queries {
+		require.Contains(t, query, "project_id=?")
+	}
+	require.Contains(t, script.queries[0], "id=?")
+	require.Contains(t, script.queries[1], "report_id=?")
+}
+
+func TestReportRepositoryGetMapsMissingRowToNotFound(t *testing.T) {
+	_, db := openScriptedDB(t, nil)
+	_, err := NewReportRepository(db).Get(context.Background(), 9, 12)
+	require.ErrorIs(t, err, reporting.ErrNotFound)
+}
+
+func TestReportRepositoryDeleteScopesMutationToProjectAndCommits(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.execResults = []driver.Result{scriptResult{affected: 1}}
+
+	err := NewReportRepository(db).Delete(context.Background(), 9, 12)
+	require.NoError(t, err)
+	require.Len(t, script.execQueries, 1)
+	require.Contains(t, script.execQueries[0], "project_id=?")
+	require.Contains(t, script.execQueries[0], "id=?")
+	require.EqualValues(t, 12, script.execArgs[0][0].Value)
+	require.EqualValues(t, 9, script.execArgs[0][1].Value)
+	require.Equal(t, 1, script.commits)
+}
+
+func TestReportRepositoryDeleteMissingRowIsNotFound(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.execResults = []driver.Result{scriptResult{affected: 0}}
+
+	err := NewReportRepository(db).Delete(context.Background(), 9, 12)
+	require.True(t, errors.Is(err, reporting.ErrNotFound))
+	require.Equal(t, 1, script.rollbacks)
+}

@@ -59,7 +59,7 @@ func TestRunRetriesAfterPartiallyAppliedDDL(t *testing.T) {
 		directory string
 		wantNames []string
 	}{
-		{name: "mysql", dialect: MySQL, directory: "mysql", wantNames: []string{"0001_metadata.sql"}},
+		{name: "mysql", dialect: MySQL, directory: "mysql", wantNames: []string{"0001_metadata.sql", "0002_custom_reports.sql"}},
 		{name: "clickhouse", dialect: ClickHouse, directory: "clickhouse", wantNames: []string{"0001_events.sql", "0002_hourly_stats.sql", "0003_non_replicated_deduplication.sql", "0004_event_statistics_contract.sql", "0005_hourly_generation_commit.sql", "0006_hourly_category_codes.sql"}},
 	}
 	for _, tt := range tests {
@@ -82,6 +82,15 @@ func TestClickHouseMigrationsEnableNonReplicatedDeduplication(t *testing.T) {
 	contents := string(raw)
 	require.Contains(t, contents, "ALTER TABLE tracking_event MODIFY SETTING non_replicated_deduplication_window = 1000")
 	require.Contains(t, contents, "ALTER TABLE tracking_invalid_event MODIFY SETTING non_replicated_deduplication_window = 1000")
+}
+
+func TestMySQLCustomReportMigrationHasProjectIsolationAndRestrictedPointDeletion(t *testing.T) {
+	raw, err := fs.ReadFile(migrationFiles(t, "mysql"), "0002_custom_reports.sql")
+	require.NoError(t, err)
+	contents := string(raw)
+	require.Contains(t, contents, "UNIQUE KEY uk_custom_report_project_name (project_id, name)")
+	require.Contains(t, contents, "FOREIGN KEY (report_id) REFERENCES custom_report (id) ON DELETE CASCADE")
+	require.Contains(t, contents, "FOREIGN KEY (point_id) REFERENCES tracking_point (id) ON DELETE RESTRICT")
 }
 
 func migrationFiles(t *testing.T, directory string) fs.FS {

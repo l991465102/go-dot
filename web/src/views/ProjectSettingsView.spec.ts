@@ -141,6 +141,28 @@ describe('ProjectSettingsView', () => {
     expect(wrapper.find('.write-key-box').exists()).toBe(false)
   })
 
+  it('invalidates an open rotation confirmation when the project changes', async () => {
+    const { pinia, projects } = setup()
+    const wrapper = mount(ProjectSettingsView, {
+      global: { plugins: [pinia], stubs: { ElDialog: dialogStub } },
+    })
+    await flushPromises()
+
+    await wrapper.get('[data-test="rotate-write-key"]').trigger('click')
+    const staleConfirm = wrapper.get('[data-test="confirm-key-rotation"]')
+
+    projects.currentProjectId = 10
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="rotation-confirm-dialog"]').exists()).toBe(false)
+    expect(projectsApi.rotateWriteKey).not.toHaveBeenCalled()
+
+    await staleConfirm.trigger('click')
+    await flushPromises()
+
+    expect(projectsApi.rotateWriteKey).not.toHaveBeenCalled()
+  })
+
   it('clears a one-time key on project switch and ignores a late rotation response', async () => {
     const { pinia, projects } = setup()
     const rotation = deferred<{ write_key: string; previous_key_expires_at: string }>()

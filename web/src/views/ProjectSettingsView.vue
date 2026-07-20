@@ -20,6 +20,7 @@ const members = ref<ProjectMember[]>([])
 const keyStatus = ref<WriteKeyStatus>({ previous_key_active: false })
 const plaintextKey = ref('')
 const rotationConfirmOpen = ref(false)
+const rotationConfirmProjectId = ref<number>()
 const loading = ref(false)
 const error = ref('')
 const form = reactive({ timezone: '', origins: '' })
@@ -33,6 +34,8 @@ function owns(active: AbortController, projectId: number) {
 
 async function load() {
   contextVersion += 1
+  rotationConfirmOpen.value = false
+  rotationConfirmProjectId.value = undefined
   controller?.abort()
   const active = new AbortController()
   controller = active
@@ -127,8 +130,22 @@ async function rotate() {
   }
 }
 
-function confirmRotation() {
+function openRotationConfirmation() {
+  const current = project.value
+  if (!current || !projects.canMutate) return
+  rotationConfirmProjectId.value = current.id
+  rotationConfirmOpen.value = true
+}
+
+function cancelRotation() {
   rotationConfirmOpen.value = false
+  rotationConfirmProjectId.value = undefined
+}
+
+function confirmRotation() {
+  const confirmedProjectId = rotationConfirmProjectId.value
+  cancelRotation()
+  if (project.value?.id !== confirmedProjectId) return
   void rotate()
 }
 
@@ -171,14 +188,14 @@ onBeforeUnmount(() => controller?.abort())
       <p v-else>当前没有处于宽限期的旧密钥。</p>
       <p>当前写入密钥永久有效，不会自动轮换。仅在确认密钥泄露时执行紧急轮换。</p>
       <p>服务端只保存哈希，当前密钥无法再次查看。轮换后新密钥只显示一次。</p>
-      <el-button v-if="projects.canMutate" data-test="rotate-write-key" type="danger" @click="rotationConfirmOpen = true">紧急轮换写入密钥</el-button>
+      <el-button v-if="projects.canMutate" data-test="rotate-write-key" type="danger" @click="openRotationConfirmation">紧急轮换写入密钥</el-button>
       <div v-if="plaintextKey" class="write-key-box" role="status"><strong>请立即保存，新密钥关闭页面后不再显示</strong><code>{{ plaintextKey }}</code><el-button @click="plaintextKey = ''">已保存并隐藏</el-button></div>
     </article>
 
     <el-dialog v-model="rotationConfirmOpen" title="确认紧急轮换写入密钥" width="520px" :close-on-click-modal="false">
       <p>轮换后所有上报端都需要切换到新密钥。旧密钥仅保留 24 小时，请确认已准备好协调各端更新。</p>
       <template #footer>
-        <el-button data-test="cancel-key-rotation" @click="rotationConfirmOpen = false">取消</el-button>
+        <el-button data-test="cancel-key-rotation" @click="cancelRotation">取消</el-button>
         <el-button data-test="confirm-key-rotation" type="danger" @click="confirmRotation">确认紧急轮换</el-button>
       </template>
     </el-dialog>

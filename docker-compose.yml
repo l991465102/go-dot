@@ -163,7 +163,7 @@ services:
       retries: 12
 
 volumes:
-  mysql_data:
+  mysql_data: 
   redis_data:
   clickhouse_data:
   prometheus_data:

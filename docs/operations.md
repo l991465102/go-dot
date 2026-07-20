@@ -75,7 +75,7 @@ make test-e2e
 
 Integration 环境变量未配置时测试会跳过；一旦配置，依赖和两个 Viewer fixture 变量不可用必须失败。第一次 bootstrap 在全新栈中创建 `e2e_viewer`；测试再从 `admin/admin` 启动，改密，创建项目和三级分类，通过公开 API 给 Viewer 添加成员关系，发布 EXACT/APPROXIMATE 两种点位，并重复提交同一批十个跨两个上海自然日的事件。每次提交后都等待 Redis consumer group 的 lag 和 pending 同时归零。它会等待 Scheduler generation，验证两日各自 exact PV=2/UV=1、approximate PV=3/UV=2，随后从已保存报表重新读取点位顺序，查询两日有值矩阵，导出并重新打开 XLSX，最后验证 Viewer 可读/导出且 POST/PATCH/DELETE 均返回 403。超时时会输出最后一组 raw/realtime/generation/aggregate 诊断。
 
-Scheduler 默认刷新当前和前一个小时。`GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS` 可在 1～168 之间调整；验收环境设为 25，因此前一上海日同一时刻的原始事件也由正常 Scheduler generation 路径聚合。扩大窗口会线性增加 ClickHouse 写入和 Scheduler 每轮耗时，生产补算结束后应恢复默认 2。
+Scheduler 默认刷新当前和前一个小时。`GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS` 可在 1～168 之间调整；验收环境设为 26，因此前一上海日同一时刻的原始事件在跨过 UTC 小时边界后仍由正常 Scheduler generation 路径聚合。报表完整性以每次查询响应时捕获的上海当前日判定：当日不完整，其他日期完整，因此跨上海零点后两个历史日都可正确验收。扩大窗口会线性增加 ClickHouse 写入和 Scheduler 每轮耗时，生产补算结束后应恢复默认 2。
 
 `GO_DOT_E2E_BOOTSTRAP=1` 会再次运行已提交的幂等 `tests/e2e/bootstrap.sh`，用改密后的当前 admin 密码 hash 刷新专用 workflow admin、首次改密账号和 Viewer，不需要手工 SQL。浏览器会通过 UI 创建项目、Domain/Module/Scene、草稿和发布点位，验证发布后不可编辑；随后 Viewer 直接调用项目设置、key、成员、分类和点位管理写接口并逐一断言 403。Admin 还会查询、保存并下载双点位自定义报表，诊断页会验证上海格式时间。当前套件 8 项全部通过才算完整 E2E。
 

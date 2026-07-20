@@ -112,7 +112,7 @@ test('admin queries, saves, and downloads a two-point custom report', async ({ p
   await expect(page.getByText('APPROXIMATE').first()).toBeVisible()
 
   await page.locator('[data-test="save-as-report"]').click()
-  await expect(page.getByText('报表已保存')).toBeVisible()
+  await expect(page.getByText('报表已创建', { exact: true })).toBeVisible()
 
   const download = page.waitForEvent('download')
   await page.locator('[data-test="export-report"]').click()

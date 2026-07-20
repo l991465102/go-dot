@@ -180,6 +180,20 @@ func TestUpdateValidatesAndResolvesBeforeMutation(t *testing.T) {
 	require.Equal(t, 1, repo.updateCalls)
 }
 
+func TestUpdateOptimisticConcurrencyRejectsReusingExpectedUpdatedAtAfterSuccessfulWrite(t *testing.T) {
+	original := time.Date(2026, 7, 20, 8, 30, 0, 123000000, time.UTC)
+	repo := &optimisticReportRepository{fakeRepository: newFakeRepository(), updatedAt: original}
+	service := NewService(&fakeAuthorizer{role: project.Admin}, repo, nil, nil, time.Now)
+	input := ReportInput{Name: "daily", DefaultDays: 30, PointIDs: []uint64{7}, ExpectedUpdatedAt: &original}
+
+	updated, err := service.UpdateReport(context.Background(), 1, 9, 7, input)
+	require.NoError(t, err)
+	require.Equal(t, original.Add(time.Millisecond), updated.UpdatedAt)
+
+	_, err = service.UpdateReport(context.Background(), 1, 9, 7, input)
+	require.ErrorIs(t, err, ErrConflict)
+}
+
 func TestAdminCanDeleteReport(t *testing.T) {
 	service, repo := newAdminServiceWithRepositoryForTest()
 
@@ -488,6 +502,19 @@ type fakeRepository struct {
 	resolveErr        error
 	resolvedProjectID uint64
 	resolved          []PointRef
+}
+
+type optimisticReportRepository struct {
+	*fakeRepository
+	updatedAt time.Time
+}
+
+func (r *optimisticReportRepository) Update(_ context.Context, projectID, reportID, actor uint64, in ReportInput) (Report, error) {
+	if in.ExpectedUpdatedAt == nil || !in.ExpectedUpdatedAt.Equal(r.updatedAt) {
+		return Report{}, ErrConflict
+	}
+	r.updatedAt = r.updatedAt.Add(time.Millisecond)
+	return Report{ID: reportID, ProjectID: projectID, Name: in.Name, DefaultDays: in.DefaultDays, UpdatedBy: actor, UpdatedAt: r.updatedAt}, nil
 }
 
 func newFakeRepository() *fakeRepository {

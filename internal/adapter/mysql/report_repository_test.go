@@ -89,6 +89,7 @@ func TestReportRepositoryUpdateUsesOptimisticTimestampAndMapsNoMatchToConflict(t
 	require.ErrorIs(t, err, reporting.ErrConflict)
 	require.Len(t, script.execQueries, 1)
 	query := strings.Join(strings.Fields(script.execQueries[0]), " ")
+	require.Contains(t, query, "updated_at=GREATEST(UTC_TIMESTAMP(3), TIMESTAMPADD(MICROSECOND,1000,updated_at))")
 	require.Contains(t, query, "WHERE id=? AND project_id=? AND updated_at=?")
 	require.Equal(t, expected, script.execArgs[0][6].Value)
 	require.Equal(t, 1, script.rollbacks)

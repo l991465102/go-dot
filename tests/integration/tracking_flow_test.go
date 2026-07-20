@@ -217,7 +217,8 @@ WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= ? AND s.hour < ?`, creat
 	query := map[string]any{"project_id": creation.Project.ID, "start_date": startDate, "end_date": endDate, "point_ids": persistedPointIDs}
 	var result dailyResult
 	postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", session.AccessToken, query, http.StatusOK, &result)
-	assertDailyMatrix(t, result, startDate, endDate, exactPoint, approximatePoint)
+	adminQueryCurrentDate := time.Now().In(location).Format(time.DateOnly)
+	assertDailyMatrix(t, result, startDate, endDate, adminQueryCurrentDate, exactPoint, approximatePoint)
 
 	exportInput := map[string]any{"project_id": creation.Project.ID, "start_date": startDate, "end_date": endDate, "point_ids": persistedPointIDs, "report_name": persisted.Name, "report_description": persisted.Description}
 	workbookBytes := request(t, client, http.MethodPost, base+"/api/v1/statistics/daily-by-point/export", session.AccessToken, exportInput, http.StatusOK, xlsxContentType)
@@ -233,7 +234,8 @@ WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= ? AND s.hour < ?`, creat
 	require.Equal(t, persisted, viewerPersisted)
 	var viewerResult dailyResult
 	postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", viewerSession.AccessToken, query, http.StatusOK, &viewerResult)
-	assertDailyMatrix(t, viewerResult, startDate, endDate, exactPoint, approximatePoint)
+	viewerQueryCurrentDate := time.Now().In(location).Format(time.DateOnly)
+	assertDailyMatrix(t, viewerResult, startDate, endDate, viewerQueryCurrentDate, exactPoint, approximatePoint)
 	viewerWorkbook := request(t, client, http.MethodPost, base+"/api/v1/statistics/daily-by-point/export", viewerSession.AccessToken, exportInput, http.StatusOK, xlsxContentType)
 	assertWorkbook(t, viewerWorkbook, viewerResult, persisted.Name, persisted.Description, viewerUsername)
 	postJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/reports", base, creation.Project.ID), viewerSession.AccessToken, map[string]any{
@@ -306,7 +308,7 @@ func acceptanceDates(now time.Time, location *time.Location) (string, string) {
 	return end.AddDate(0, 0, -1).Format(time.DateOnly), end.Format(time.DateOnly)
 }
 
-func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate string, exact, approximate acceptancePoint) {
+func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate, currentDate string, exact, approximate acceptancePoint) {
 	t.Helper()
 	require.Equal(t, "Asia/Shanghai", result.Timezone)
 	require.Equal(t, startDate, result.StartDate)
@@ -324,6 +326,7 @@ func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate stri
 		for _, point := range []acceptancePoint{exact, approximate} {
 			item, ok := items[fmt.Sprintf("%s/%d", date, point.ID)]
 			require.True(t, ok, "missing matrix row for %s/%d", date, point.ID)
+			require.Equal(t, expectedDateComplete(date, currentDate), item.Complete, "unexpected completeness for %s", date)
 			require.Equal(t, point.Code, item.PointCode)
 			require.Equal(t, point.Name, item.PointName)
 			require.Equal(t, point.UVMode, item.UVMode)
@@ -336,9 +339,9 @@ func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate stri
 			}
 		}
 	}
-	require.False(t, items[fmt.Sprintf("%s/%d", endDate, exact.ID)].Complete, "current Shanghai date must be incomplete")
-	require.True(t, items[fmt.Sprintf("%s/%d", startDate, exact.ID)].Complete, "previous Shanghai date must be complete")
 }
+
+func expectedDateComplete(date, currentDate string) bool { return date != currentDate }
 
 func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportName, reportDescription, exportedBy string) {
 	t.Helper()
@@ -467,4 +470,22 @@ func TestAcceptanceDatesUsesTwoShanghaiCivilDays(t *testing.T) {
 	start, end := acceptanceDates(time.Date(2026, 7, 20, 16, 30, 0, 0, time.UTC), location)
 	require.Equal(t, "2026-07-20", start)
 	require.Equal(t, "2026-07-21", end)
+}
+
+func TestExpectedDateCompleteUsesShanghaiDateCapturedAtQueryResponse(t *testing.T) {
+	tests := []struct {
+		name        string
+		date        string
+		currentDate string
+		complete    bool
+	}{
+		{name: "current date remains incomplete", date: "2026-07-21", currentDate: "2026-07-21", complete: false},
+		{name: "previous date is complete", date: "2026-07-20", currentDate: "2026-07-21", complete: true},
+		{name: "both requested dates may be historical after midnight", date: "2026-07-19", currentDate: "2026-07-21", complete: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.complete, expectedDateComplete(tt.date, tt.currentDate))
+		})
+	}
 }

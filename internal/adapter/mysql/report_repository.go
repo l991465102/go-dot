@@ -109,7 +109,7 @@ func (r *ReportRepository) Update(ctx context.Context, projectID, reportID, acto
 	defer rollbackOnError(tx, &err)
 
 	result, err := tx.ExecContext(ctx, `UPDATE custom_report
-SET name=?, description=?, default_days=?, updated_by=?, updated_at=UTC_TIMESTAMP(3)
+SET name=?, description=?, default_days=?, updated_by=?, updated_at=GREATEST(UTC_TIMESTAMP(3), TIMESTAMPADD(MICROSECOND,1000,updated_at))
 WHERE id=? AND project_id=? AND updated_at=?`, in.Name, in.Description, in.DefaultDays, actorID, reportID, projectID, in.ExpectedUpdatedAt)
 	if err != nil {
 		return updated, reportConflict(err)

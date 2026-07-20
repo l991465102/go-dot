@@ -58,10 +58,10 @@ func TestLoadValidatesSchedulerAggregateLookbackHours(t *testing.T) {
 
 	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
 	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
-	t.Setenv("GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS", "25")
+	t.Setenv("GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS", "26")
 	cfg, err := Load(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 25, cfg.Scheduler.AggregateLookbackHours)
+	require.Equal(t, 26, cfg.Scheduler.AggregateLookbackHours)
 }
 
 func TestLoadRejectsQueueStreamsWithoutOneCommonRedisHashTag(t *testing.T) {

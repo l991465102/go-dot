@@ -176,6 +176,7 @@ describe('CustomReportsView', () => {
     await wrapper.get('[data-test="save-as-report"]').trigger('click')
     await flushPromises()
     expect(reportsApi.createReport).toHaveBeenCalledWith(9, { name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1] })
+    expect(wrapper.text()).toContain('报表已创建')
 
     await wrapper.get('[data-test="save-report"]').trigger('click')
     await flushPromises()

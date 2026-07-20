@@ -34,12 +34,12 @@ func TestAggregateRefreshesCurrentAndPreviousProjectLocalHours(t *testing.T) {
 func TestAggregateRefreshesConfiguredLookbackHoursNewestFirst(t *testing.T) {
 	now := time.Date(2026, 7, 20, 16, 35, 0, 0, time.UTC)
 	store := &recordingStatisticsStore{}
-	agg := NewAggregatorWithLookback(store, fakeProjects{{ID: 7, Timezone: "Asia/Shanghai"}}, func() time.Time { return now }, 25)
+	agg := NewAggregatorWithLookback(store, fakeProjects{{ID: 7, Timezone: "Asia/Shanghai"}}, func() time.Time { return now }, 26)
 
 	require.NoError(t, agg.RefreshCurrentAndPrevious(context.Background()))
-	require.Len(t, store.hours, 25)
+	require.Len(t, store.hours, 26)
 	require.Equal(t, time.Date(2026, 7, 20, 16, 0, 0, 0, time.UTC), store.hours[0].Start)
-	require.Equal(t, time.Date(2026, 7, 19, 16, 0, 0, 0, time.UTC), store.hours[24].Start)
+	require.Equal(t, time.Date(2026, 7, 19, 15, 0, 0, 0, time.UTC), store.hours[25].Start)
 }
 
 func TestAggregateContinuesOtherHoursAndProjectsAndReturnsJoinedErrors(t *testing.T) {

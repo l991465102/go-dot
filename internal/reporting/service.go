@@ -2,6 +2,7 @@ package reporting
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -9,6 +10,8 @@ import (
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
+
+var errDailyStoreUnavailable = errors.New("reporting: daily store unavailable")
 
 type Authorizer interface {
 	RequireRole(context.Context, uint64, uint64, ...project.Role) error
@@ -92,7 +95,10 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 	if err := s.auth.RequireRole(ctx, actor, query.ProjectID, project.Admin, project.Viewer); err != nil {
 		return DailyResult{}, err
 	}
-	if s.daily == nil || query.ProjectID == 0 {
+	if s.daily == nil {
+		return DailyResult{}, errDailyStoreUnavailable
+	}
+	if query.ProjectID == 0 {
 		return DailyResult{}, ErrInvalid
 	}
 	location, err := time.LoadLocation("Asia/Shanghai")
@@ -109,10 +115,14 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 	}
 	now := s.now().In(location)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
-	dayCount := int(end.Sub(start)/(24*time.Hour)) + 1
-	if end.Before(start) || end.After(today) || dayCount < 1 || dayCount > 90 {
+	if end.Before(start) || end.After(today) || end.After(start.AddDate(0, 0, 89)) {
 		return DailyResult{}, ErrInvalid
 	}
+	startYear, startMonth, startDay := start.Date()
+	endYear, endMonth, endDay := end.Date()
+	civilStart := time.Date(startYear, startMonth, startDay, 0, 0, 0, 0, time.UTC)
+	civilEnd := time.Date(endYear, endMonth, endDay, 0, 0, 0, 0, time.UTC)
+	dayCount := int(civilEnd.Sub(civilStart)/(24*time.Hour)) + 1
 
 	pointIDs := uniquePointIDs(query.PointIDs)
 	if len(pointIDs) < 1 || len(pointIDs) > 100 {
@@ -124,6 +134,9 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 	}
 	byID := make(map[uint64]PointRef, len(resolved))
 	for _, point := range resolved {
+		if point.DefinitionState != tracking.Published && point.DefinitionState != tracking.Deprecated {
+			return DailyResult{}, ErrInvalid
+		}
 		if point.UVMode != tracking.Approximate && point.UVMode != tracking.Exact {
 			return DailyResult{}, ErrInvalid
 		}

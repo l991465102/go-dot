@@ -193,8 +193,8 @@ func TestQueryDailyFillsMissingPointDaysAndMarksTodayIncomplete(t *testing.T) {
 	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
 	daily := &fakeDailyStore{items: []DailyAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PV: 4, UV: 2}}}
 	repo := &fakeRepository{resolved: []PointRef{
-		{ID: 3, Code: "checkout", Name: "Checkout", UVMode: tracking.Exact},
-		{ID: 2, Code: "view", Name: "View", UVMode: tracking.Approximate},
+		{ID: 3, Code: "checkout", Name: "Checkout", DefinitionState: tracking.Published, UVMode: tracking.Exact},
+		{ID: 2, Code: "view", Name: "View", DefinitionState: tracking.Published, UVMode: tracking.Approximate},
 	}}
 	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, nil, func() time.Time { return now })
 
@@ -222,6 +222,51 @@ func TestQueryDailyFillsMissingPointDaysAndMarksTodayIncomplete(t *testing.T) {
 	require.Equal(t, "2026-07-19T00:00:00+08:00", daily.filter.Start.Format(time.RFC3339))
 	require.Equal(t, "2026-07-21T00:00:00+08:00", daily.filter.End.Format(time.RFC3339))
 	require.Equal(t, uint64(9), repo.resolvedProjectID)
+}
+
+func TestQueryDailyCountsCivilDaysAcrossHistoricalShanghaiDST(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(1991, 5, 2, 12, 0, 0, 0, location)
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, Code: "checkout", Name: "Checkout", DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+	daily := &fakeDailyStore{}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, nil, func() time.Time { return now })
+
+	_, err = service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "1991-02-01", EndDate: "1991-05-02", PointIDs: []uint64{3}})
+	require.ErrorIs(t, err, ErrInvalid, "91 civil days crossing the 1991 spring-forward must be rejected")
+	require.Zero(t, daily.calls)
+
+	result, err := service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "1991-02-01", EndDate: "1991-05-01", PointIDs: []uint64{3}})
+	require.NoError(t, err)
+	require.Equal(t, 90, result.DayCount)
+	require.Len(t, result.Items, 90)
+	require.Equal(t, "1991-05-01", result.Items[0].Date)
+	require.Equal(t, "1991-02-01", result.Items[len(result.Items)-1].Date)
+}
+
+func TestQueryDailyRejectsDraftResolvedPoint(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, Code: "checkout", DefinitionState: tracking.Draft, UVMode: tracking.Exact}}}
+	daily := &fakeDailyStore{}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, nil, func() time.Time { return now })
+
+	_, err = service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}})
+	require.ErrorIs(t, err, ErrInvalid)
+	require.Zero(t, daily.calls)
+}
+
+func TestQueryDailyWithoutStoreReturnsInternalUnavailableError(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, newFakeRepository(), nil, nil, func() time.Time { return now })
+
+	_, err = service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrInvalid)
+	require.ErrorContains(t, err, "daily store unavailable")
 }
 
 func TestQueryDailyRejectsInvalidQueries(t *testing.T) {
@@ -260,7 +305,7 @@ func TestQueryDailyDeduplicatesPointsAndRejectsUnauthorizedResolution(t *testing
 	require.NoError(t, err)
 	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
 
-	repo := &fakeRepository{resolved: []PointRef{{ID: 3, Code: "checkout", Name: "Checkout", UVMode: tracking.Exact}}}
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, Code: "checkout", Name: "Checkout", DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
 	daily := &fakeDailyStore{}
 	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, nil, func() time.Time { return now })
 	result, err := service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3, 3}})
@@ -268,7 +313,7 @@ func TestQueryDailyDeduplicatesPointsAndRejectsUnauthorizedResolution(t *testing
 	require.Equal(t, 1, result.PointCount)
 	require.Equal(t, []uint64{3}, repo.lastPointIDs)
 
-	repo.resolved = []PointRef{{ID: 3, UVMode: tracking.Exact}}
+	repo.resolved = []PointRef{{ID: 3, DefinitionState: tracking.Published, UVMode: tracking.Exact}}
 	_, err = service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3, 2}})
 	require.ErrorIs(t, err, ErrInvalid)
 }

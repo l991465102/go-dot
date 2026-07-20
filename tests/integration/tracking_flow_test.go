@@ -23,7 +23,10 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-const xlsxContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+const (
+	xlsxContentType            = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	stableDateQueryMaxAttempts = 3
+)
 
 type acceptancePoint struct {
 	ID     uint64 `json:"id"`
@@ -215,9 +218,11 @@ WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= ? AND s.hour < ?`, creat
 	persistedPointIDs := []uint64{persisted.Points[0].ID, persisted.Points[1].ID}
 
 	query := map[string]any{"project_id": creation.Project.ID, "start_date": startDate, "end_date": endDate, "point_ids": persistedPointIDs}
-	var result dailyResult
-	postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", session.AccessToken, query, http.StatusOK, &result)
-	adminQueryCurrentDate := time.Now().In(location).Format(time.DateOnly)
+	result, adminQueryCurrentDate, err := queryDailyOnStableShanghaiDate(location, time.Now, stableDateQueryMaxAttempts, func(result *dailyResult) error {
+		postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", session.AccessToken, query, http.StatusOK, result)
+		return nil
+	})
+	require.NoError(t, err)
 	assertDailyMatrix(t, result, startDate, endDate, adminQueryCurrentDate, exactPoint, approximatePoint)
 
 	exportInput := map[string]any{"project_id": creation.Project.ID, "start_date": startDate, "end_date": endDate, "point_ids": persistedPointIDs, "report_name": persisted.Name, "report_description": persisted.Description}
@@ -232,9 +237,11 @@ WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= ? AND s.hour < ?`, creat
 	var viewerPersisted savedReport
 	getJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/reports/%d", base, creation.Project.ID, saved.ID), viewerSession.AccessToken, &viewerPersisted)
 	require.Equal(t, persisted, viewerPersisted)
-	var viewerResult dailyResult
-	postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", viewerSession.AccessToken, query, http.StatusOK, &viewerResult)
-	viewerQueryCurrentDate := time.Now().In(location).Format(time.DateOnly)
+	viewerResult, viewerQueryCurrentDate, err := queryDailyOnStableShanghaiDate(location, time.Now, stableDateQueryMaxAttempts, func(result *dailyResult) error {
+		postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", viewerSession.AccessToken, query, http.StatusOK, result)
+		return nil
+	})
+	require.NoError(t, err)
 	assertDailyMatrix(t, viewerResult, startDate, endDate, viewerQueryCurrentDate, exactPoint, approximatePoint)
 	viewerWorkbook := request(t, client, http.MethodPost, base+"/api/v1/statistics/daily-by-point/export", viewerSession.AccessToken, exportInput, http.StatusOK, xlsxContentType)
 	assertWorkbook(t, viewerWorkbook, viewerResult, persisted.Name, persisted.Description, viewerUsername)
@@ -342,6 +349,21 @@ func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate, cur
 }
 
 func expectedDateComplete(date, currentDate string) bool { return date != currentDate }
+
+func queryDailyOnStableShanghaiDate(location *time.Location, now func() time.Time, maxAttempts int, query func(*dailyResult) error) (dailyResult, string, error) {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		before := now().In(location).Format(time.DateOnly)
+		var result dailyResult
+		if err := query(&result); err != nil {
+			return dailyResult{}, "", err
+		}
+		after := now().In(location).Format(time.DateOnly)
+		if before == after {
+			return result, after, nil
+		}
+	}
+	return dailyResult{}, "", fmt.Errorf("query crossed the Asia/Shanghai date boundary %d times", maxAttempts)
+}
 
 func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportName, reportDescription, exportedBy string) {
 	t.Helper()
@@ -488,4 +510,32 @@ func TestExpectedDateCompleteUsesShanghaiDateCapturedAtQueryResponse(t *testing.
 			require.Equal(t, tt.complete, expectedDateComplete(tt.date, tt.currentDate))
 		})
 	}
+}
+
+func TestQueryDailyOnStableShanghaiDateRetriesOneMidnightCrossing(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	times := []time.Time{
+		time.Date(2026, 7, 20, 15, 59, 59, 0, time.UTC),
+		time.Date(2026, 7, 20, 16, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 20, 16, 0, 1, 0, time.UTC),
+		time.Date(2026, 7, 20, 16, 0, 2, 0, time.UTC),
+	}
+	clockCalls := 0
+	requestCalls := 0
+
+	result, currentDate, err := queryDailyOnStableShanghaiDate(location, func() time.Time {
+		current := times[clockCalls]
+		clockCalls++
+		return current
+	}, 3, func(result *dailyResult) error {
+		requestCalls++
+		result.TotalPV = uint64(requestCalls)
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, requestCalls)
+	require.Equal(t, uint64(2), result.TotalPV, "must return the stable retry response")
+	require.Equal(t, "2026-07-21", currentDate)
 }

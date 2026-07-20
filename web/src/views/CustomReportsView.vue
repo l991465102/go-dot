@@ -79,7 +79,8 @@ function userError(cause: unknown, fallback: string) {
   if (response?.status === 409) return `配置已被其他人更新，请重新加载后再保存${detail}`
   if (response?.status === 400) return `请求参数无效，请检查日期、默认天数和点位配置${detail}`
   if (detail) return detail.slice(1)
-  return cause instanceof Error && cause.message ? cause.message : fallback
+  const message = cause instanceof Error ? cause.message : ''
+  return /[\u3400-\u9fff]/.test(message) ? message : fallback
 }
 function shanghaiToday(now = new Date()): string {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now)
@@ -225,6 +226,10 @@ function enterTemporaryMode() {
   setSelectedReportId(undefined); selectedReport.value = undefined; savedSnapshot.value = undefined
   success.value = ''; error.value = ''; resetEditable(); rebuildAvailablePoints()
 }
+function newReport() {
+  if (loadingReports.value || loadingReport.value || mutating.value) return
+  enterTemporaryMode()
+}
 async function selectSavedReport(value: number) {
   invalidateContext()
   const active = new AbortController(); reportController = active
@@ -265,7 +270,7 @@ function replaceReport(report: SavedReport) {
   setSelectedReportId(normalized.id); selectedReport.value = snapshot(normalized); savedSnapshot.value = snapshot(normalized)
 }
 async function saveAsReport() {
-  if (!canMutate.value || mutating.value) return
+  if (!canMutate.value || loadingReports.value || loadingReport.value || mutating.value) return
   const input = mutation(); if (!input) return
   const id = projectId.value; const epoch = contextEpoch; const token = ++sequence; mutationToken = token
   mutating.value = true; success.value = ''; error.value = ''
@@ -277,7 +282,7 @@ async function saveAsReport() {
 }
 async function saveReport() {
   const base = savedSnapshot.value
-  if (!canMutate.value || !base || mutating.value) { if (!base) error.value = '请先选择已保存报表，或使用另存为'; return }
+  if (!canMutate.value || loadingReports.value || loadingReport.value || !base || mutating.value) { if (!base && !loadingReports.value && !loadingReport.value) error.value = '请先选择已保存报表，或使用另存为'; return }
   const input = mutation(); if (!input) return
   const id = projectId.value; const epoch = contextEpoch; const reportId = base.id; const token = ++sequence; mutationToken = token
   mutating.value = true; success.value = ''; error.value = ''
@@ -289,7 +294,7 @@ async function saveReport() {
 }
 async function confirmReportDeletion() {
   const base = savedSnapshot.value
-  if (!canMutate.value || !base || mutating.value) return
+  if (!canMutate.value || loadingReports.value || loadingReport.value || !base || mutating.value) return
   const id = projectId.value; const epoch = contextEpoch; const reportId = base.id; const token = ++sequence; mutationToken = token
   mutating.value = true; success.value = ''; error.value = ''
   try {
@@ -326,15 +331,23 @@ async function download() {
   finally { if (operationOwns(token, epoch, id, 'export')) exporting.value = false }
 }
 
+function invalidateQueryForEdit() {
+  queryController?.abort()
+  queryController = undefined
+  querying.value = false
+  lastResult.value = undefined
+}
+
 watch(projectId, loadProject, { immediate: true })
 watch(selectedReportId, (value) => {
   if (suppressSelectionWatch) return
+  if (loadingReports.value || loadingReport.value || mutating.value) { setSelectedReportId(selectedReport.value?.id); return }
   if (value !== undefined && value === selectedReport.value?.id) return
   if (value === undefined || value === null) enterTemporaryMode(); else void selectSavedReport(value)
 }, { flush: 'sync' })
 watch(categoryId, () => { void loadPointPage(true) })
-watch(() => editable.dateRange?.join('|') ?? '', () => { lastResult.value = undefined })
-watch(() => editable.points.map((point) => point.id).join(','), () => { lastResult.value = undefined })
+watch(() => editable.dateRange?.join('|') ?? '', invalidateQueryForEdit)
+watch(() => editable.points.map((point) => point.id).join(','), invalidateQueryForEdit)
 onBeforeUnmount(() => { invalidateContext(true) })
 </script>
 
@@ -343,10 +356,10 @@ onBeforeUnmount(() => { invalidateContext(true) })
     <header class="page-heading">
       <div><p class="eyebrow">CUSTOM REPORTS</p><h1 id="custom-reports-title">自定义报表</h1><p>按自然日查看点位 PV 与 UV。统计时区：Asia/Shanghai</p></div>
       <div v-if="canMutate" class="heading-actions">
-        <el-button data-test="new-report" :disabled="mutating" @click="enterTemporaryMode">新建</el-button>
-        <el-button data-test="save-report" :disabled="!savedSnapshot || loadingReport || mutating" :loading="mutating" @click="saveReport">保存配置</el-button>
-        <el-button data-test="save-as-report" :disabled="loadingReport || mutating" :loading="mutating" @click="saveAsReport">另存为</el-button>
-        <el-button data-test="delete-report" type="danger" :disabled="!savedSnapshot || loadingReport || mutating" @click="confirmDelete = true">删除</el-button>
+        <el-button data-test="new-report" :disabled="loadingReports || loadingReport || mutating" @click="newReport">新建</el-button>
+        <el-button data-test="save-report" :disabled="loadingReports || !savedSnapshot || loadingReport || mutating" :loading="mutating" @click="saveReport">保存配置</el-button>
+        <el-button data-test="save-as-report" :disabled="loadingReports || loadingReport || mutating" :loading="mutating" @click="saveAsReport">另存为</el-button>
+        <el-button data-test="delete-report" type="danger" :disabled="loadingReports || !savedSnapshot || loadingReport || mutating" @click="confirmDelete = true">删除</el-button>
       </div>
     </header>
     <div v-if="error" class="page-error" role="alert">{{ error }}</div>
@@ -356,7 +369,7 @@ onBeforeUnmount(() => { invalidateContext(true) })
       <h2 id="report-config-title">报表配置</h2>
       <el-form label-position="top" class="report-config-grid" @submit.prevent="runQuery">
         <el-form-item label="已保存报表">
-          <el-select v-model="selectedReportId" data-test="report-select" clearable :disabled="mutating" placeholder="选择报表" aria-label="已保存报表">
+          <el-select v-model="selectedReportId" data-test="report-select" clearable :disabled="loadingReports || loadingReport || mutating" placeholder="选择报表" aria-label="已保存报表">
             <el-option v-for="report in reports" :key="report.id" :label="report.name" :value="report.id" />
           </el-select>
           <small v-if="savedSnapshot" class="report-meta">上次更新：{{ formatShanghaiDateTime(savedSnapshot.updated_at) }}</small>

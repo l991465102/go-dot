@@ -325,6 +325,82 @@ func TestQueryDailyHasNoTotalUVJSONField(t *testing.T) {
 	}
 }
 
+func TestExportDailyQueriesCurrentResultAndBuildsWorkbook(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 51, 3, 0, location)
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, Code: "checkout", Name: "Checkout", DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+	daily := &fakeDailyStore{items: []DailyAggregate{{Date: "2026-07-19", PointID: 3, PV: 4, UV: 2}}}
+	exporter := &fakeExporter{contents: []byte("xlsx")}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, exporter, func() time.Time { return now })
+	in := ExportInput{
+		DailyQuery: DailyQuery{ProjectID: 9, StartDate: "2026-07-19", EndDate: "2026-07-20", PointIDs: []uint64{3}},
+		ReportName: "运营日报", ReportDescription: "核心指标",
+	}
+
+	file, err := service.ExportDaily(context.Background(), 7, "alice", in)
+
+	require.NoError(t, err)
+	require.Equal(t, "运营日报_20260719_20260720.xlsx", file.Filename)
+	require.Equal(t, []byte("xlsx"), file.Contents)
+	require.Equal(t, 1, daily.calls)
+	require.Equal(t, 1, exporter.calls)
+	require.Equal(t, "运营日报", exporter.document.ReportName)
+	require.Equal(t, "核心指标", exporter.document.ReportDescription)
+	require.Equal(t, "alice", exporter.document.ExportedBy)
+	require.True(t, exporter.document.ExportedAt.Equal(now.UTC()))
+	require.Equal(t, "Asia/Shanghai", exporter.document.Result.Timezone)
+	require.Equal(t, uint64(4), exporter.document.Result.TotalPV)
+}
+
+func TestExportDailySanitizesFilenameAndFallsBackWhenNameIsEmpty(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 51, 3, 0, location)
+	newService := func() *Service {
+		repo := &fakeRepository{resolved: []PointRef{{ID: 3, DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+		return NewService(&fakeAuthorizer{role: project.Viewer}, repo, &fakeDailyStore{}, &fakeExporter{}, func() time.Time { return now })
+	}
+	query := DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}}
+
+	file, err := newService().ExportDaily(context.Background(), 7, "alice", ExportInput{DailyQuery: query, ReportName: " /周\\报\n "})
+	require.NoError(t, err)
+	require.Equal(t, "周报_20260720_20260720.xlsx", file.Filename)
+
+	file, err = newService().ExportDaily(context.Background(), 7, "alice", ExportInput{DailyQuery: query, ReportName: " /\\\n\t "})
+	require.NoError(t, err)
+	require.Equal(t, "自定义报表_20260720_20260720.xlsx", file.Filename)
+}
+
+func TestExportDailyPropagatesQueryAndExporterErrors(t *testing.T) {
+	queryErr := errors.New("daily failed")
+	queryExporter := &fakeExporter{}
+	queryRepo := &fakeRepository{resolved: []PointRef{{ID: 3, DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, queryRepo, &fakeDailyStore{err: queryErr}, queryExporter, time.Now)
+	in := ExportInput{DailyQuery: DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}}}
+	_, err := service.ExportDaily(context.Background(), 7, "alice", in)
+	require.ErrorIs(t, err, queryErr)
+	require.Zero(t, queryExporter.calls)
+
+	exportErr := errors.New("xlsx failed")
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+	service = NewService(&fakeAuthorizer{role: project.Viewer}, repo, &fakeDailyStore{}, &fakeExporter{err: exportErr}, time.Now)
+	_, err = service.ExportDaily(context.Background(), 7, "alice", in)
+	require.ErrorIs(t, err, exportErr)
+}
+
+func TestExportDailyWithoutExporterReturnsInternalUnavailableError(t *testing.T) {
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, &fakeDailyStore{}, nil, time.Now)
+	in := ExportInput{DailyQuery: DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}}}
+
+	_, err := service.ExportDaily(context.Background(), 7, "alice", in)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrInvalid)
+	require.ErrorContains(t, err, "exporter unavailable")
+}
+
 type fakeAuthorizer struct {
 	role  project.Role
 	err   error
@@ -427,6 +503,19 @@ type fakeDailyStore struct {
 	err    error
 	calls  int
 	filter DailyFilter
+}
+
+type fakeExporter struct {
+	document ExportDocument
+	contents []byte
+	err      error
+	calls    int
+}
+
+func (e *fakeExporter) Build(document ExportDocument) ([]byte, error) {
+	e.calls++
+	e.document = document
+	return append([]byte(nil), e.contents...), e.err
 }
 
 func (s *fakeDailyStore) QueryDaily(_ context.Context, filter DailyFilter) ([]DailyAggregate, error) {

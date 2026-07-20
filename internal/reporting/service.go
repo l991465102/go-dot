@@ -3,15 +3,20 @@ package reporting
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
-var errDailyStoreUnavailable = errors.New("reporting: daily store unavailable")
+var (
+	errDailyStoreUnavailable = errors.New("reporting: daily store unavailable")
+	errExporterUnavailable   = errors.New("reporting: exporter unavailable")
+)
 
 type Authorizer interface {
 	RequireRole(context.Context, uint64, uint64, ...project.Role) error
@@ -192,6 +197,38 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 		}
 	}
 	return result, nil
+}
+
+func (s *Service) ExportDaily(ctx context.Context, actor uint64, username string, in ExportInput) (ExportFile, error) {
+	if s.exporter == nil {
+		return ExportFile{}, errExporterUnavailable
+	}
+	result, err := s.QueryDaily(ctx, actor, in.DailyQuery)
+	if err != nil {
+		return ExportFile{}, err
+	}
+	contents, err := s.exporter.Build(ExportDocument{
+		Result: result, ReportName: in.ReportName, ReportDescription: in.ReportDescription,
+		ExportedBy: username, ExportedAt: s.now().UTC(),
+	})
+	if err != nil {
+		return ExportFile{}, err
+	}
+	return ExportFile{Filename: exportFilename(in.ReportName, result.StartDate, result.EndDate), Contents: contents}, nil
+}
+
+func exportFilename(reportName, startDate, endDate string) string {
+	name := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, reportName)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "自定义报表"
+	}
+	return fmt.Sprintf("%s_%s_%s.xlsx", name, strings.ReplaceAll(startDate, "-", ""), strings.ReplaceAll(endDate, "-", ""))
 }
 
 func (s *Service) validateInput(ctx context.Context, projectID uint64, in *ReportInput, requireExpectedUpdatedAt bool) ([]PointRef, error) {

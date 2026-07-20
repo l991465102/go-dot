@@ -19,6 +19,7 @@ const project = computed(() => projects.currentProject)
 const members = ref<ProjectMember[]>([])
 const keyStatus = ref<WriteKeyStatus>({ previous_key_active: false })
 const plaintextKey = ref('')
+const rotationConfirmOpen = ref(false)
 const loading = ref(false)
 const error = ref('')
 const form = reactive({ timezone: '', origins: '' })
@@ -126,6 +127,11 @@ async function rotate() {
   }
 }
 
+function confirmRotation() {
+  rotationConfirmOpen.value = false
+  void rotate()
+}
+
 watch(() => projects.currentProjectId, load, { immediate: true })
 onBeforeUnmount(() => controller?.abort())
 </script>
@@ -163,9 +169,18 @@ onBeforeUnmount(() => controller?.abort())
       <h2>写入密钥</h2>
       <el-alert v-if="keyStatus.previous_key_active" type="warning" :closable="false" :title="`旧密钥仍可使用至 ${formatShanghaiDateTime(keyStatus.previous_key_expires_at)}（${DISPLAY_TIMEZONE}，轮换后最多 24 小时）`" />
       <p v-else>当前没有处于宽限期的旧密钥。</p>
+      <p>当前写入密钥永久有效，不会自动轮换。仅在确认密钥泄露时执行紧急轮换。</p>
       <p>服务端只保存哈希，当前密钥无法再次查看。轮换后新密钥只显示一次。</p>
-      <el-button v-if="projects.canMutate" data-test="rotate-write-key" type="danger" @click="rotate">轮换写入密钥</el-button>
+      <el-button v-if="projects.canMutate" data-test="rotate-write-key" type="danger" @click="rotationConfirmOpen = true">紧急轮换写入密钥</el-button>
       <div v-if="plaintextKey" class="write-key-box" role="status"><strong>请立即保存，新密钥关闭页面后不再显示</strong><code>{{ plaintextKey }}</code><el-button @click="plaintextKey = ''">已保存并隐藏</el-button></div>
     </article>
+
+    <el-dialog v-model="rotationConfirmOpen" title="确认紧急轮换写入密钥" width="520px" :close-on-click-modal="false">
+      <p>轮换后所有上报端都需要切换到新密钥。旧密钥仅保留 24 小时，请确认已准备好协调各端更新。</p>
+      <template #footer>
+        <el-button data-test="cancel-key-rotation" @click="rotationConfirmOpen = false">取消</el-button>
+        <el-button data-test="confirm-key-rotation" type="danger" @click="confirmRotation">确认紧急轮换</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>

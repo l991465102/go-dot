@@ -1,4 +1,4 @@
-import axios, { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
+import axios, { AxiosError, AxiosHeaders, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiClient, setAccessToken, setUnauthorizedHandler } from './client'
 import {
@@ -101,6 +101,7 @@ describe('API query serialization', () => {
 describe('report API client', () => {
   afterEach(() => {
     apiClient.defaults.adapter = originalAdapter
+    vi.restoreAllMocks()
   })
 
   it('uses project-scoped endpoints for saved-report CRUD', async () => {
@@ -170,6 +171,7 @@ describe('report API client', () => {
   it.each([
     [`attachment; filename="fallback.xlsx"; filename*="UTF-8''%E6%A0%B8%E5%BF%83%E6%97%A5%E6%8A%A5.xlsx"`, '核心日报.xlsx'],
     [`attachment; filename=fallback.xlsx; filename*=UTF-8''%E6%A0%B8%E5%BF%83.xlsx`, '核心.xlsx'],
+    [`attachment; filename=fallback.xlsx; filename*=UTF-8'zh-CN'%E6%A0%B8%E5%BF%83.xlsx`, '核心.xlsx'],
     [`attachment; filename=fallback.xlsx; filename*=UTF-8''not%ZZvalid`, 'custom-report.xlsx'],
     [`attachment; filename=fallback.xlsx; filename*=UTF-8''..%2Fsecret.xlsx`, 'custom-report.xlsx'],
   ])('exports an authenticated blob and safely parses %s', async (disposition, expectedFilename) => {
@@ -192,5 +194,46 @@ describe('report API client', () => {
     expect(request?.url).toBe('/statistics/daily-by-point/export')
     expect(request?.method).toBe('post')
     expect(request?.responseType).toBe('blob')
+  })
+
+  it('reads Content-Disposition case-insensitively from AxiosHeaders', async () => {
+    const blob = new Blob(['xlsx'])
+    apiClient.defaults.adapter = async (config) => ({
+      data: blob,
+      status: 200,
+      statusText: 'OK',
+      headers: new AxiosHeaders({ 'Content-Disposition': `attachment; filename*=UTF-8''axios.xlsx` }),
+      config,
+    })
+
+    const result = await exportDaily({
+      project_id: 9,
+      start_date: '2026-07-20',
+      end_date: '2026-07-20',
+      point_ids: [3],
+      report_name: '',
+      report_description: '',
+    })
+
+    expect(result).toEqual({ blob, filename: 'axios.xlsx' })
+  })
+
+  it('falls back to a case-insensitive lookup for plain-object response headers', async () => {
+    const blob = new Blob(['xlsx'])
+    vi.spyOn(apiClient, 'post').mockResolvedValue({
+      data: blob,
+      headers: { 'Content-Disposition': `attachment; filename*=UTF-8''raw.xlsx` },
+    } as never)
+
+    const result = await exportDaily({
+      project_id: 9,
+      start_date: '2026-07-20',
+      end_date: '2026-07-20',
+      point_ids: [3],
+      report_name: '',
+      report_description: '',
+    })
+
+    expect(result).toEqual({ blob, filename: 'raw.xlsx' })
   })
 })

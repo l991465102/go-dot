@@ -30,4 +30,23 @@ describe('management shell permissions', () => {
     expect(router.resolve({ name: 'custom-reports', params: { projectId: 9 } }).href).toBe('/projects/9/reports')
     expect(wrapper.get('nav').findAll('a').find((link) => link.text().includes('自定义报表'))?.attributes('href')).toBe('/projects/9/reports')
   })
+
+  it('shows custom report navigation to admins', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().setSession({
+      accessToken: 'token',
+      mustChangePassword: false,
+      user: { id: 1, username: 'admin', displayName: 'Admin', mustChangePassword: false, status: 'ACTIVE' },
+    })
+    useProjectStore().$patch({
+      projects: [{ id: 9, code: 'checkout', name: 'Checkout', allowedOrigins: [], timezone: 'Asia/Shanghai', active: true, createdBy: 1, role: 'ADMIN' }],
+      currentProjectId: 9,
+    })
+    const router = createAppRouter()
+    await router.push('/projects/9/overview')
+    const wrapper = mount(AppLayout, { global: { plugins: [pinia, router], stubs: { RouterView: true } } })
+
+    expect(wrapper.get('nav').findAll('a').find((link) => link.text().includes('自定义报表'))?.attributes('href')).toBe('/projects/9/reports')
+  })
 })

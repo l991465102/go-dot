@@ -1,3 +1,4 @@
+import { AxiosHeaders } from 'axios'
 import { apiClient } from './client'
 
 export type ReportPointState = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED'
@@ -99,7 +100,7 @@ function filenameFromDisposition(disposition: string | undefined): string {
   if (!disposition) return fallbackFilename
   const match = disposition.match(/(?:^|;)\s*filename\*\s*=\s*(?:"([^"]*)"|([^;]*))/i)
   const value = (match?.[1] ?? match?.[2] ?? '').trim()
-  const encoded = /^UTF-8''(.+)$/i.exec(value)?.[1]
+  const encoded = /^UTF-8'[a-z0-9-]*'(.+)$/i.exec(value)?.[1]
   if (!encoded) return fallbackFilename
   try {
     const filename = decodeURIComponent(encoded).trim()
@@ -117,10 +118,20 @@ function filenameFromDisposition(disposition: string | undefined): string {
   }
 }
 
+function contentDispositionHeader(headers: unknown): string | undefined {
+  if (headers instanceof AxiosHeaders) {
+    const value = headers.get('content-disposition')
+    return typeof value === 'string' ? value : undefined
+  }
+  if (!headers || typeof headers !== 'object') return undefined
+  const entry = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-disposition')
+  return typeof entry?.[1] === 'string' ? entry[1] : undefined
+}
+
 export async function exportDaily(input: DailyExport): Promise<{ blob: Blob; filename: string }> {
   const response = await apiClient.post<Blob>('/statistics/daily-by-point/export', input, { responseType: 'blob' })
   return {
     blob: response.data,
-    filename: filenameFromDisposition(response.headers['content-disposition']),
+    filename: filenameFromDisposition(contentDispositionHeader(response.headers)),
   }
 }

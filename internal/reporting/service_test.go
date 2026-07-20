@@ -3,6 +3,7 @@ package reporting
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,99 @@ func TestAdminCanDeleteReport(t *testing.T) {
 	require.Equal(t, 1, repo.deleteCalls)
 }
 
+func TestQueryDailyFillsMissingPointDaysAndMarksTodayIncomplete(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
+	daily := &fakeDailyStore{items: []DailyAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PV: 4, UV: 2}}}
+	repo := &fakeRepository{resolved: []PointRef{
+		{ID: 3, Code: "checkout", Name: "Checkout", UVMode: tracking.Exact},
+		{ID: 2, Code: "view", Name: "View", UVMode: tracking.Approximate},
+	}}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, nil, func() time.Time { return now })
+
+	result, err := service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-19", EndDate: "2026-07-20", PointIDs: []uint64{3, 2}})
+
+	require.NoError(t, err)
+	require.Equal(t, "Asia/Shanghai", result.Timezone)
+	require.Equal(t, 2, result.DayCount)
+	require.Equal(t, 2, result.PointCount)
+	require.Len(t, result.Items, 4)
+	require.Equal(t, []string{"2026-07-20", "2026-07-20", "2026-07-19", "2026-07-19"}, []string{result.Items[0].Date, result.Items[1].Date, result.Items[2].Date, result.Items[3].Date})
+	require.Equal(t, []uint64{3, 2, 3, 2}, []uint64{result.Items[0].PointID, result.Items[1].PointID, result.Items[2].PointID, result.Items[3].PointID})
+	require.False(t, result.Items[0].Complete)
+	require.False(t, result.Items[1].Complete)
+	require.True(t, result.Items[2].Complete)
+	require.Equal(t, uint64(4), result.TotalPV)
+	require.Equal(t, uint64(2), result.Items[2].UV)
+	require.Equal(t, "Checkout", result.Items[2].PointName)
+	require.Equal(t, tracking.Exact, result.Items[2].UVMode)
+	require.Equal(t, 1, daily.calls)
+	require.Equal(t, uint64(9), daily.filter.ProjectID)
+	require.Equal(t, []uint64{2}, daily.filter.ApproximatePointIDs)
+	require.Equal(t, []uint64{3}, daily.filter.ExactPointIDs)
+	require.Equal(t, "Asia/Shanghai", daily.filter.Timezone)
+	require.Equal(t, "2026-07-19T00:00:00+08:00", daily.filter.Start.Format(time.RFC3339))
+	require.Equal(t, "2026-07-21T00:00:00+08:00", daily.filter.End.Format(time.RFC3339))
+	require.Equal(t, uint64(9), repo.resolvedProjectID)
+}
+
+func TestQueryDailyRejectsInvalidQueries(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
+	tooMany := make([]uint64, 101)
+	for i := range tooMany {
+		tooMany[i] = uint64(i + 1)
+	}
+	tests := []struct {
+		name  string
+		query DailyQuery
+	}{
+		{name: "malformed start", query: DailyQuery{ProjectID: 9, StartDate: "2026/07/19", EndDate: "2026-07-20", PointIDs: []uint64{3}}},
+		{name: "malformed end", query: DailyQuery{ProjectID: 9, StartDate: "2026-07-19", EndDate: "July 20", PointIDs: []uint64{3}}},
+		{name: "future end", query: DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-21", PointIDs: []uint64{3}}},
+		{name: "start after end", query: DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-19", PointIDs: []uint64{3}}},
+		{name: "zero points", query: DailyQuery{ProjectID: 9, StartDate: "2026-07-19", EndDate: "2026-07-20"}},
+		{name: "101 unique points", query: DailyQuery{ProjectID: 9, StartDate: "2026-07-19", EndDate: "2026-07-20", PointIDs: tooMany}},
+		{name: "91 inclusive days", query: DailyQuery{ProjectID: 9, StartDate: "2026-04-21", EndDate: "2026-07-20", PointIDs: []uint64{3}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			daily := &fakeDailyStore{}
+			service := NewService(&fakeAuthorizer{role: project.Viewer}, newFakeRepository(), daily, nil, func() time.Time { return now })
+			_, err := service.QueryDaily(context.Background(), 7, test.query)
+			require.ErrorIs(t, err, ErrInvalid)
+			require.Zero(t, daily.calls)
+		})
+	}
+}
+
+func TestQueryDailyDeduplicatesPointsAndRejectsUnauthorizedResolution(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, location)
+
+	repo := &fakeRepository{resolved: []PointRef{{ID: 3, Code: "checkout", Name: "Checkout", UVMode: tracking.Exact}}}
+	daily := &fakeDailyStore{}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, nil, func() time.Time { return now })
+	result, err := service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3, 3}})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.PointCount)
+	require.Equal(t, []uint64{3}, repo.lastPointIDs)
+
+	repo.resolved = []PointRef{{ID: 3, UVMode: tracking.Exact}}
+	_, err = service.QueryDaily(context.Background(), 7, DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3, 2}})
+	require.ErrorIs(t, err, ErrInvalid)
+}
+
+func TestQueryDailyHasNoTotalUVJSONField(t *testing.T) {
+	typ := reflect.TypeOf(DailyResult{})
+	for i := 0; i < typ.NumField(); i++ {
+		require.NotEqual(t, "total_uv", typ.Field(i).Tag.Get("json"))
+	}
+}
+
 type fakeAuthorizer struct {
 	role  project.Role
 	err   error
@@ -215,6 +309,7 @@ type fakeRepository struct {
 	deleteCalls       int
 	resolveErr        error
 	resolvedProjectID uint64
+	resolved          []PointRef
 }
 
 func newFakeRepository() *fakeRepository {
@@ -265,8 +360,12 @@ func (r *fakeRepository) Delete(_ context.Context, _, _ uint64) error {
 
 func (r *fakeRepository) ResolvePoints(_ context.Context, projectID uint64, ids []uint64) ([]PointRef, error) {
 	r.resolvedProjectID = projectID
+	r.lastPointIDs = append([]uint64(nil), ids...)
 	if r.resolveErr != nil {
 		return nil, r.resolveErr
+	}
+	if r.resolved != nil {
+		return append([]PointRef(nil), r.resolved...), nil
 	}
 	resolved := make([]PointRef, 0, len(ids))
 	for _, id := range ids {
@@ -276,6 +375,19 @@ func (r *fakeRepository) ResolvePoints(_ context.Context, projectID uint64, ids 
 		}
 	}
 	return resolved, nil
+}
+
+type fakeDailyStore struct {
+	items  []DailyAggregate
+	err    error
+	calls  int
+	filter DailyFilter
+}
+
+func (s *fakeDailyStore) QueryDaily(_ context.Context, filter DailyFilter) ([]DailyAggregate, error) {
+	s.calls++
+	s.filter = filter
+	return append([]DailyAggregate(nil), s.items...), s.err
 }
 
 func newAdminServiceForTest() *Service {

@@ -88,6 +88,99 @@ func (s *Service) DeleteReport(ctx context.Context, actor, projectID, reportID u
 	return s.repo.Delete(ctx, projectID, reportID)
 }
 
+func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery) (DailyResult, error) {
+	if err := s.auth.RequireRole(ctx, actor, query.ProjectID, project.Admin, project.Viewer); err != nil {
+		return DailyResult{}, err
+	}
+	if s.daily == nil || query.ProjectID == 0 {
+		return DailyResult{}, ErrInvalid
+	}
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return DailyResult{}, err
+	}
+	start, err := time.ParseInLocation(time.DateOnly, query.StartDate, location)
+	if err != nil {
+		return DailyResult{}, ErrInvalid
+	}
+	end, err := time.ParseInLocation(time.DateOnly, query.EndDate, location)
+	if err != nil {
+		return DailyResult{}, ErrInvalid
+	}
+	now := s.now().In(location)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	dayCount := int(end.Sub(start)/(24*time.Hour)) + 1
+	if end.Before(start) || end.After(today) || dayCount < 1 || dayCount > 90 {
+		return DailyResult{}, ErrInvalid
+	}
+
+	pointIDs := uniquePointIDs(query.PointIDs)
+	if len(pointIDs) < 1 || len(pointIDs) > 100 {
+		return DailyResult{}, ErrInvalid
+	}
+	resolved, err := s.repo.ResolvePoints(ctx, query.ProjectID, pointIDs)
+	if err != nil {
+		return DailyResult{}, err
+	}
+	byID := make(map[uint64]PointRef, len(resolved))
+	for _, point := range resolved {
+		if point.UVMode != tracking.Approximate && point.UVMode != tracking.Exact {
+			return DailyResult{}, ErrInvalid
+		}
+		if _, duplicate := byID[point.ID]; duplicate {
+			return DailyResult{}, ErrInvalid
+		}
+		byID[point.ID] = point
+	}
+	if len(byID) != len(pointIDs) {
+		return DailyResult{}, ErrInvalid
+	}
+	points := make([]PointRef, 0, len(pointIDs))
+	filter := DailyFilter{ProjectID: query.ProjectID, Start: start, End: end.AddDate(0, 0, 1), Timezone: "Asia/Shanghai"}
+	for _, id := range pointIDs {
+		point, ok := byID[id]
+		if !ok {
+			return DailyResult{}, ErrInvalid
+		}
+		points = append(points, point)
+		if point.UVMode == tracking.Exact {
+			filter.ExactPointIDs = append(filter.ExactPointIDs, id)
+		} else {
+			filter.ApproximatePointIDs = append(filter.ApproximatePointIDs, id)
+		}
+	}
+
+	aggregates, err := s.daily.QueryDaily(ctx, filter)
+	if err != nil {
+		return DailyResult{}, err
+	}
+	type dailyKey struct {
+		date    string
+		pointID uint64
+	}
+	indexed := make(map[dailyKey]DailyAggregate, len(aggregates))
+	for _, aggregate := range aggregates {
+		indexed[dailyKey{date: aggregate.Date, pointID: aggregate.PointID}] = aggregate
+	}
+	result := DailyResult{
+		Timezone: "Asia/Shanghai", StartDate: query.StartDate, EndDate: query.EndDate,
+		PointCount: len(points), DayCount: dayCount, Items: make([]DailyItem, 0, dayCount*len(points)),
+	}
+	for date := end; !date.Before(start); date = date.AddDate(0, 0, -1) {
+		dateText := date.Format(time.DateOnly)
+		complete := date.Before(today)
+		for _, point := range points {
+			aggregate := indexed[dailyKey{date: dateText, pointID: point.ID}]
+			result.Items = append(result.Items, DailyItem{
+				Date: dateText, Complete: complete, PointID: point.ID, PointCode: point.Code,
+				PointName: point.Name, PV: aggregate.PV, UV: aggregate.UV, UVMode: point.UVMode,
+			})
+			result.TotalPV += aggregate.PV
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) validateInput(ctx context.Context, projectID uint64, in *ReportInput, requireExpectedUpdatedAt bool) ([]PointRef, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Description = strings.TrimSpace(in.Description)

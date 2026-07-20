@@ -25,6 +25,7 @@ import (
 	"github.com/lzw7758/go-dot/internal/observability"
 	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
+	"github.com/lzw7758/go-dot/internal/reporting"
 	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
@@ -74,6 +75,8 @@ func runAPI(ctx context.Context) error {
 	statisticsStore := clickhouseadapter.NewStatisticsStore(chDB)
 	statisticsService := statistics.NewService(projectService, rediscounter.New(redisClient), statisticsStore, snapshotCache,
 		statistics.CompositeDiagnostics{Events: statisticsStore, DeadLetters: queue}, time.Now)
+	reportRepository := mysqladapter.NewReportRepository(db)
+	reportService := reporting.NewService(projectService, reportRepository, statisticsStore, reporting.ExcelExporter{}, time.Now)
 	collector := ingestion.NewCollector(snapshotCache, observedQueue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
 	observedCollector := observability.ObservedCollectService{Next: collector, Metrics: metrics, Logger: logger}
 	overviewService := overview.NewService(projectService, statisticsStore, queue, trackingRepo, time.Now)
@@ -82,7 +85,7 @@ func runAPI(ctx context.Context) error {
 		httpapi.NewWriteKeyMiddleware(projectRepo, time.Now),
 		httpapi.NewRateLimitMiddleware(httpapi.NewRedisTokenBucket(redisClient, 200, 100)),
 	)
-	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService, overviewService)
+	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService, overviewService, reportService)
 	handler := http.NewServeMux()
 	health := httpapi.NewHealthHandler(map[string]httpapi.HealthDependency{"mysql": db, "clickhouse": chDB, "redis": redisHealthDependency{client: redisClient}})
 	handler.Handle("/health/", health)

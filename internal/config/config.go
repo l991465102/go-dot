@@ -70,7 +70,7 @@ type WorkerConfig struct {
 }
 type SchedulerConfig struct {
 	AggregateEvery, ReclaimEvery, MetricsEvery, ExpireKeysEvery, ReclaimIdle, LeaseTTL time.Duration
-	BatchSize                                                                          int
+	BatchSize, AggregateLookbackHours                                                  int
 }
 
 func Load(ctx context.Context) (Config, error) {
@@ -94,7 +94,7 @@ func Load(ctx context.Context) (Config, error) {
 			PublishDedupTTL: 72 * time.Hour,
 		},
 		Worker:    WorkerConfig{Concurrency: 8, MaxDeliveries: 5, ReclaimIdle: 30 * time.Second, DrainTimeout: 30 * time.Second, RetryBase: time.Second, RetryMax: time.Minute},
-		Scheduler: SchedulerConfig{AggregateEvery: time.Minute, ReclaimEvery: 15 * time.Second, MetricsEvery: time.Minute, ExpireKeysEvery: time.Hour, ReclaimIdle: time.Minute, LeaseTTL: 2 * time.Minute, BatchSize: 100},
+		Scheduler: SchedulerConfig{AggregateEvery: time.Minute, ReclaimEvery: 15 * time.Second, MetricsEvery: time.Minute, ExpireKeysEvery: time.Hour, ReclaimIdle: time.Minute, LeaseTTL: 2 * time.Minute, BatchSize: 100, AggregateLookbackHours: 2},
 	}
 	if raw := os.Getenv("GO_DOT_SECURE_COOKIES"); raw != "" {
 		secure, err := strconv.ParseBool(raw)
@@ -138,6 +138,12 @@ func Load(ctx context.Context) (Config, error) {
 	}
 	if err := loadPositiveInt("GO_DOT_SCHEDULER_BATCH_SIZE", &cfg.Scheduler.BatchSize); err != nil {
 		return Config{}, err
+	}
+	if err := loadPositiveInt("GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS", &cfg.Scheduler.AggregateLookbackHours); err != nil {
+		return Config{}, err
+	}
+	if cfg.Scheduler.AggregateLookbackHours > 168 {
+		return Config{}, errors.New("GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS must be between 1 and 168")
 	}
 	if cfg.Worker.RetryBase < 100*time.Millisecond || cfg.Worker.RetryBase > time.Hour {
 		return Config{}, errors.New("GO_DOT_WORKER_RETRY_BASE must be between 100ms and 1h")

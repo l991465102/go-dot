@@ -14,15 +14,23 @@ type Aggregator struct {
 	store       ports.ProjectStatisticsStore
 	projects    ports.StatisticsProjectSource
 	now         func() time.Time
+	lookback    int
 	mu          sync.Mutex
 	lastVersion uint64
 }
 
 func NewAggregator(store ports.ProjectStatisticsStore, projects ports.StatisticsProjectSource, now func() time.Time) *Aggregator {
+	return NewAggregatorWithLookback(store, projects, now, 2)
+}
+
+func NewAggregatorWithLookback(store ports.ProjectStatisticsStore, projects ports.StatisticsProjectSource, now func() time.Time, lookbackHours int) *Aggregator {
 	if now == nil {
 		now = time.Now
 	}
-	return &Aggregator{store: store, projects: projects, now: now}
+	if lookbackHours < 1 {
+		lookbackHours = 2
+	}
+	return &Aggregator{store: store, projects: projects, now: now, lookback: lookbackHours}
 }
 
 func ProjectHourRange(at time.Time, location *time.Location) (time.Time, time.Time) {
@@ -48,7 +56,8 @@ func (a *Aggregator) RefreshCurrentAndPrevious(ctx context.Context) error {
 			continue
 		}
 		current, _ := ProjectHourRange(now, loc)
-		for _, hour := range []time.Time{current, current.Add(-time.Hour)} {
+		for offset := 0; offset < a.lookback; offset++ {
+			hour := current.Add(-time.Duration(offset) * time.Hour)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}

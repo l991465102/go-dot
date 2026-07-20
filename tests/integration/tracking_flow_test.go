@@ -37,6 +37,7 @@ type savedReport struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
 	Points      []acceptancePoint `json:"points"`
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 type dailyItem struct {
@@ -106,38 +107,51 @@ func TestTrackingFlow(t *testing.T) {
 	domain := category("DOMAIN", nil)
 	module := category("MODULE", domain)
 	scene := category("SCENE", module)
-	exactPoint := createPoint(t, client, base, session.AccessToken, creation.Project.ID, scene, "product_detail_view", "商品详情浏览", "EXACT")
-	approximatePoint := createPoint(t, client, base, session.AccessToken, creation.Project.ID, scene, "checkout_submit", "结算提交", "APPROXIMATE")
+	exactPoint := createPoint(t, client, base, session.AccessToken, creation.Project.ID, scene, "product_detail_view", "-商品详情浏览", "EXACT")
+	approximatePoint := createPoint(t, client, base, session.AccessToken, creation.Project.ID, scene, "checkout_submit", "@结算提交", "APPROXIMATE")
 	if fixtureFile := os.Getenv("GO_DOT_INTEGRATION_FIXTURE_FILE"); fixtureFile != "" {
 		fixture := fmt.Sprintf("GO_DOT_FAULT_WRITE_KEY=%q\nGO_DOT_FAULT_PROJECT_ID=%d\nGO_DOT_FAULT_POINT_ID=%d\n", creation.WriteKey, creation.Project.ID, exactPoint.ID)
 		require.NoError(t, os.WriteFile(fixtureFile, []byte(fixture), 0o600))
 	}
 
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
 	reportedAt := time.Now().UTC()
+	historicalAt := reportedAt.In(location).AddDate(0, 0, -1).UTC()
 	events := []map[string]any{
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0001", "point_code": "product_detail_view", "event_time": reportedAt.UnixMilli(), "anonymous_id": "exact-visitor", "platform": "web", "properties": map[string]any{}},
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0002", "point_code": "product_detail_view", "event_time": reportedAt.UnixMilli(), "anonymous_id": "exact-visitor", "platform": "web", "properties": map[string]any{}},
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0003", "point_code": "checkout_submit", "event_time": reportedAt.UnixMilli(), "anonymous_id": "approximate-a", "platform": "web", "properties": map[string]any{}},
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0004", "point_code": "checkout_submit", "event_time": reportedAt.UnixMilli(), "anonymous_id": "approximate-b", "platform": "web", "properties": map[string]any{}},
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0005", "point_code": "checkout_submit", "event_time": reportedAt.UnixMilli(), "anonymous_id": "approximate-b", "platform": "web", "properties": map[string]any{}},
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0006", "point_code": "product_detail_view", "event_time": historicalAt.UnixMilli(), "anonymous_id": "exact-visitor", "platform": "web", "properties": map[string]any{}},
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0007", "point_code": "product_detail_view", "event_time": historicalAt.UnixMilli(), "anonymous_id": "exact-visitor", "platform": "web", "properties": map[string]any{}},
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0008", "point_code": "checkout_submit", "event_time": historicalAt.UnixMilli(), "anonymous_id": "approximate-a", "platform": "web", "properties": map[string]any{}},
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0009", "point_code": "checkout_submit", "event_time": historicalAt.UnixMilli(), "anonymous_id": "approximate-b", "platform": "web", "properties": map[string]any{}},
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0010", "point_code": "checkout_submit", "event_time": historicalAt.UnixMilli(), "anonymous_id": "approximate-b", "platform": "web", "properties": map[string]any{}},
 	}
+	rdb := redis.NewClient(&redis.Options{Addr: os.Getenv("GO_DOT_REDIS_TEST_ADDRESS")})
+	defer rdb.Close()
+	eventStream := envOr("GO_DOT_INTEGRATION_EVENT_STREAM", "tracking:{queue}:events")
+	consumerGroup := envOr("GO_DOT_INTEGRATION_CONSUMER_GROUP", "tracking-workers")
 	for i := 0; i < 2; i++ {
 		collect(t, client, base, creation.WriteKey, map[string]any{"events": events})
+		waitForQueueDrain(t, rdb, eventStream, consumerGroup)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	rdb := redis.NewClient(&redis.Options{Addr: os.Getenv("GO_DOT_REDIS_TEST_ADDRESS")})
-	defer rdb.Close()
 	ch, err := sql.Open("clickhouse", os.Getenv("GO_DOT_CLICKHOUSE_TEST_DSN"))
 	require.NoError(t, err)
 	defer ch.Close()
+	aggregateStart := historicalAt.Truncate(time.Hour)
+	aggregateEnd := reportedAt.Truncate(time.Hour).Add(time.Hour)
 	var lastDiagnostic string
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		var rows uint64
 		err := ch.QueryRowContext(ctx, "SELECT count() FROM tracking_event FINAL WHERE project_id = ?", creation.Project.ID).Scan(&rows)
 		require.NoError(c, err)
-		require.Equal(c, uint64(5), rows)
+		require.Equal(c, uint64(10), rows)
 		pvKeys, err := scanKeys(ctx, rdb, fmt.Sprintf("rt:pv:hour:{project:%d}:*:%d:*", creation.Project.ID, exactPoint.ID))
 		require.NoError(c, err)
 		var pv int64
@@ -146,7 +160,7 @@ func TestTrackingFlow(t *testing.T) {
 			require.NoError(c, e)
 			pv += n
 		}
-		require.Equal(c, int64(2), pv)
+		require.Equal(c, int64(4), pv)
 		uvKeys, err := scanKeys(ctx, rdb, fmt.Sprintf("rt:uv:hour:{project:%d}:*:%d:*:EXACT", creation.Project.ID, exactPoint.ID))
 		require.NoError(c, err)
 		members := map[string]struct{}{}
@@ -160,42 +174,39 @@ func TestTrackingFlow(t *testing.T) {
 		require.Len(c, members, 1)
 
 		var generations uint64
-		err = ch.QueryRowContext(ctx, `SELECT count() FROM business_stat_hour_generation FINAL WHERE project_id = ? AND hour >= now() - INTERVAL 2 HOUR`, creation.Project.ID).Scan(&generations)
+		err = ch.QueryRowContext(ctx, `SELECT count() FROM business_stat_hour_generation FINAL WHERE project_id = ? AND hour >= ? AND hour < ?`, creation.Project.ID, aggregateStart, aggregateEnd).Scan(&generations)
 		require.NoError(c, err)
-		require.Greater(c, generations, uint64(0), "scheduler has not committed an hourly generation")
+		require.GreaterOrEqual(c, generations, uint64(2), "scheduler has not committed generations covering both Shanghai dates")
 		var exactPV, exactUV, approximatePV, approximateUV uint64
 		err = ch.QueryRowContext(ctx, `
 SELECT coalesce(sum(s.pv), 0), uniqExactMerge(s.uv_state)
 FROM business_stat_exact_hourly AS s
 INNER JOIN business_stat_hour_generation AS g FINAL
   ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation
-WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= now() - INTERVAL 2 HOUR`, creation.Project.ID, exactPoint.ID).Scan(&exactPV, &exactUV)
+WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= ? AND s.hour < ?`, creation.Project.ID, exactPoint.ID, aggregateStart, aggregateEnd).Scan(&exactPV, &exactUV)
 		require.NoError(c, err)
 		err = ch.QueryRowContext(ctx, `
 SELECT coalesce(sum(s.pv), 0), uniqCombined64Merge(s.uv_state)
 FROM business_stat_hourly AS s
 INNER JOIN business_stat_hour_generation AS g FINAL
   ON s.project_id = g.project_id AND s.hour = g.hour AND s.version = g.generation
-WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= now() - INTERVAL 2 HOUR`, creation.Project.ID, approximatePoint.ID).Scan(&approximatePV, &approximateUV)
+WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= ? AND s.hour < ?`, creation.Project.ID, approximatePoint.ID, aggregateStart, aggregateEnd).Scan(&approximatePV, &approximateUV)
 		require.NoError(c, err)
 		lastDiagnostic = fmt.Sprintf("raw rows=%d redis exact pv=%d uv=%d generations=%d exact pv=%d uv=%d approximate pv=%d uv=%d", rows, pv, len(members), generations, exactPV, exactUV, approximatePV, approximateUV)
-		require.Equal(c, uint64(2), exactPV, lastDiagnostic)
+		require.Equal(c, uint64(4), exactPV, lastDiagnostic)
 		require.Equal(c, uint64(1), exactUV, lastDiagnostic)
-		require.Equal(c, uint64(3), approximatePV, lastDiagnostic)
+		require.Equal(c, uint64(6), approximatePV, lastDiagnostic)
 		require.Equal(c, uint64(2), approximateUV, lastDiagnostic)
 	}, 90*time.Second, time.Second)
 	t.Log("integration convergence: " + lastDiagnostic)
 
-	location, err := time.LoadLocation("Asia/Shanghai")
-	require.NoError(t, err)
-	startDate, endDate := acceptanceDates(time.Now(), location)
-	dataDate := reportedAt.In(location).Format(time.DateOnly)
+	startDate, endDate := acceptanceDates(reportedAt, location)
 	pointIDs := []uint64{exactPoint.ID, approximatePoint.ID}
 	var saved savedReport
 	postJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/reports", base, creation.Project.ID), session.AccessToken, map[string]any{
-		"name": "集成验收日报", "description": "精确与近似 UV", "default_days": 2, "point_ids": pointIDs,
+		"name": "=1+1 集成验收日报", "description": "+SUM(A1:A2)", "default_days": 2, "point_ids": pointIDs,
 	}, http.StatusCreated, &saved)
-	require.Equal(t, "集成验收日报", saved.Name)
+	require.Equal(t, "=1+1 集成验收日报", saved.Name)
 	var persisted savedReport
 	getJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/reports/%d", base, creation.Project.ID, saved.ID), session.AccessToken, &persisted)
 	require.Len(t, persisted.Points, 2)
@@ -206,11 +217,11 @@ WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= now() - INTERVAL 2 HOUR`
 	query := map[string]any{"project_id": creation.Project.ID, "start_date": startDate, "end_date": endDate, "point_ids": persistedPointIDs}
 	var result dailyResult
 	postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", session.AccessToken, query, http.StatusOK, &result)
-	assertDailyMatrix(t, result, startDate, endDate, dataDate, exactPoint, approximatePoint)
+	assertDailyMatrix(t, result, startDate, endDate, exactPoint, approximatePoint)
 
 	exportInput := map[string]any{"project_id": creation.Project.ID, "start_date": startDate, "end_date": endDate, "point_ids": persistedPointIDs, "report_name": persisted.Name, "report_description": persisted.Description}
 	workbookBytes := request(t, client, http.MethodPost, base+"/api/v1/statistics/daily-by-point/export", session.AccessToken, exportInput, http.StatusOK, xlsxContentType)
-	assertWorkbook(t, workbookBytes, result, persisted.Name, "admin")
+	assertWorkbook(t, workbookBytes, result, persisted.Name, persisted.Description, "admin")
 
 	postJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/members", base, creation.Project.ID), session.AccessToken, map[string]any{"username": viewerUsername, "role": "VIEWER"}, http.StatusCreated, nil)
 	var viewerSession struct {
@@ -222,12 +233,16 @@ WHERE s.project_id = ? AND s.point_id = ? AND s.hour >= now() - INTERVAL 2 HOUR`
 	require.Equal(t, persisted, viewerPersisted)
 	var viewerResult dailyResult
 	postJSON(t, client, base+"/api/v1/statistics/daily-by-point/query", viewerSession.AccessToken, query, http.StatusOK, &viewerResult)
-	assertDailyMatrix(t, viewerResult, startDate, endDate, dataDate, exactPoint, approximatePoint)
+	assertDailyMatrix(t, viewerResult, startDate, endDate, exactPoint, approximatePoint)
 	viewerWorkbook := request(t, client, http.MethodPost, base+"/api/v1/statistics/daily-by-point/export", viewerSession.AccessToken, exportInput, http.StatusOK, xlsxContentType)
-	assertWorkbook(t, viewerWorkbook, viewerResult, persisted.Name, viewerUsername)
+	assertWorkbook(t, viewerWorkbook, viewerResult, persisted.Name, persisted.Description, viewerUsername)
 	postJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/reports", base, creation.Project.ID), viewerSession.AccessToken, map[string]any{
 		"name": "Viewer 不可保存", "description": "forbidden", "default_days": 2, "point_ids": pointIDs,
 	}, http.StatusForbidden, nil)
+	request(t, client, http.MethodPatch, fmt.Sprintf("%s/api/v1/projects/%d/reports/%d", base, creation.Project.ID, saved.ID), viewerSession.AccessToken, map[string]any{
+		"name": persisted.Name, "description": persisted.Description, "default_days": 2, "point_ids": persistedPointIDs, "expected_updated_at": persisted.UpdatedAt,
+	}, http.StatusForbidden, "")
+	request(t, client, http.MethodDelete, fmt.Sprintf("%s/api/v1/projects/%d/reports/%d", base, creation.Project.ID, saved.ID), viewerSession.AccessToken, nil, http.StatusForbidden, "")
 }
 
 func postJSON(t *testing.T, client *http.Client, url, token string, body any, status int, target any) {
@@ -276,7 +291,7 @@ func createPoint(t *testing.T, client *http.Client, base, token string, projectI
 	t.Helper()
 	var point acceptancePoint
 	postJSON(t, client, fmt.Sprintf("%s/api/v1/projects/%d/points", base, projectID), token, map[string]any{
-		"category_id": categoryID, "code": code, "name": name, "behavior_type": "ACTION", "development_state": "ONLINE",
+		"category_id": categoryID, "code": code, "name": name, "behavior_type": "PAGE_VIEW", "development_state": "ONLINE",
 		"trigger_timing": "集成验收动作完成后一次", "trigger_count_rule": "每次完成计数一次", "count_pv": true, "count_uv": true,
 		"uv_mode": uvMode, "time_basis": "CLIENT", "supported_platforms": []string{"web"}, "supported_channels": []string{},
 		"product_owner": "integration", "properties": []any{},
@@ -291,14 +306,14 @@ func acceptanceDates(now time.Time, location *time.Location) (string, string) {
 	return end.AddDate(0, 0, -1).Format(time.DateOnly), end.Format(time.DateOnly)
 }
 
-func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate, dataDate string, exact, approximate acceptancePoint) {
+func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate string, exact, approximate acceptancePoint) {
 	t.Helper()
 	require.Equal(t, "Asia/Shanghai", result.Timezone)
 	require.Equal(t, startDate, result.StartDate)
 	require.Equal(t, endDate, result.EndDate)
 	require.Equal(t, 2, result.PointCount)
 	require.Equal(t, 2, result.DayCount)
-	require.Equal(t, uint64(5), result.TotalPV)
+	require.Equal(t, uint64(10), result.TotalPV)
 	require.Len(t, result.Items, 4)
 
 	items := make(map[string]dailyItem, len(result.Items))
@@ -312,22 +327,20 @@ func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate, dat
 			require.Equal(t, point.Code, item.PointCode)
 			require.Equal(t, point.Name, item.PointName)
 			require.Equal(t, point.UVMode, item.UVMode)
-			if date != dataDate {
-				require.Zero(t, item.PV)
-				require.Zero(t, item.UV)
+			if point.ID == exact.ID {
+				require.Equal(t, uint64(2), item.PV)
+				require.Equal(t, uint64(1), item.UV)
+			} else {
+				require.Equal(t, uint64(3), item.PV)
+				require.Equal(t, uint64(2), item.UV)
 			}
 		}
 	}
 	require.False(t, items[fmt.Sprintf("%s/%d", endDate, exact.ID)].Complete, "current Shanghai date must be incomplete")
-	exactItem := items[fmt.Sprintf("%s/%d", dataDate, exact.ID)]
-	approximateItem := items[fmt.Sprintf("%s/%d", dataDate, approximate.ID)]
-	require.Equal(t, uint64(2), exactItem.PV)
-	require.Equal(t, uint64(1), exactItem.UV)
-	require.Equal(t, uint64(3), approximateItem.PV)
-	require.Equal(t, uint64(2), approximateItem.UV)
+	require.True(t, items[fmt.Sprintf("%s/%d", startDate, exact.ID)].Complete, "previous Shanghai date must be complete")
 }
 
-func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportName, exportedBy string) {
+func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportName, reportDescription, exportedBy string) {
 	t.Helper()
 	book, err := excelize.OpenReader(bytes.NewReader(contents))
 	require.NoError(t, err)
@@ -346,8 +359,8 @@ func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportNam
 			expectedStatus = "完整"
 		}
 		require.Equal(t, expectedStatus, row[1])
-		require.Equal(t, item.PointCode, row[2])
-		require.Equal(t, item.PointName, row[3])
+		require.Equal(t, spreadsheetText(item.PointCode), row[2])
+		require.Equal(t, spreadsheetText(item.PointName), row[3])
 		require.Equal(t, strconv.FormatUint(item.PV, 10), row[4])
 		require.Equal(t, strconv.FormatUint(item.UV, 10), row[5])
 		expectedMode := "近似"
@@ -364,10 +377,36 @@ func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportNam
 			explanation[row[0]] = row[1]
 		}
 	}
-	require.Equal(t, reportName, explanation["报表名称"])
+	require.Equal(t, spreadsheetText(reportName), explanation["报表名称"])
+	require.Equal(t, spreadsheetText(reportDescription), explanation["报表说明"])
 	require.Equal(t, result.StartDate+" 至 "+result.EndDate, explanation["查询范围"])
 	require.Equal(t, "Asia/Shanghai", explanation["统计时区"])
 	require.Equal(t, exportedBy, explanation["导出用户"])
+	for _, target := range []struct{ sheet, cell string }{
+		{sheet: "报表说明", cell: "B2"}, {sheet: "报表说明", cell: "B3"},
+	} {
+		assertTextCellHasNoFormula(t, book, target.sheet, target.cell)
+	}
+	for row := 2; row <= len(result.Items)+1; row++ {
+		assertTextCellHasNoFormula(t, book, "数据明细", fmt.Sprintf("D%d", row))
+	}
+}
+
+func spreadsheetText(value string) string {
+	if value != "" && strings.ContainsRune("=+-@", rune(value[0])) {
+		return "'" + value
+	}
+	return value
+}
+
+func assertTextCellHasNoFormula(t *testing.T, book *excelize.File, sheet, cell string) {
+	t.Helper()
+	formula, err := book.GetCellFormula(sheet, cell)
+	require.NoError(t, err)
+	require.Empty(t, formula)
+	cellType, err := book.GetCellType(sheet, cell)
+	require.NoError(t, err)
+	require.Contains(t, []excelize.CellType{excelize.CellTypeInlineString, excelize.CellTypeSharedString}, cellType)
 }
 func collect(t *testing.T, client *http.Client, base, key string, body any) {
 	t.Helper()
@@ -395,6 +434,31 @@ func scanKeys(ctx context.Context, client *redis.Client, pattern string) ([]stri
 			return out, nil
 		}
 	}
+}
+
+func waitForQueueDrain(t *testing.T, client *redis.Client, stream, group string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		groups, err := client.XInfoGroups(ctx, stream).Result()
+		require.NoError(c, err)
+		for _, current := range groups {
+			if current.Name == group {
+				require.Zero(c, current.Pending, "consumer group still has pending messages")
+				require.Zero(c, current.Lag, "consumer group still has undelivered messages")
+				return
+			}
+		}
+		require.Fail(c, "consumer group not found", "%s on %s", group, stream)
+	}, 30*time.Second, 200*time.Millisecond)
+}
+
+func envOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func TestAcceptanceDatesUsesTwoShanghaiCivilDays(t *testing.T) {

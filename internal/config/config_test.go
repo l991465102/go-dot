@@ -38,10 +38,30 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 	require.Equal(t, time.Second, cfg.Worker.RetryBase)
 	require.Equal(t, time.Minute, cfg.Worker.RetryMax)
 	require.Equal(t, time.Minute, cfg.Scheduler.AggregateEvery)
+	require.Equal(t, 2, cfg.Scheduler.AggregateLookbackHours)
 	require.Equal(t, 15*time.Second, cfg.Scheduler.ReclaimEvery)
 	require.Equal(t, time.Minute, cfg.Scheduler.ReclaimIdle)
 	require.Equal(t, 2*time.Minute, cfg.Scheduler.LeaseTTL)
 	require.Equal(t, 100, cfg.Scheduler.BatchSize)
+}
+
+func TestLoadValidatesSchedulerAggregateLookbackHours(t *testing.T) {
+	for _, value := range []string{"0", "169", "not-a-number"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+			t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+			t.Setenv("GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS", value)
+			_, err := Load(context.Background())
+			require.ErrorContains(t, err, "GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS")
+		})
+	}
+
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS", "25")
+	cfg, err := Load(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 25, cfg.Scheduler.AggregateLookbackHours)
 }
 
 func TestLoadRejectsQueueStreamsWithoutOneCommonRedisHashTag(t *testing.T) {

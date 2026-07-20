@@ -43,9 +43,13 @@ curl -sS http://127.0.0.1:8080/health/ready
 
 ```bash
 cp deploy/acceptance.env.example .env.acceptance
-docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
-docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml ps
-GO_DOT_E2E_ENV_FILE=.env.acceptance make test-e2e-bootstrap
+# 释放固定验收端口；不带 -v，因此旧 go-dot-acceptance volumes 会保留。
+docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml down
+export GO_DOT_ACCEPTANCE_PROJECT="go-dot-acceptance-$(date +%Y%m%d%H%M%S)-$$"
+acceptance_compose=(docker compose --env-file .env.acceptance -p "$GO_DOT_ACCEPTANCE_PROJECT" -f docker-compose.yml -f deploy/docker-compose.acceptance.yml)
+"${acceptance_compose[@]}" up -d --build
+"${acceptance_compose[@]}" ps
+GO_DOT_E2E_COMPOSE_PROJECT="$GO_DOT_ACCEPTANCE_PROJECT" GO_DOT_E2E_ENV_FILE=.env.acceptance make test-e2e-bootstrap
 
 GO_DOT_INTEGRATION_BASE_URL=http://127.0.0.1:18080 \
 GO_DOT_REDIS_TEST_ADDRESS=127.0.0.1:16379 \
@@ -56,6 +60,7 @@ GO_DOT_INTEGRATION_VIEWER_PASSWORD=admin \
 make test-integration
 
 GO_DOT_E2E_BOOTSTRAP=1 \
+GO_DOT_E2E_COMPOSE_PROJECT="$GO_DOT_ACCEPTANCE_PROJECT" \
 GO_DOT_E2E_ENV_FILE=.env.acceptance \
 GO_DOT_E2E_BASE_URL=http://127.0.0.1:15173 \
 GO_DOT_E2E_WORKERS=1 \
@@ -66,11 +71,11 @@ GO_DOT_E2E_VIEWER_PASSWORD='Admin-Changed-2026!' \
 make test-e2e
 ```
 
-验收后可删除这套隔离环境：`docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml down -v`；不要对默认项目执行 `down -v`。
+故障测试完成后用 `"${acceptance_compose[@]}" down -v --remove-orphans` 删除本次唯一 project 的容器和 volumes；不要对默认项目或被保留的旧 `go-dot-acceptance` 执行 `down -v`。
 
-Integration 环境变量未配置时测试会跳过；一旦配置，依赖和两个 Viewer fixture 变量不可用必须失败。第一次 bootstrap 在全新栈中创建 `e2e_viewer`；测试再从 `admin/admin` 启动，改密，创建项目和三级分类，通过公开 API 给 Viewer 添加成员关系，发布 EXACT/APPROXIMATE 两种点位，并重复提交同一批五个事件。它会等待 Scheduler generation，验证 exact PV=2/UV=1、approximate PV=3/UV=2，随后从已保存报表重新读取点位顺序，查询“前一上海日零值 + 当前窗口实值”的两日矩阵，导出并重新打开 XLSX，最后验证 Viewer 可读/导出且保存返回 403。超时时会输出最后一组 raw/realtime/generation/aggregate 诊断。
+Integration 环境变量未配置时测试会跳过；一旦配置，依赖和两个 Viewer fixture 变量不可用必须失败。第一次 bootstrap 在全新栈中创建 `e2e_viewer`；测试再从 `admin/admin` 启动，改密，创建项目和三级分类，通过公开 API 给 Viewer 添加成员关系，发布 EXACT/APPROXIMATE 两种点位，并重复提交同一批十个跨两个上海自然日的事件。每次提交后都等待 Redis consumer group 的 lag 和 pending 同时归零。它会等待 Scheduler generation，验证两日各自 exact PV=2/UV=1、approximate PV=3/UV=2，随后从已保存报表重新读取点位顺序，查询两日有值矩阵，导出并重新打开 XLSX，最后验证 Viewer 可读/导出且 POST/PATCH/DELETE 均返回 403。超时时会输出最后一组 raw/realtime/generation/aggregate 诊断。
 
-Scheduler 只刷新当前和前一个小时，因此 live acceptance 不伪造历史聚合、不直接写 ClickHouse，也不依赖恰好在上海零点运行。跨上海自然日分桶由 `internal/adapter/clickhouse/daily_report_test.go` 对 `toDate(hour, 'Asia/Shanghai')` 的查询合约，以及 `internal/reporting/service_test.go` 的日期矩阵、当天未完整和历史上海民用日边界测试提供确定性覆盖。
+Scheduler 默认刷新当前和前一个小时。`GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS` 可在 1～168 之间调整；验收环境设为 25，因此前一上海日同一时刻的原始事件也由正常 Scheduler generation 路径聚合。扩大窗口会线性增加 ClickHouse 写入和 Scheduler 每轮耗时，生产补算结束后应恢复默认 2。
 
 `GO_DOT_E2E_BOOTSTRAP=1` 会再次运行已提交的幂等 `tests/e2e/bootstrap.sh`，用改密后的当前 admin 密码 hash 刷新专用 workflow admin、首次改密账号和 Viewer，不需要手工 SQL。浏览器会通过 UI 创建项目、Domain/Module/Scene、草稿和发布点位，验证发布后不可编辑；随后 Viewer 直接调用项目设置、key、成员、分类和点位管理写接口并逐一断言 403。Admin 还会查询、保存并下载双点位自定义报表，诊断页会验证上海格式时间。当前套件 8 项全部通过才算完整 E2E。
 
@@ -83,7 +88,7 @@ set -a
 source /tmp/go-dot-acceptance-fixture.env
 set +a
 export GO_DOT_FAULT_API_URL=http://127.0.0.1:18080
-export GO_DOT_FAULT_COMPOSE_PROJECT=go-dot-acceptance
+export GO_DOT_FAULT_COMPOSE_PROJECT="$GO_DOT_ACCEPTANCE_PROJECT"
 export GO_DOT_FAULT_COMPOSE_OVERRIDE=deploy/docker-compose.acceptance.yml
 export GO_DOT_FAULT_ENV_FILE=.env.acceptance
 make test-fault

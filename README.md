@@ -236,8 +236,12 @@ docker compose config
 
 ```bash
 cp deploy/acceptance.env.example .env.acceptance
-docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
-GO_DOT_E2E_ENV_FILE=.env.acceptance make test-e2e-bootstrap
+# 固定验收端口若被旧的 go-dot-acceptance 占用，先停容器但保留其 volumes。
+docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml down
+export GO_DOT_ACCEPTANCE_PROJECT="go-dot-acceptance-$(date +%Y%m%d%H%M%S)-$$"
+acceptance_compose=(docker compose --env-file .env.acceptance -p "$GO_DOT_ACCEPTANCE_PROJECT" -f docker-compose.yml -f deploy/docker-compose.acceptance.yml)
+"${acceptance_compose[@]}" up -d --build
+GO_DOT_E2E_COMPOSE_PROJECT="$GO_DOT_ACCEPTANCE_PROJECT" GO_DOT_E2E_ENV_FILE=.env.acceptance make test-e2e-bootstrap
 GO_DOT_INTEGRATION_BASE_URL=http://127.0.0.1:18080 \
 GO_DOT_REDIS_TEST_ADDRESS=127.0.0.1:16379 \
 GO_DOT_CLICKHOUSE_TEST_DSN='clickhouse://default:@127.0.0.1:19001/go_dot' \
@@ -246,6 +250,7 @@ GO_DOT_INTEGRATION_VIEWER_USERNAME=e2e_viewer \
 GO_DOT_INTEGRATION_VIEWER_PASSWORD=admin \
 make test-integration
 GO_DOT_E2E_BOOTSTRAP=1 \
+GO_DOT_E2E_COMPOSE_PROJECT="$GO_DOT_ACCEPTANCE_PROJECT" \
 GO_DOT_E2E_ENV_FILE=.env.acceptance \
 GO_DOT_E2E_BASE_URL=http://127.0.0.1:15173 \
 GO_DOT_E2E_WORKERS=1 \
@@ -254,9 +259,11 @@ GO_DOT_E2E_FIRST_PASSWORD='Admin-Changed-2026!' \
 GO_DOT_E2E_FIRST_NEW_PASSWORD='First-Changed-2026!' \
 GO_DOT_E2E_VIEWER_PASSWORD='Admin-Changed-2026!' \
 make test-e2e
+# 若不继续执行 fault/load 验收，此时清理本次唯一 project。
+"${acceptance_compose[@]}" down -v --remove-orphans
 ```
 
-第一次 `test-e2e-bootstrap` 在全新栈中创建 Viewer 账号，Integration 再通过公开成员 API 把它加入新项目并验证读/导出与 403 写权限。后面的 `GO_DOT_E2E_BOOTSTRAP=1` 会在 Admin 改密后幂等刷新浏览器账号密码。Integration 仅验收 Scheduler 支持的当前/前一小时窗口，并用“前一上海自然日为零 + 当前窗口有值”验证两日完整矩阵，避免依赖恰好在上海零点运行。它还会把故障测试所需的一次性 fixture 写入权限为 `0600` 的临时文件。按 [docs/operations.md](docs/operations.md) source 该文件后运行 `make test-fault`。压测还需设置 `GO_DOT_LOAD_WRITE_KEY` 和可访问的 Scheduler `/metrics` 地址后执行 `make load-test`。
+时间戳加 PID 的 Compose project 名确保每次得到新的 project-scoped volumes；结束命令只删除本次唯一 project。第一次 `test-e2e-bootstrap` 在全新栈中创建 Viewer 账号，Integration 再通过公开成员 API 把它加入新项目并验证读/导出与 POST/PATCH/DELETE 403。后面的 `GO_DOT_E2E_BOOTSTRAP=1` 会在 Admin 改密后幂等刷新浏览器账号密码。验收配置把 `GO_DOT_SCHEDULER_AGGREGATE_LOOKBACK_HOURS` 设为 25，使 Scheduler 通过正常 generation 提交流程刷新最近 25 个小时；Integration 会在相邻两个上海自然日真实上报数据并验证两日均有值。生产默认仍为 2，可配置范围为 1～168；扩大窗口会线性增加每轮聚合开销，只应在补算窗口明确时使用。Integration 还会把故障测试所需的一次性 fixture 写入权限为 `0600` 的临时文件。按 [docs/operations.md](docs/operations.md) source 该文件后运行 `make test-fault`。压测还需设置 `GO_DOT_LOAD_WRITE_KEY` 和可访问的 Scheduler `/metrics` 地址后执行 `make load-test`。
 
 ## 生产部署
 

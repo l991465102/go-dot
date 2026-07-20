@@ -16,7 +16,7 @@ vi.mock('@/api/reports', () => ({
   queryDaily: vi.fn(),
   exportDaily: vi.fn(),
 }))
-vi.mock('@/api/tracking', () => ({ listPoints: vi.fn() }))
+vi.mock('@/api/tracking', () => ({ listPoints: vi.fn(), listCategories: vi.fn() }))
 vi.mock('vue-router', () => ({ useRoute: () => ({ params: { projectId: '9' } }) }))
 
 const rowsKey = Symbol('rows') as InjectionKey<Ref<Record<string, unknown>[]>>
@@ -41,11 +41,11 @@ const ElTableColumn = defineComponent({
 })
 const ElSelect = defineComponent({
   name: 'ElSelect',
-  props: ['modelValue'],
+  props: ['modelValue', 'remoteMethod', 'disabled'],
   emits: ['update:modelValue'],
   setup(_, { slots }) { return () => h('div', slots.default?.()) },
 })
-const ElOption = defineComponent({ name: 'ElOption', setup: () => () => h('span') })
+const ElOption = defineComponent({ name: 'ElOption', props: ['label'], setup: (props, { attrs }) => () => h('span', attrs, props.label) })
 const ElDatePicker = defineComponent({ name: 'ElDatePicker', props: ['modelValue'], emits: ['update:modelValue'], template: '<div />' })
 const ElInput = defineComponent({
   name: 'ElInput',
@@ -93,14 +93,26 @@ function setup(role: 'ADMIN' | 'VIEWER') {
   return mount(CustomReportsView, { global: { plugins: [pinia], stubs, directives: { loading: () => undefined } } })
 }
 
+function componentByTest(wrapper: ReturnType<typeof setup>, test: string) {
+  return wrapper.findAllComponents(ElSelect).find((item) => item.attributes('data-test') === test)!
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (cause: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
+
 describe('CustomReportsView', () => {
   afterEach(() => vi.useRealTimers())
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-07-20T16:30:00Z')) // 2026-07-21 in Shanghai
     vi.mocked(reportsApi.listReports).mockResolvedValue([])
+    vi.mocked(trackingApi.listCategories).mockResolvedValue([])
     vi.mocked(trackingApi.listPoints)
       .mockResolvedValueOnce({ items: [point(1, 'published', '已发布点位', 'PUBLISHED')], total: 1 })
       .mockResolvedValueOnce({ items: [point(2, 'deprecated', '已废弃点位', 'DEPRECATED')], total: 1 })
@@ -138,7 +150,7 @@ describe('CustomReportsView', () => {
     expect(trackingApi.listPoints).toHaveBeenNthCalledWith(1, 9, expect.objectContaining({ definition_state: 'PUBLISHED' }), expect.any(AbortSignal))
     expect(trackingApi.listPoints).toHaveBeenNthCalledWith(2, 9, expect.objectContaining({ definition_state: 'DEPRECATED' }), expect.any(AbortSignal))
 
-    wrapper.findAllComponents(ElSelect)[1]!.vm.$emit('update:modelValue', [1, 2])
+    componentByTest(wrapper, 'point-select').vm.$emit('update:modelValue', [1, 2])
     await wrapper.vm.$nextTick()
     await wrapper.get('[data-test="move-point-down-1"]').trigger('click')
     wrapper.getComponent(ElDatePicker).vm.$emit('update:modelValue', ['2026-07-20', '2026-07-21'])
@@ -171,6 +183,10 @@ describe('CustomReportsView', () => {
       name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], expected_updated_at: 'snapshot-v1',
     })
 
+    await wrapper.get('[data-test="save-report"]').trigger('click')
+    await flushPromises()
+    expect(reportsApi.updateReport).toHaveBeenLastCalledWith(9, 7, expect.objectContaining({ expected_updated_at: 'snapshot-v2' }))
+
     wrapper.getComponent(ElDatePicker).vm.$emit('update:modelValue', ['2026-07-19', '2026-07-20'])
     await wrapper.get('[data-test="export-report"]').trigger('click')
     await flushPromises()
@@ -181,6 +197,12 @@ describe('CustomReportsView', () => {
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
     expect(click).toHaveBeenCalled()
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:download')
+
+    await wrapper.get('[data-test="delete-report"]').trigger('click')
+    expect(wrapper.find('[data-test="confirm-delete-report"]').exists()).toBe(true)
+    await wrapper.get('[data-test="confirm-delete-report"]').trigger('click')
+    await flushPromises()
+    expect(reportsApi.deleteReport).toHaveBeenCalledWith(9, 7)
   })
 
   it('lets viewers load, query, and export while hiding every mutation control', async () => {
@@ -221,5 +243,163 @@ describe('CustomReportsView', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('2026-07-21')
     expect(wrapper.text()).toContain('未完整')
+    expect(wrapper.get('[data-test="completion-2026-07-21-2"]').text()).toBe('未完整')
+
+    await wrapper.get('[data-test="export-report"]').trigger('click')
+    await flushPromises()
+    expect(reportsApi.exportDaily).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears stale mutation targets when a selection is cleared, switched, or fails to load', async () => {
+    const first = { id: 1, project_id: 9, name: 'A', description: '', default_days: 7, points: [], created_by: 1, updated_by: 1, created_at: '2026-01-01T00:00:00Z', updated_at: 'a1' }
+    const second = { ...first, id: 2, name: 'B', updated_at: 'b1' }
+    vi.mocked(reportsApi.listReports).mockResolvedValue([first, second])
+    vi.mocked(reportsApi.getReport).mockResolvedValueOnce(first)
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', 1)
+    await flushPromises()
+    expect(wrapper.get('[data-test="save-report"]').attributes('disabled')).toBeUndefined()
+
+    const pending = deferred<reportsApi.SavedReport>()
+    vi.mocked(reportsApi.getReport).mockReturnValueOnce(pending.promise)
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', 2)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-test="save-report"]').attributes('disabled')).toBeDefined()
+    pending.reject(new Error('load failed'))
+    await flushPromises()
+    expect(componentByTest(wrapper, 'report-select').props('modelValue')).toBeUndefined()
+    expect(wrapper.get('[data-test="save-report"]').attributes('disabled')).toBeDefined()
+
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', undefined)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('[data-test="report-name"]').attributes('value')).toBe('')
+  })
+
+  it('rejects cleared, reversed, future, and 91-day ranges while accepting the 90-day boundary', async () => {
+    vi.mocked(reportsApi.queryDaily).mockResolvedValue({ timezone: 'Asia/Shanghai', start_date: '2026-04-23', end_date: '2026-07-21', point_count: 1, day_count: 90, total_pv: 0, items: [] })
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+    componentByTest(wrapper, 'point-select').vm.$emit('update:modelValue', [1])
+    await wrapper.vm.$nextTick()
+    const picker = wrapper.getComponent(ElDatePicker)
+
+    for (const range of [null, ['2026-07-21', '2026-07-20'], ['2026-07-21', '2026-07-22'], ['2026-04-22', '2026-07-21']]) {
+      picker.vm.$emit('update:modelValue', range)
+      await wrapper.get('[data-test="query-report"]').trigger('click')
+      await wrapper.vm.$nextTick()
+    }
+    expect(reportsApi.queryDaily).not.toHaveBeenCalled()
+
+    picker.vm.$emit('update:modelValue', ['2026-04-23', '2026-07-21'])
+    await wrapper.get('[data-test="query-report"]').trigger('click')
+    await flushPromises()
+    expect(reportsApi.queryDaily).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores late PATCH and delete completions after the report context changes', async () => {
+    const pointA = { id: 1, code: 'published', name: '已发布点位', definition_state: 'PUBLISHED', uv_mode: 'APPROXIMATE', sort_no: 0 } as const
+    const reportA = { id: 1, project_id: 9, name: 'A', description: '', default_days: 7, points: [pointA], created_by: 1, updated_by: 1, created_at: '2026-01-01T00:00:00Z', updated_at: 'a1' }
+    const reportB = { ...reportA, id: 2, name: 'B', updated_at: 'b1' }
+    vi.mocked(reportsApi.listReports).mockResolvedValue([reportA, reportB])
+    vi.mocked(reportsApi.getReport).mockResolvedValueOnce(reportA).mockResolvedValueOnce(reportB).mockResolvedValueOnce(reportA).mockResolvedValueOnce(reportB)
+    const patch = deferred<reportsApi.SavedReport>()
+    vi.mocked(reportsApi.updateReport).mockReturnValueOnce(patch.promise)
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', 1)
+    await flushPromises()
+    await wrapper.get('[data-test="save-report"]').trigger('click')
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', 2)
+    await flushPromises()
+    patch.resolve({ ...reportA, name: 'A late', updated_at: 'a2' })
+    await flushPromises()
+    expect(wrapper.get('[data-test="report-name"]').attributes('value')).toBe('B')
+
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', 1)
+    await flushPromises()
+    const deletion = deferred<void>()
+    vi.mocked(reportsApi.deleteReport).mockReturnValueOnce(deletion.promise)
+    await wrapper.get('[data-test="delete-report"]').trigger('click')
+    await wrapper.get('[data-test="confirm-delete-report"]').trigger('click')
+    componentByTest(wrapper, 'report-select').vm.$emit('update:modelValue', 2)
+    await flushPromises()
+    deletion.resolve()
+    await flushPromises()
+    expect(wrapper.get('[data-test="report-name"]').attributes('value')).toBe('B')
+  })
+
+  it('loads categories and paginated published/deprecated search results with dedupe', async () => {
+    vi.mocked(trackingApi.listCategories).mockResolvedValue([{ id: 3, project_id: 9, code: 'pay', name: '支付', level: 'DOMAIN', sort_order: 0, active: true, created_by: 1 }])
+    vi.mocked(trackingApi.listPoints).mockReset()
+    vi.mocked(trackingApi.listPoints)
+      .mockResolvedValueOnce({ items: [point(1, 'one', '一', 'PUBLISHED')], total: 2 })
+      .mockResolvedValueOnce({ items: [point(3, 'three', '三', 'DEPRECATED')], total: 1 })
+      .mockResolvedValueOnce({ items: [point(2, 'two', '二', 'PUBLISHED'), point(3, 'three', '三', 'DEPRECATED')], total: 2 })
+      .mockResolvedValueOnce({ items: [], total: 1 })
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+
+    expect(trackingApi.listCategories).toHaveBeenCalledWith(9, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('支付')
+    await wrapper.get('[data-test="load-more-points"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test^="point-option-"]')).toHaveLength(3)
+    expect(trackingApi.listPoints).toHaveBeenLastCalledWith(9, expect.objectContaining({ definition_state: 'DEPRECATED', page: 2 }), expect.any(AbortSignal))
+
+    componentByTest(wrapper, 'category-select').vm.$emit('update:modelValue', 3)
+    await wrapper.vm.$nextTick()
+    expect(trackingApi.listPoints).toHaveBeenCalledWith(9, expect.objectContaining({ category_id: 3, page: 1 }), expect.any(AbortSignal))
+  })
+
+  it('revokes the Blob URL even when the download click throws', async () => {
+    vi.mocked(reportsApi.exportDaily).mockResolvedValue({ blob: new Blob(), filename: 'x.xlsx' })
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:throw')
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => { throw new Error('blocked') })
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+    componentByTest(wrapper, 'point-select').vm.$emit('update:modelValue', [1])
+    await wrapper.vm.$nextTick()
+
+    await wrapper.get('[data-test="export-report"]').trigger('click')
+    await flushPromises()
+    expect(revoke).toHaveBeenCalledWith('blob:throw')
+    expect(wrapper.text()).toContain('blocked')
+  })
+
+  it('uses the context epoch to reject a late reload even when the project ID is unchanged', async () => {
+    const oldList = deferred<reportsApi.SavedReport[]>()
+    const base = { project_id: 9, description: '', default_days: 7, points: [], created_by: 1, updated_by: 1, created_at: '2026-01-01T00:00:00Z' }
+    vi.mocked(reportsApi.listReports)
+      .mockReturnValueOnce(oldList.promise)
+      .mockResolvedValueOnce([{ ...base, id: 2, name: '新上下文', updated_at: 'new' }])
+    const wrapper = setup('ADMIN')
+    await wrapper.vm.$nextTick()
+
+    await (wrapper.vm as unknown as { loadProject: () => Promise<void> }).loadProject()
+    oldList.resolve([{ ...base, id: 1, name: '旧上下文', updated_at: 'old' }])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('新上下文')
+    expect(wrapper.text()).not.toContain('旧上下文')
+  })
+
+  it('caps ordered point selection at 100', async () => {
+    const many = Array.from({ length: 101 }, (_, index) => point(index + 1, `point_${index + 1}`, `点位 ${index + 1}`, 'PUBLISHED'))
+    vi.mocked(trackingApi.listPoints).mockReset()
+    vi.mocked(trackingApi.listPoints)
+      .mockResolvedValueOnce({ items: many, total: 101 })
+      .mockResolvedValueOnce({ items: [], total: 0 })
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+
+    componentByTest(wrapper, 'point-select').vm.$emit('update:modelValue', many.map((_, index) => index + 1))
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.findAll('.ordered-point-row')).toHaveLength(100)
+    expect(wrapper.text()).toContain('最多选择 100 个点位')
   })
 })

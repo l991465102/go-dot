@@ -141,7 +141,7 @@ PATCH  /api/v1/projects/{projectId}/reports/{reportId}
 DELETE /api/v1/projects/{projectId}/reports/{reportId}
 ```
 
-创建和更新请求：
+创建请求：
 
 ```json
 {
@@ -151,6 +151,21 @@ DELETE /api/v1/projects/{projectId}/reports/{reportId}
   "point_ids": [12, 18, 21]
 }
 ```
+
+更新请求在相同字段之外必须携带详情接口最后返回的 `updated_at`：
+
+```json
+{
+  "name": "核心转化日报",
+  "description": "产品详情与下单核心点位",
+  "default_days": 30,
+  "point_ids": [12, 18, 21],
+  "expected_updated_at": "2026-07-20T02:51:03.123Z"
+}
+```
+
+仓储使用 `WHERE id = ? AND project_id = ? AND updated_at = ?` 实施乐观锁；影响
+行数为 0 时返回 HTTP 409，防止两个管理员静默覆盖彼此的修改。
 
 列表返回轻量摘要；详情返回有序点位列表、点位编码、名称、定义状态、UV 模式
 和创建/更新时间。项目内重名返回 HTTP 409，非法点位或跨项目点位返回统一的

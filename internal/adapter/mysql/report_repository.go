@@ -82,7 +82,7 @@ func (r *ReportRepository) Create(ctx context.Context, projectID, actorID uint64
 		DefaultDays: in.DefaultDays, CreatedBy: actorID, UpdatedBy: actorID,
 		Points: pointRefs(in.PointIDs),
 	}
-	if err = replaceReportPoints(ctx, tx, created.ID, in.PointIDs); err != nil {
+	if err = insertPointMappings(ctx, tx, projectID, created.ID, in.PointIDs); err != nil {
 		return created, err
 	}
 	if err = tx.QueryRowContext(ctx, `SELECT created_at,updated_at FROM custom_report WHERE id=? AND project_id=?`, created.ID, projectID).Scan(&created.CreatedAt, &created.UpdatedAt); err != nil {
@@ -124,7 +124,7 @@ WHERE id=? AND project_id=? AND updated_at=?`, in.Name, in.Description, in.Defau
 	if _, err = tx.ExecContext(ctx, `DELETE rp FROM custom_report_point rp JOIN custom_report r ON r.id=rp.report_id WHERE rp.report_id=? AND r.project_id=?`, reportID, projectID); err != nil {
 		return updated, err
 	}
-	if err = replaceReportPoints(ctx, tx, reportID, in.PointIDs); err != nil {
+	if err = insertPointMappings(ctx, tx, projectID, reportID, in.PointIDs); err != nil {
 		return updated, err
 	}
 	updated = reporting.Report{
@@ -228,10 +228,20 @@ func loadReportPoints(ctx context.Context, q queryer, projectID, reportID uint64
 	return points, rows.Err()
 }
 
-func replaceReportPoints(ctx context.Context, tx *sql.Tx, reportID uint64, pointIDs []uint64) error {
+func insertPointMappings(ctx context.Context, tx *sql.Tx, projectID, reportID uint64, pointIDs []uint64) error {
 	for sortNo, pointID := range pointIDs {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO custom_report_point(report_id,point_id,sort_no) VALUES(?,?,?)`, reportID, pointID, sortNo); err != nil {
+		result, err := tx.ExecContext(ctx, `INSERT INTO custom_report_point(report_id,point_id,sort_no)
+SELECT ?,p.id,? FROM tracking_point p
+WHERE p.id=? AND p.project_id=? AND p.definition_state IN ('PUBLISHED','DEPRECATED')`, reportID, sortNo, pointID, projectID)
+		if err != nil {
 			return reportConflict(err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return reporting.ErrInvalid
 		}
 	}
 	return nil

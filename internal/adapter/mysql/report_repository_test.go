@@ -36,14 +36,36 @@ func TestReportRepositoryCreateCommitsReportOrderedPointsAndAuditTogether(t *tes
 	require.Len(t, script.execQueries, 4)
 	require.Contains(t, script.execQueries[0], "INSERT INTO custom_report")
 	require.Contains(t, script.execQueries[1], "INSERT INTO custom_report_point")
+	require.Contains(t, script.execQueries[1], "p.project_id=?")
+	require.Contains(t, script.execQueries[1], "definition_state IN ('PUBLISHED','DEPRECATED')")
 	require.Contains(t, script.execQueries[2], "INSERT INTO custom_report_point")
 	require.Contains(t, script.execQueries[3], "audit_log")
-	require.EqualValues(t, 7, script.execArgs[1][1].Value)
-	require.EqualValues(t, 0, script.execArgs[1][2].Value)
-	require.EqualValues(t, 5, script.execArgs[2][1].Value)
-	require.EqualValues(t, 1, script.execArgs[2][2].Value)
+	require.EqualValues(t, 0, script.execArgs[1][1].Value)
+	require.EqualValues(t, 7, script.execArgs[1][2].Value)
+	require.EqualValues(t, 9, script.execArgs[1][3].Value)
+	require.EqualValues(t, 1, script.execArgs[2][1].Value)
+	require.EqualValues(t, 5, script.execArgs[2][2].Value)
+	require.EqualValues(t, 9, script.execArgs[2][3].Value)
 	require.Equal(t, 1, script.commits)
 	require.Zero(t, script.rollbacks)
+}
+
+func TestReportRepositoryCreateRejectsCrossProjectPointAndRollsBack(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.execResults = []driver.Result{
+		scriptResult{lastID: 12, affected: 1},
+		scriptResult{affected: 0},
+	}
+
+	_, err := NewReportRepository(db).Create(context.Background(), 9, 3, reporting.ReportInput{
+		Name: "Conversion", DefaultDays: 30, PointIDs: []uint64{77},
+	})
+	require.ErrorIs(t, err, reporting.ErrInvalid)
+	require.Len(t, script.execQueries, 2)
+	require.Contains(t, script.execQueries[1], "p.project_id=?")
+	require.Contains(t, script.execQueries[1], "definition_state IN ('PUBLISHED','DEPRECATED')")
+	require.Equal(t, 1, script.rollbacks)
+	require.Zero(t, script.commits)
 }
 
 func TestReportRepositoryCreateMapsDuplicateNameToConflict(t *testing.T) {
@@ -71,6 +93,56 @@ func TestReportRepositoryUpdateUsesOptimisticTimestampAndMapsNoMatchToConflict(t
 	require.Equal(t, expected, script.execArgs[0][6].Value)
 	require.Equal(t, 1, script.rollbacks)
 	require.Zero(t, script.commits)
+}
+
+func TestReportRepositoryUpdateReplacesMappingsAndAuditsInOneTransaction(t *testing.T) {
+	expected := time.Date(2026, 7, 20, 8, 30, 0, 123000000, time.UTC)
+	createdAt := expected.Add(-time.Hour)
+	updatedAt := expected.Add(time.Millisecond)
+	script, db := openScriptedDB(t, []driver.Value{uint64(2), createdAt, updatedAt})
+	script.execResults = []driver.Result{
+		scriptResult{affected: 1},
+		scriptResult{affected: 2},
+		scriptResult{affected: 1},
+		scriptResult{affected: 1},
+		scriptResult{affected: 1},
+	}
+
+	updated, err := NewReportRepository(db).Update(context.Background(), 9, 12, 3, reporting.ReportInput{
+		Name: "Conversion v2", DefaultDays: 14, PointIDs: []uint64{7, 5}, ExpectedUpdatedAt: &expected,
+	})
+	require.NoError(t, err)
+	require.Equal(t, updatedAt, updated.UpdatedAt)
+	require.Len(t, script.execQueries, 5)
+	require.Contains(t, script.execQueries[1], "DELETE rp FROM custom_report_point")
+	for _, index := range []int{2, 3} {
+		require.Contains(t, script.execQueries[index], "p.project_id=?")
+		require.Contains(t, script.execQueries[index], "definition_state IN ('PUBLISHED','DEPRECATED')")
+	}
+	require.Contains(t, script.execQueries[4], "audit_log")
+	require.EqualValues(t, 9, script.execArgs[4][0].Value)
+	require.EqualValues(t, 3, script.execArgs[4][1].Value)
+	require.Equal(t, "UPDATE_REPORT", script.execArgs[4][2].Value)
+	require.Equal(t, "CUSTOM_REPORT", script.execArgs[4][3].Value)
+	require.EqualValues(t, 12, script.execArgs[4][4].Value)
+	require.Equal(t, 1, script.commits)
+	require.Zero(t, script.rollbacks)
+}
+
+func TestReportRepositoryResolvePointsFiltersDeduplicatesAndRestoresInputOrder(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRowSets = [][][]driver.Value{{
+		{uint64(7), "checkout", "Checkout", "PUBLISHED", "EXACT"},
+		{uint64(5), "view", "View", "DEPRECATED", "APPROXIMATE"},
+	}}
+
+	points, err := NewReportRepository(db).ResolvePoints(context.Background(), 9, []uint64{5, 7, 5, 8})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{5, 7}, []uint64{points[0].ID, points[1].ID})
+	require.Equal(t, []int{0, 1}, []int{points[0].SortNo, points[1].SortNo})
+	require.Len(t, script.queries, 1)
+	require.Contains(t, script.queries[0], "project_id=?")
+	require.Contains(t, script.queries[0], "definition_state IN ('PUBLISHED','DEPRECATED')")
 }
 
 func TestReportRepositoryGetScopesReportAndPointReadsToProject(t *testing.T) {

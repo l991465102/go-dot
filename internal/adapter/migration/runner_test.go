@@ -84,7 +84,7 @@ func TestClickHouseMigrationsEnableNonReplicatedDeduplication(t *testing.T) {
 	require.Contains(t, contents, "ALTER TABLE tracking_invalid_event MODIFY SETTING non_replicated_deduplication_window = 1000")
 }
 
-func TestMySQLCustomReportMigrationHasProjectIsolationAndRestrictedPointDeletion(t *testing.T) {
+func TestMySQLCustomReportMigrationHasRelationshipConstraints(t *testing.T) {
 	raw, err := fs.ReadFile(migrationFiles(t, "mysql"), "0002_custom_reports.sql")
 	require.NoError(t, err)
 	contents := string(raw)

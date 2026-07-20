@@ -468,17 +468,18 @@ func openScriptedDB(t *testing.T, row []driver.Value) (*dbScript, *sql.DB) {
 }
 
 type dbScript struct {
-	mu          sync.Mutex
-	row         []driver.Value
-	queryRows   [][]driver.Value
-	execErrors  []error
-	execResults []driver.Result
-	queryErrors []error
-	queries     []string
-	execQueries []string
-	execArgs    [][]driver.NamedValue
-	commits     int
-	rollbacks   int
+	mu           sync.Mutex
+	row          []driver.Value
+	queryRows    [][]driver.Value
+	queryRowSets [][][]driver.Value
+	execErrors   []error
+	execResults  []driver.Result
+	queryErrors  []error
+	queries      []string
+	execQueries  []string
+	execArgs     [][]driver.NamedValue
+	commits      int
+	rollbacks    int
 }
 
 type scriptedDriver struct{}
@@ -512,12 +513,19 @@ func (c *scriptedConn) QueryContext(_ context.Context, query string, _ []driver.
 			return nil, err
 		}
 	}
+	rows := [][]driver.Value{c.script.row}
+	if len(c.script.queryRowSets) > 0 {
+		rows = c.script.queryRowSets[0]
+		c.script.queryRowSets = c.script.queryRowSets[1:]
+		return &scriptedRows{rows: rows}, nil
+	}
 	row := c.script.row
 	if len(c.script.queryRows) > 0 {
 		row = c.script.queryRows[0]
 		c.script.queryRows = c.script.queryRows[1:]
 	}
-	return &scriptedRows{row: append([]driver.Value(nil), row...)}, nil
+	rows[0] = append([]driver.Value(nil), row...)
+	return &scriptedRows{rows: rows}, nil
 }
 func (c *scriptedConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.script.mu.Lock()
@@ -560,12 +568,16 @@ func (t *scriptedTx) Rollback() error {
 }
 
 type scriptedRows struct {
-	row  []driver.Value
-	read bool
+	rows [][]driver.Value
+	next int
 }
 
 func (r *scriptedRows) Columns() []string {
-	columns := make([]string, len(r.row))
+	columnCount := 0
+	if len(r.rows) > 0 {
+		columnCount = len(r.rows[0])
+	}
+	columns := make([]string, columnCount)
 	for i := range columns {
 		columns[i] = "column"
 	}
@@ -573,10 +585,10 @@ func (r *scriptedRows) Columns() []string {
 }
 func (r *scriptedRows) Close() error { return nil }
 func (r *scriptedRows) Next(dest []driver.Value) error {
-	if r.read || len(r.row) == 0 {
+	if r.next >= len(r.rows) || len(r.rows[r.next]) == 0 {
 		return io.EOF
 	}
-	r.read = true
-	copy(dest, r.row)
+	copy(dest, r.rows[r.next])
+	r.next++
 	return nil
 }

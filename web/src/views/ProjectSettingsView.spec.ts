@@ -97,4 +97,22 @@ describe('ProjectSettingsView', () => {
     expect(wrapper.text()).toContain('current-user')
     expect(wrapper.text()).not.toContain('stale-user')
   })
+
+  it('renders the write-key expiry in Asia/Shanghai', async () => {
+    const { pinia } = setup()
+    vi.mocked(projectsApi.getWriteKeyStatus).mockResolvedValue({
+      previous_key_active: true,
+      previous_key_expires_at: '2026-07-20T02:51:03Z',
+    })
+    const wrapper = mount(ProjectSettingsView, {
+      global: {
+        plugins: [pinia],
+        stubs: { ElAlert: { props: ['title'], template: '<div>{{ title }}</div>' } },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('旧密钥仍可使用至 2026-07-20 10:51:03（Asia/Shanghai，轮换后最多 24 小时）')
+    expect(wrapper.text()).not.toContain('2026-07-20T02:51:03Z')
+  })
 })

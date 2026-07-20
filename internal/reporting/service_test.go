@@ -335,7 +335,7 @@ func TestExportDailyQueriesCurrentResultAndBuildsWorkbook(t *testing.T) {
 	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, exporter, func() time.Time { return now })
 	in := ExportInput{
 		DailyQuery: DailyQuery{ProjectID: 9, StartDate: "2026-07-19", EndDate: "2026-07-20", PointIDs: []uint64{3}},
-		ReportName: "运营日报", ReportDescription: "核心指标",
+		ReportName: " 运营日报 ", ReportDescription: " 核心指标 ",
 	}
 
 	file, err := service.ExportDaily(context.Background(), 7, "alice", in)
@@ -370,6 +370,53 @@ func TestExportDailySanitizesFilenameAndFallsBackWhenNameIsEmpty(t *testing.T) {
 	file, err = newService().ExportDaily(context.Background(), 7, "alice", ExportInput{DailyQuery: query, ReportName: " /\\\n\t "})
 	require.NoError(t, err)
 	require.Equal(t, "自定义报表_20260720_20260720.xlsx", file.Filename)
+
+	file, err = newService().ExportDaily(context.Background(), 7, "alice", ExportInput{DailyQuery: query, ReportName: `周"报;中文`})
+	require.NoError(t, err)
+	require.Equal(t, "周报中文_20260720_20260720.xlsx", file.Filename)
+}
+
+func TestExportDailyValidatesUnicodeMetadataBoundariesAfterQuery(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Date(2026, 7, 20, 10, 51, 3, 0, location)
+	query := DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}}
+	tests := []struct {
+		name        string
+		reportName  string
+		description string
+		wantErr     error
+	}{
+		{name: "empty name allowed"},
+		{name: "128 rune name", reportName: " " + strings.Repeat("界", 128) + " "},
+		{name: "129 rune name", reportName: " " + strings.Repeat("界", 129) + " ", wantErr: ErrInvalid},
+		{name: "1000 rune description", reportName: "日报", description: " " + strings.Repeat("界", 1000) + " "},
+		{name: "1001 rune description", reportName: "日报", description: " " + strings.Repeat("界", 1001) + " ", wantErr: ErrInvalid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := &fakeRepository{resolved: []PointRef{{ID: 3, DefinitionState: tracking.Published, UVMode: tracking.Exact}}}
+			daily := &fakeDailyStore{}
+			exporter := &fakeExporter{}
+			service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, daily, exporter, func() time.Time { return now })
+
+			file, err := service.ExportDaily(context.Background(), 7, "alice", ExportInput{
+				DailyQuery: query, ReportName: test.reportName, ReportDescription: test.description,
+			})
+
+			require.Equal(t, 1, daily.calls, "metadata validation must follow the authorized daily query")
+			if test.wantErr != nil {
+				require.ErrorIs(t, err, test.wantErr)
+				require.Zero(t, exporter.calls)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 1, exporter.calls)
+			if test.reportName == "" {
+				require.Equal(t, "自定义报表_20260720_20260720.xlsx", file.Filename)
+			}
+		})
+	}
 }
 
 func TestExportDailyPropagatesQueryAndExporterErrors(t *testing.T) {
@@ -399,6 +446,16 @@ func TestExportDailyWithoutExporterReturnsInternalUnavailableError(t *testing.T)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrInvalid)
 	require.ErrorContains(t, err, "exporter unavailable")
+}
+
+func TestExportDailyUnauthorizedWithoutExporterReturnsForbiddenFirst(t *testing.T) {
+	service := NewService(&fakeAuthorizer{}, newFakeRepository(), &fakeDailyStore{}, nil, time.Now)
+	in := ExportInput{DailyQuery: DailyQuery{ProjectID: 9, StartDate: "2026-07-20", EndDate: "2026-07-20", PointIDs: []uint64{3}}}
+
+	_, err := service.ExportDaily(context.Background(), 7, "alice", in)
+
+	require.ErrorIs(t, err, project.ErrForbidden)
+	require.NotErrorIs(t, err, errExporterUnavailable)
 }
 
 type fakeAuthorizer struct {

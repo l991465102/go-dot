@@ -200,12 +200,17 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 }
 
 func (s *Service) ExportDaily(ctx context.Context, actor uint64, username string, in ExportInput) (ExportFile, error) {
-	if s.exporter == nil {
-		return ExportFile{}, errExporterUnavailable
-	}
 	result, err := s.QueryDaily(ctx, actor, in.DailyQuery)
 	if err != nil {
 		return ExportFile{}, err
+	}
+	if s.exporter == nil {
+		return ExportFile{}, errExporterUnavailable
+	}
+	in.ReportName = strings.TrimSpace(in.ReportName)
+	in.ReportDescription = strings.TrimSpace(in.ReportDescription)
+	if utf8.RuneCountInString(in.ReportName) > 128 || utf8.RuneCountInString(in.ReportDescription) > 1000 {
+		return ExportFile{}, ErrInvalid
 	}
 	contents, err := s.exporter.Build(ExportDocument{
 		Result: result, ReportName: in.ReportName, ReportDescription: in.ReportDescription,
@@ -219,7 +224,7 @@ func (s *Service) ExportDaily(ctx context.Context, actor uint64, username string
 
 func exportFilename(reportName, startDate, endDate string) string {
 	name := strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || unicode.IsControl(r) {
+		if r == '/' || r == '\\' || r == '"' || r == '\'' || r == ';' || unicode.IsControl(r) {
 			return -1
 		}
 		return r

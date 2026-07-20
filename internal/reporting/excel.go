@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
 	"github.com/xuri/excelize/v2"
 
@@ -35,6 +35,10 @@ func (ExcelExporter) Build(document ExportDocument) (contents []byte, returnErr 
 	if err != nil {
 		return nil, err
 	}
+	wrapStyle, err := book.NewStyle(&excelize.Style{Alignment: &excelize.Alignment{WrapText: true, Vertical: "top"}})
+	if err != nil {
+		return nil, err
+	}
 	if _, err = book.NewSheet(detailSheet); err != nil {
 		return nil, err
 	}
@@ -44,7 +48,7 @@ func (ExcelExporter) Build(document ExportDocument) (contents []byte, returnErr 
 	if err = writeDetailSheet(book, headerStyle, document.Result); err != nil {
 		return nil, err
 	}
-	if err = writeExplanationSheet(book, headerStyle, document); err != nil {
+	if err = writeExplanationSheet(book, headerStyle, wrapStyle, document); err != nil {
 		return nil, err
 	}
 	if err = book.DeleteSheet("Sheet1"); err != nil {
@@ -118,7 +122,7 @@ func writeDetailSheet(book *excelize.File, headerStyle int, result DailyResult) 
 	return nil
 }
 
-func writeExplanationSheet(book *excelize.File, headerStyle int, document ExportDocument) (returnErr error) {
+func writeExplanationSheet(book *excelize.File, headerStyle, wrapStyle int, document ExportDocument) (returnErr error) {
 	stream, err := book.NewStreamWriter(explanationSheet)
 	if err != nil {
 		return err
@@ -142,13 +146,13 @@ func writeExplanationSheet(book *excelize.File, headerStyle int, document Export
 	}
 	rows := [][]interface{}{
 		{excelize.Cell{StyleID: headerStyle, Value: "项目"}, excelize.Cell{StyleID: headerStyle, Value: "内容"}},
-		{"报表名称", safeSpreadsheetText(document.ReportName)},
-		{"报表说明", safeSpreadsheetText(document.ReportDescription)},
-		{"查询范围", safeSpreadsheetText(document.Result.StartDate + " 至 " + document.Result.EndDate)},
-		{"统计时区", "Asia/Shanghai"},
-		{"点位清单", safeSpreadsheetText(pointList(document.Result.Items))},
-		{"导出时间", document.ExportedAt.In(location).Format("2006-01-02 15:04:05")},
-		{"导出用户", safeSpreadsheetText(document.ExportedBy)},
+		{"报表名称", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.ReportName)}},
+		{"报表说明", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.ReportDescription)}},
+		{"查询范围", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.Result.StartDate + " 至 " + document.Result.EndDate)}},
+		{"统计时区", excelize.Cell{StyleID: wrapStyle, Value: "Asia/Shanghai"}},
+		{"点位清单", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(pointList(document.Result.Items))}},
+		{"导出时间", excelize.Cell{StyleID: wrapStyle, Value: document.ExportedAt.In(location).Format("2006-01-02 15:04:05")}},
+		{"导出用户", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.ExportedBy)}},
 	}
 	for index, row := range rows {
 		cell, coordinateErr := excelize.CoordinatesToCellName(1, index+1)
@@ -180,11 +184,15 @@ func pointList(items []DailyItem) string {
 }
 
 func safeSpreadsheetText(value string) string {
-	first, _ := utf8.DecodeRuneInString(value)
-	switch first {
-	case '=', '+', '-', '@':
-		return "'" + value
-	default:
-		return value
+	for _, current := range value {
+		if unicode.IsSpace(current) || unicode.IsControl(current) || current == '\ufeff' {
+			continue
+		}
+		switch current {
+		case '=', '+', '-', '@':
+			return "'" + value
+		}
+		break
 	}
+	return value
 }

@@ -48,6 +48,12 @@ func TestExcelExporterBuildsTwoSheetWorkbook(t *testing.T) {
 	require.Contains(t, explanationRows, []string{"统计时区", "Asia/Shanghai"})
 	require.Contains(t, explanationRows, []string{"导出用户", "alice"})
 	require.Contains(t, explanationRows, []string{"导出时间", "2026-07-20 10:51:03"})
+	styleID, err := book.GetCellStyle("报表说明", "B3")
+	require.NoError(t, err)
+	style, err := book.GetStyle(styleID)
+	require.NoError(t, err)
+	require.NotNil(t, style.Alignment)
+	require.True(t, style.Alignment.WrapText)
 }
 
 func TestExcelExporterProtectsEveryUserControlledTextCellFromFormulaInjection(t *testing.T) {
@@ -80,6 +86,29 @@ func TestExcelExporterProtectsEveryUserControlledTextCellFromFormulaInjection(t 
 		formula, err := book.GetCellFormula(target.sheet, target.cell)
 		require.NoError(t, err)
 		require.Empty(t, formula)
+	}
+}
+
+func TestSafeSpreadsheetTextDetectsOperatorsAfterIgnorablePrefix(t *testing.T) {
+	for _, value := range []string{
+		"\t=tab", "\r+carriage", "\n-line", "  @spaces", "\u00a0=value", "\ufeff+value",
+		"\t\r\n \u00a0\ufeff@combined",
+	} {
+		t.Run(value, func(t *testing.T) {
+			require.Equal(t, "'"+value, safeSpreadsheetText(value))
+
+			contents, err := (ExcelExporter{}).Build(ExportDocument{
+				Result:     DailyResult{StartDate: "2026-07-20", EndDate: "2026-07-20"},
+				ReportName: value, ExportedAt: time.Date(2026, 7, 20, 2, 51, 3, 0, time.UTC),
+			})
+			require.NoError(t, err)
+			book, err := excelize.OpenReader(bytes.NewReader(contents))
+			require.NoError(t, err)
+			formula, err := book.GetCellFormula("报表说明", "B2")
+			require.NoError(t, err)
+			require.Empty(t, formula)
+			require.NoError(t, book.Close())
+		})
 	}
 }
 

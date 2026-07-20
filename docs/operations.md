@@ -45,11 +45,14 @@ curl -sS http://127.0.0.1:8080/health/ready
 cp deploy/acceptance.env.example .env.acceptance
 docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
 docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml ps
+GO_DOT_E2E_ENV_FILE=.env.acceptance make test-e2e-bootstrap
 
 GO_DOT_INTEGRATION_BASE_URL=http://127.0.0.1:18080 \
 GO_DOT_REDIS_TEST_ADDRESS=127.0.0.1:16379 \
 GO_DOT_CLICKHOUSE_TEST_DSN='clickhouse://default:@127.0.0.1:19001/go_dot' \
 GO_DOT_INTEGRATION_FIXTURE_FILE=/tmp/go-dot-acceptance-fixture.env \
+GO_DOT_INTEGRATION_VIEWER_USERNAME=e2e_viewer \
+GO_DOT_INTEGRATION_VIEWER_PASSWORD=admin \
 make test-integration
 
 GO_DOT_E2E_BOOTSTRAP=1 \
@@ -65,9 +68,11 @@ make test-e2e
 
 验收后可删除这套隔离环境：`docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml down -v`；不要对默认项目执行 `down -v`。
 
-Integration 环境变量未配置时测试会跳过；一旦配置，依赖不可用必须失败。测试从 `admin/admin` 启动，改密，创建项目和三级分类，发布点位，重复提交同一批事件，验证 Redis PV=2/UV=1、ClickHouse `FINAL` 两条逻辑明细，并等待 Scheduler 提交 generation 后验证 exact hourly aggregate PV=2/UV=1。超时时会输出最后一组 raw/realtime/generation/aggregate 诊断。
+Integration 环境变量未配置时测试会跳过；一旦配置，依赖和两个 Viewer fixture 变量不可用必须失败。第一次 bootstrap 在全新栈中创建 `e2e_viewer`；测试再从 `admin/admin` 启动，改密，创建项目和三级分类，通过公开 API 给 Viewer 添加成员关系，发布 EXACT/APPROXIMATE 两种点位，并重复提交同一批五个事件。它会等待 Scheduler generation，验证 exact PV=2/UV=1、approximate PV=3/UV=2，随后从已保存报表重新读取点位顺序，查询“前一上海日零值 + 当前窗口实值”的两日矩阵，导出并重新打开 XLSX，最后验证 Viewer 可读/导出且保存返回 403。超时时会输出最后一组 raw/realtime/generation/aggregate 诊断。
 
-`GO_DOT_E2E_BOOTSTRAP=1` 会运行已提交的 `tests/e2e/bootstrap.sh`，从当前 admin 密码 hash 创建专用 workflow admin、首次改密账号和 Viewer，不需要手工 SQL。浏览器会通过 UI 创建项目、Domain/Module/Scene、草稿和发布点位，验证发布后不可编辑；随后 Viewer 直接调用项目设置、key、成员、分类和点位管理写接口并逐一断言 403。只有 7 项全部通过才算完整 E2E。
+Scheduler 只刷新当前和前一个小时，因此 live acceptance 不伪造历史聚合、不直接写 ClickHouse，也不依赖恰好在上海零点运行。跨上海自然日分桶由 `internal/adapter/clickhouse/daily_report_test.go` 对 `toDate(hour, 'Asia/Shanghai')` 的查询合约，以及 `internal/reporting/service_test.go` 的日期矩阵、当天未完整和历史上海民用日边界测试提供确定性覆盖。
+
+`GO_DOT_E2E_BOOTSTRAP=1` 会再次运行已提交的幂等 `tests/e2e/bootstrap.sh`，用改密后的当前 admin 密码 hash 刷新专用 workflow admin、首次改密账号和 Viewer，不需要手工 SQL。浏览器会通过 UI 创建项目、Domain/Module/Scene、草稿和发布点位，验证发布后不可编辑；随后 Viewer 直接调用项目设置、key、成员、分类和点位管理写接口并逐一断言 403。Admin 还会查询、保存并下载双点位自定义报表，诊断页会验证上海格式时间。当前套件 8 项全部通过才算完整 E2E。
 
 ## 4. 故障恢复
 

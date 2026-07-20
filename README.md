@@ -76,6 +76,15 @@ npm --prefix web run dev
 
 API、Worker、Scheduler 必须使用相同的数据库、Redis Stream 名称、consumer group 和密钥配置。API 不能代替 Worker 或 Scheduler。
 
+升级已有部署时，先备份 MySQL 和 ClickHouse，再用与目标版本完全相同的配置执行迁移；`0002_custom_reports.sql` 会创建自定义报表配置表。迁移完成后需重启 API、Worker、Scheduler，并重新构建/发布 Web，不能只刷新浏览器静态文件：
+
+```bash
+make migrate
+docker compose up -d --build api worker scheduler web
+docker compose ps
+curl -fsS http://127.0.0.1:8080/health/ready
+```
+
 ## 从点位定义到上报
 
 管理后台中的标准流程是：
@@ -151,6 +160,47 @@ res, err := http.DefaultClient.Do(req)
 - Redis 提供当前窗口实时结果；ClickHouse 提供明细和已提交的历史聚合。页面会明确标记实时/聚合延迟与精确/近似 UV。
 - 客户端时间超出允许窗口或点位选择 `SERVER` 时，以服务端时间统计。
 
+## 自定义报表
+
+进入管理后台后，从左侧项目导航选择“自定义报表”。未选择“已保存报表”时是临时报表：日期、点位、名称等编辑仅存在于当前页面，不会覆盖已保存配置；Admin 使用“另存为”创建命名报表，加载已有报表后再用“保存配置”显式更新。Viewer 可以加载、查询和导出，但创建、更新、删除均由后端返回 HTTP 403。
+
+- 新建临时报表默认最近 30 个上海自然日；一次查询/保存最多 90 个自然日、100 个点位，至少选择 1 个已发布或已废弃点位。
+- 日期边界固定为 `Asia/Shanghai`。当天数据标为“未完整”，Scheduler 尚未提交的新小时可能暂未显示；不要把它解读为最终日结值。
+- 事件、聚合和 API 中的绝对时间仍以 UTC 存储/传输；后台和 Excel 的绝对时间统一显示为 `Asia/Shanghai` 的 `YYYY-MM-DD HH:mm:ss`。
+- 导出的 XLSX 恰好包含 `数据明细`、`报表说明` 两个工作表。日期×点位组合完整输出，无数据组合为 0；名称、说明、点位文案等用户文本会阻止以 `= + - @` 开头的内容成为 Excel 公式。
+
+先登录取得 access token，再可直接调用查询接口：
+
+```bash
+export GO_DOT_ACCESS_TOKEN='<登录响应中的access_token>'
+curl -fsS http://127.0.0.1:8080/api/v1/statistics/daily-by-point/query \
+  -H "Authorization: Bearer $GO_DOT_ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "project_id": 1,
+    "start_date": "2026-07-01",
+    "end_date": "2026-07-30",
+    "point_ids": [101, 102]
+  }'
+```
+
+导出使用相同查询条件，并补充报表名称和说明；服务端返回 XLSX 下载：
+
+```bash
+curl -fS http://127.0.0.1:8080/api/v1/statistics/daily-by-point/export \
+  -H "Authorization: Bearer $GO_DOT_ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "project_id": 1,
+    "start_date": "2026-07-01",
+    "end_date": "2026-07-30",
+    "point_ids": [101, 102],
+    "report_name": "月度经营报表",
+    "report_description": "精确与近似 UV 点位合并展示"
+  }' \
+  --output custom-report.xlsx
+```
+
 ## 账号与权限
 
 - 系统账号需要先登录获取 access token；refresh token 只保存在 HttpOnly Cookie。
@@ -158,7 +208,7 @@ res, err := http.DefaultClient.Do(req)
 - 项目 `VIEWER` 只能读取。后端会对管理写接口返回 HTTP 403，不能依赖前端隐藏按钮实现权限。
 - 发布点位不可直接编辑或物理删除，确保历史数据可解释。
 
-生产 HTTPS 部署必须设置 `GO_DOT_SECURE_COOKIES=true`。JWT secret、visitor master key、数据库密码和 write key 应由 Secret Manager 注入，不能提交到仓库、写入镜像或输出到日志。两个 master key 必须相互独立；丢失 visitor key 会改变后续 UV 身份哈希口径。
+生产 HTTPS 部署必须设置 `GO_DOT_SECURE_COOKIES=true`。JWT secret、visitor master key、数据库密码和 write key 应由 Secret Manager 注入，不能提交到仓库、写入镜像或输出到日志。两个 master key 必须相互独立。visitor master key 是统计口径的一部分，应在备份和灾备中永久保存：常规发布不得轮换；丢失或紧急轮换会让轮换后的访客哈希与历史 UV 无法连续去重，必须记录切换时刻并在报表中标注口径断点。紧急轮换 JWT secret 会立即使现有登录令牌失效，需要所有账号重新登录。项目 write key 应通过项目设置的轮换接口更换，旧 key 仅保留 24 小时宽限，不要直接修改数据库哈希。
 
 ## 健康检查与指标
 
@@ -187,10 +237,13 @@ docker compose config
 ```bash
 cp deploy/acceptance.env.example .env.acceptance
 docker compose --env-file .env.acceptance -p go-dot-acceptance -f docker-compose.yml -f deploy/docker-compose.acceptance.yml up -d --build
+GO_DOT_E2E_ENV_FILE=.env.acceptance make test-e2e-bootstrap
 GO_DOT_INTEGRATION_BASE_URL=http://127.0.0.1:18080 \
 GO_DOT_REDIS_TEST_ADDRESS=127.0.0.1:16379 \
 GO_DOT_CLICKHOUSE_TEST_DSN='clickhouse://default:@127.0.0.1:19001/go_dot' \
 GO_DOT_INTEGRATION_FIXTURE_FILE=/tmp/go-dot-acceptance-fixture.env \
+GO_DOT_INTEGRATION_VIEWER_USERNAME=e2e_viewer \
+GO_DOT_INTEGRATION_VIEWER_PASSWORD=admin \
 make test-integration
 GO_DOT_E2E_BOOTSTRAP=1 \
 GO_DOT_E2E_ENV_FILE=.env.acceptance \
@@ -203,7 +256,7 @@ GO_DOT_E2E_VIEWER_PASSWORD='Admin-Changed-2026!' \
 make test-e2e
 ```
 
-Integration 会把故障测试所需的一次性 fixture 写入权限为 `0600` 的临时文件。按 [docs/operations.md](docs/operations.md) source 该文件后运行 `make test-fault`。压测还需设置 `GO_DOT_LOAD_WRITE_KEY` 和可访问的 Scheduler `/metrics` 地址后执行 `make load-test`。
+第一次 `test-e2e-bootstrap` 在全新栈中创建 Viewer 账号，Integration 再通过公开成员 API 把它加入新项目并验证读/导出与 403 写权限。后面的 `GO_DOT_E2E_BOOTSTRAP=1` 会在 Admin 改密后幂等刷新浏览器账号密码。Integration 仅验收 Scheduler 支持的当前/前一小时窗口，并用“前一上海自然日为零 + 当前窗口有值”验证两日完整矩阵，避免依赖恰好在上海零点运行。它还会把故障测试所需的一次性 fixture 写入权限为 `0600` 的临时文件。按 [docs/operations.md](docs/operations.md) source 该文件后运行 `make test-fault`。压测还需设置 `GO_DOT_LOAD_WRITE_KEY` 和可访问的 Scheduler `/metrics` 地址后执行 `make load-test`。
 
 ## 生产部署
 

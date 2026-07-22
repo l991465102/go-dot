@@ -5,6 +5,7 @@ import { useProjectStore } from '@/stores/project'
 import * as api from '@/api/tracking'
 import type { Category, Point, PointFilters } from '@/api/tracking'
 import PointWizard from '@/components/points/PointWizard.vue'
+import { behaviorTypeOptions, definitionStateOptions, developmentStateOptions, platformOptions } from '@/constants/enum-options'
 
 const route = useRoute()
 const router = useRouter()
@@ -102,10 +103,10 @@ onBeforeUnmount(() => controller?.abort())
       <main class="point-panel">
         <form class="filter-bar" @submit.prevent="filters.page = 1; load()">
           <input v-model="filters.q" aria-label="搜索点位" placeholder="搜索编码或名称">
-          <select v-model="filters.definition_state" aria-label="定义状态"><option value="">全部定义状态</option><option>DRAFT</option><option>PUBLISHED</option><option>DEPRECATED</option></select>
-          <select v-model="filters.development_state" aria-label="开发状态"><option value="">全部开发状态</option><option>PENDING</option><option>DEVELOPING</option><option>TESTING</option><option>ONLINE</option></select>
-          <select v-model="filters.behavior_type" aria-label="行为类型"><option value="">全部行为</option><option v-for="v in ['PAGE_VIEW','ELEMENT_EXPOSE','ELEMENT_CLICK','BUSINESS_ACTION','BUSINESS_RESULT','CUSTOM']" :key="v">{{ v }}</option></select>
-          <select v-model="filters.platform" aria-label="平台"><option value="">全部平台</option><option v-for="v in ['web','ios','android','mini_program','server']" :key="v">{{ v }}</option></select>
+          <select v-model="filters.definition_state" aria-label="定义状态"><option value="">全部定义状态</option><option v-for="option in definitionStateOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select>
+          <select v-model="filters.development_state" aria-label="开发状态"><option value="">全部开发状态</option><option v-for="option in developmentStateOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select>
+          <select v-model="filters.behavior_type" aria-label="行为类型"><option value="">全部行为</option><option v-for="option in behaviorTypeOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select>
+          <select v-model="filters.platform" aria-label="平台"><option value="">全部平台</option><option v-for="option in platformOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select>
           <input v-model="filters.owner" aria-label="负责人" placeholder="负责人">
           <input v-model="filters.created_from" type="date" aria-label="创建开始日期">
           <input v-model="filters.created_to" type="date" aria-label="创建结束日期">

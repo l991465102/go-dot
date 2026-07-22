@@ -39,4 +39,28 @@ describe('PointWorkbenchView route draft editing', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('只能编辑当前项目中的草稿点位'))
     expect(wrapper.find('[aria-label="点位编辑向导"]').exists()).toBe(false)
   })
+
+  it('shows Chinese filter labels and submits the original enum values', async () => {
+    const wrapper = mount(PointWorkbenchView)
+    await vi.waitFor(() => expect(trackingApi.listPoints).toHaveBeenCalled())
+
+    expect(wrapper.get('[aria-label="定义状态"]').text()).toContain('草稿')
+    expect(wrapper.get('[aria-label="定义状态"]').text()).toContain('已发布')
+    expect(wrapper.get('[aria-label="开发状态"]').text()).toContain('开发中')
+    expect(wrapper.get('[aria-label="行为类型"]').text()).toContain('页面浏览')
+    expect(wrapper.get('[aria-label="平台"]').text()).toContain('小程序')
+
+    await wrapper.get('[aria-label="定义状态"]').setValue('PUBLISHED')
+    await wrapper.get('[aria-label="开发状态"]').setValue('TESTING')
+    await wrapper.get('[aria-label="行为类型"]').setValue('ELEMENT_CLICK')
+    await wrapper.get('[aria-label="平台"]').setValue('mini_program')
+    await wrapper.get('.filter-bar').trigger('submit')
+
+    await vi.waitFor(() => expect(trackingApi.listPoints).toHaveBeenLastCalledWith(9, expect.objectContaining({
+      definition_state: 'PUBLISHED',
+      development_state: 'TESTING',
+      behavior_type: 'ELEMENT_CLICK',
+      platform: 'mini_program',
+    }), expect.any(AbortSignal)))
+  })
 })

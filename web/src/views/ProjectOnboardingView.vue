@@ -3,6 +3,7 @@ import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
+import { timezoneOptions } from '@/constants/enum-options'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -64,8 +65,7 @@ async function signOut() {
           <small class="field-help">小写字母开头，可使用数字、下划线和短横线。</small>
           <label for="project-timezone">统计时区</label>
           <el-select id="project-timezone" v-model="form.timezone" size="large">
-            <el-option label="Asia/Shanghai (UTC+8)" value="Asia/Shanghai" />
-            <el-option label="UTC" value="UTC" />
+            <el-option v-for="option in timezoneOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
           <label for="allowed-origins">允许上报的 Web 域名（可选）</label>
           <el-input id="allowed-origins" v-model="form.origins" type="textarea" :rows="3" placeholder="每行一个，例如 https://www.example.com" />

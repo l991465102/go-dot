@@ -6,7 +6,7 @@ import * as trackingApi from '@/api/tracking'
 
 vi.mock('@/api/tracking', async () => {
   const actual = await vi.importActual<typeof import('@/api/tracking')>('@/api/tracking')
-  return { ...actual, createPoint: vi.fn(), updateDraft: vi.fn(), publishPoint: vi.fn(), getPoint: vi.fn() }
+  return { ...actual, createPoint: vi.fn(), updateDraft: vi.fn(), publishPoint: vi.fn(), getPoint: vi.fn(), updateDevelopmentState: vi.fn() }
 })
 
 const scene = { id: 3, project_id: 9, parent_id: 2, code: 'detail', name: '商品详情', level: 'SCENE' as const, sort_order: 0, active: true, created_by: 1 }
@@ -61,5 +61,21 @@ describe('PointWizard', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('商品详情浏览'))
     expect(wrapper.find('[data-test=edit-point]').exists()).toBe(false)
     expect(wrapper.find('[data-test=copy-point]').exists()).toBe(false)
+  })
+
+  it('shows Chinese development options and submits the protocol value', async () => {
+    vi.mocked(trackingApi.getPoint).mockResolvedValue({ ...baseDraft, definition_state: 'PUBLISHED' })
+    vi.mocked(trackingApi.updateDevelopmentState).mockResolvedValue({ ...baseDraft, definition_state: 'PUBLISHED', development_state: 'TESTING' })
+    const wrapper = mount(PointDetailView, { props: { projectId: 9, pointId: 7, canMutate: true } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('商品详情浏览'))
+
+    const select = wrapper.get('select')
+    expect(select.text()).toContain('待开发')
+    expect(select.text()).toContain('开发中')
+    expect(select.text()).toContain('测试中')
+    expect(select.text()).toContain('已上线')
+
+    await select.setValue('TESTING')
+    expect(trackingApi.updateDevelopmentState).toHaveBeenCalledWith(9, 7, 'TESTING')
   })
 })

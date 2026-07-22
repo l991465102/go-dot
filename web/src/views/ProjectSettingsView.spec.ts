@@ -37,6 +37,17 @@ const dialogStub = {
   props: ['modelValue'],
   template: '<div v-if="modelValue" data-test="rotation-confirm-dialog"><slot /><slot name="footer" /></div>',
 }
+const selectStub = {
+  props: ['modelValue'],
+  emits: ['update:modelValue'],
+  template: '<select :value="modelValue" @change="$emit(\'update:modelValue\', $event.target.value)"><slot /></select>',
+}
+const optionStub = { props: ['label', 'value'], template: '<option :value="value">{{ label }}</option>' }
+const inputStub = {
+  props: ['modelValue'], emits: ['update:modelValue'],
+  template: '<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)">',
+}
+const formStub = { emits: ['submit'], template: '<form @submit.prevent="$emit(\'submit\', $event)"><slot /></form>' }
 
 describe('ProjectSettingsView', () => {
   beforeEach(() => {
@@ -98,6 +109,26 @@ describe('ProjectSettingsView', () => {
 
     expect(projectsApi.rotateWriteKey).toHaveBeenCalledTimes(1)
     expect(projectsApi.rotateWriteKey).toHaveBeenCalledWith(9)
+  })
+
+  it('shows Chinese member roles and submits the protocol value', async () => {
+    const { pinia } = setup()
+    const wrapper = mount(ProjectSettingsView, {
+      global: { plugins: [pinia], stubs: { ElDialog: dialogStub, ElSelect: selectStub, ElOption: optionStub, ElInput: inputStub, ElForm: formStub } },
+    })
+    await flushPromises()
+
+    const form = wrapper.get('[data-test="member-mutation-form"]')
+    const role = form.get('select')
+    expect(role.text()).toContain('管理员')
+    expect(role.text()).toContain('只读用户')
+
+    await form.get('input').setValue('reader')
+    await role.setValue('ADMIN')
+    await form.trigger('submit')
+    await flushPromises()
+
+    expect(projectsApi.addProjectMember).toHaveBeenCalledWith(9, 'reader', 'ADMIN')
   })
 
   it('shows the one-time key and Shanghai expiry after a confirmed rotation', async () => {

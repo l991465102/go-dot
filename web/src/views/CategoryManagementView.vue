@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import * as api from '@/api/tracking'
 import type { Category, CategoryInput, CategoryLevel } from '@/api/tracking'
+import { categoryLevelOptions } from '@/constants/enum-options'
 
 const route = useRoute(), projects = useProjectStore()
 const projectId = computed(() => Number(route.params.projectId)), canMutate = computed(() => projects.canMutate)
@@ -35,6 +36,6 @@ function changeLevel(value: string) { form.value.level = value as CategoryLevel;
         </div>
       </article>
     </div>
-    <div v-if="dialog" class="modal-backdrop"><form class="modal-card wizard-form" role="dialog" aria-modal="true" @submit.prevent="save"><h2>{{ editing ? '编辑分类' : '新增分类' }}</h2><label>层级<select :value="form.level" :disabled="!!editing" @change="changeLevel(($event.target as HTMLSelectElement).value)"><option>DOMAIN</option><option>MODULE</option><option>SCENE</option></select></label><label v-if="form.level !== 'DOMAIN'">父分类<select v-model.number="form.parent_id" :disabled="!!editing"><option :value="undefined">请选择</option><option v-for="p in parents" :key="p.id" :value="p.id">{{ p.name }}</option></select></label><label>编码<input v-model="form.code" :disabled="!!editing" required></label><label>名称<input v-model="form.name" required></label><label>排序<input v-model.number="form.sort_order" type="number"></label><label>说明<textarea v-model="form.description" /></label><footer class="wizard-actions"><button type="button" class="secondary-button" @click="dialog = false">取消</button><button class="primary-button" type="submit">保存</button></footer></form></div>
+    <div v-if="dialog" class="modal-backdrop"><form class="modal-card wizard-form" role="dialog" aria-modal="true" @submit.prevent="save"><h2>{{ editing ? '编辑分类' : '新增分类' }}</h2><label>层级<select :value="form.level" :disabled="!!editing" @change="changeLevel(($event.target as HTMLSelectElement).value)"><option v-for="option in categoryLevelOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label><label v-if="form.level !== 'DOMAIN'">父分类<select v-model.number="form.parent_id" :disabled="!!editing"><option :value="undefined">请选择</option><option v-for="p in parents" :key="p.id" :value="p.id">{{ p.name }}</option></select></label><label>编码<input v-model="form.code" :disabled="!!editing" required></label><label>名称<input v-model="form.name" required></label><label>排序<input v-model.number="form.sort_order" type="number"></label><label>说明<textarea v-model="form.description" /></label><footer class="wizard-actions"><button type="button" class="secondary-button" @click="dialog = false">取消</button><button class="primary-button" type="submit">保存</button></footer></form></div>
   </section>
 </template>

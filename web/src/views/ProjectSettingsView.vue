@@ -13,6 +13,7 @@ import {
   type WriteKeyStatus,
 } from '@/api/projects'
 import { DISPLAY_TIMEZONE, formatShanghaiDateTime } from '@/utils/datetime'
+import { projectRoleOptions } from '@/constants/enum-options'
 
 const projects = useProjectStore()
 const project = computed(() => projects.currentProject)
@@ -173,7 +174,7 @@ onBeforeUnmount(() => controller?.abort())
       <h2>项目成员</h2>
       <el-form v-if="projects.canMutate" data-test="member-mutation-form" class="inline-settings" @submit.prevent="add">
         <el-input v-model="memberForm.username" placeholder="已存在账号用户名" />
-        <el-select v-model="memberForm.role"><el-option label="管理员" value="ADMIN" /><el-option label="只读" value="VIEWER" /></el-select>
+        <el-select v-model="memberForm.role"><el-option v-for="option in projectRoleOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select>
         <el-button native-type="submit" type="primary" :disabled="!memberForm.username.trim()">添加或更新</el-button>
       </el-form>
       <el-table :data="members">

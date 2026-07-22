@@ -5,6 +5,9 @@ export type DefinitionState = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED'
 export type DevelopmentState = 'PENDING' | 'DEVELOPING' | 'TESTING' | 'ONLINE'
 export type BehaviorType = 'PAGE_VIEW' | 'ELEMENT_EXPOSE' | 'ELEMENT_CLICK' | 'BUSINESS_ACTION' | 'BUSINESS_RESULT' | 'CUSTOM'
 export type PropertyType = 'STRING' | 'INTEGER' | 'DECIMAL' | 'BOOLEAN' | 'DATETIME' | 'ENUM' | 'ARRAY'
+export type Platform = 'web' | 'ios' | 'android' | 'mini_program' | 'server'
+export type UVMode = 'APPROXIMATE' | 'EXACT'
+export type TimeBasis = 'CLIENT' | 'SERVER'
 
 export interface Category { id: number; project_id: number; parent_id?: number; code: string; name: string; level: CategoryLevel; description?: string; sort_order: number; active: boolean; created_by: number }
 export interface CategoryInput { parent_id?: number; code: string; name: string; level: CategoryLevel; description?: string; sort_order: number }
@@ -14,12 +17,12 @@ export interface Point {
   id: number; project_id: number; category_id: number; category: Category; category_path: Array<Pick<Category, 'id'|'code'|'name'|'level'>>;
   code: string; name: string; description?: string; behavior_type: BehaviorType | ''; definition_state: DefinitionState; development_state: DevelopmentState;
   trigger_page?: string; trigger_timing?: string; trigger_count_rule?: string; abnormal_trigger_rule?: string; count_pv: boolean; count_uv: boolean;
-  uv_mode: 'APPROXIMATE'|'EXACT'; time_basis: 'CLIENT'|'SERVER'; supported_platforms: string[]; supported_channels: string[];
+  uv_mode: UVMode; time_basis: TimeBasis; supported_platforms: Platform[]; supported_channels: string[];
   product_owner?: string; developer_owner?: string; requirement_url?: string; properties: PointProperty[]; published_version?: number;
   deprecation_reason?: string; replacement_point_id?: number; created_by: number; updated_by: number;
 }
 export type PointDraft = Omit<Point, 'id'|'project_id'|'category'|'category_path'|'definition_state'|'created_by'|'updated_by'|'published_version'|'deprecation_reason'|'replacement_point_id'>
-export interface PointFilters { q?: string; category_id?: number; definition_state?: DefinitionState|''; development_state?: DevelopmentState|''; behavior_type?: BehaviorType|''; platform?: string; owner?: string; created_from?: string; created_to?: string; page?: number; page_size?: number }
+export interface PointFilters { q?: string; category_id?: number; definition_state?: DefinitionState|''; development_state?: DevelopmentState|''; behavior_type?: BehaviorType|''; platform?: Platform|''; owner?: string; created_from?: string; created_to?: string; page?: number; page_size?: number }
 export interface PointList { items: Point[]; total: number }
 
 export async function listCategories(projectId: number, signal?: AbortSignal) { return (await apiClient.get<Category[]>(`/projects/${projectId}/categories`, { signal })).data }

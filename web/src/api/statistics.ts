@@ -1,11 +1,14 @@
 import { apiClient } from './client'
 
+export type StatisticsGranularity = 'hour' | 'day'
+export type StatisticsRangeHours = 24 | 168 | 720
+
 export interface StatisticsQuery {
   projectId: number
   start: string
   end: string
   timezone: string
-  granularity: 'hour' | 'day'
+  granularity: StatisticsGranularity
   domainCategoryCode?: string
   moduleCategoryCode?: string
   sceneCategoryCode?: string

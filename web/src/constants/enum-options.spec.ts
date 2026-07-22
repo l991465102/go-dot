@@ -7,6 +7,8 @@ import {
   platformOptions,
   projectRoleOptions,
   propertyTypeOptions,
+  statisticsGranularityOptions,
+  statisticsRangeOptions,
   timeBasisOptions,
   timezoneOptions,
   uvModeOptions,
@@ -41,6 +43,15 @@ describe('enum options', () => {
     expect(timezoneOptions).toEqual([
       { value: 'Asia/Shanghai', label: '上海时区（UTC+8）' },
       { value: 'UTC', label: '协调世界时（UTC）' },
+    ])
+    expect(statisticsRangeOptions).toEqual([
+      { value: 24, label: '24 小时' },
+      { value: 168, label: '7 天' },
+      { value: 720, label: '30 天' },
+    ])
+    expect(statisticsGranularityOptions).toEqual([
+      { value: 'hour', label: '小时' },
+      { value: 'day', label: '天' },
     ])
   })
 })

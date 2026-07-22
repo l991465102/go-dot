@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import PointWorkbenchView from './PointWorkbenchView.vue'
 import * as trackingApi from '@/api/tracking'
+import type { Point } from '@/api/tracking'
 
 const mocks = vi.hoisted(() => ({ route: { params: { projectId: '9' }, query: {} as Record<string, string | undefined> }, replace: vi.fn(), push: vi.fn() }))
 vi.mock('vue-router', () => ({ useRoute: () => mocks.route, useRouter: () => ({ replace: mocks.replace, push: mocks.push }) }))
@@ -12,7 +13,7 @@ vi.mock('@/api/tracking', async () => {
 })
 
 const scene = { id: 3, project_id: 9, parent_id: 2, code: 'detail', name: '商品详情', level: 'SCENE' as const, sort_order: 0, active: true, created_by: 1 }
-const draft = { id: 7, project_id: 9, category_id: 3, category: scene, category_path: [], code: 'product_detail_view', name: '商品详情浏览', behavior_type: 'PAGE_VIEW' as const, definition_state: 'DRAFT' as const, development_state: 'PENDING' as const, count_pv: true, count_uv: true, uv_mode: 'APPROXIMATE' as const, time_basis: 'CLIENT' as const, supported_platforms: ['web'], supported_channels: [], properties: [], created_by: 1, updated_by: 1 }
+const draft: Point = { id: 7, project_id: 9, category_id: 3, category: scene, category_path: [], code: 'product_detail_view', name: '商品详情浏览', behavior_type: 'PAGE_VIEW', definition_state: 'DRAFT', development_state: 'PENDING', count_pv: true, count_uv: true, uv_mode: 'APPROXIMATE', time_basis: 'CLIENT', supported_platforms: ['web'], supported_channels: [], properties: [], created_by: 1, updated_by: 1 }
 
 describe('PointWorkbenchView route draft editing', () => {
   beforeEach(() => {

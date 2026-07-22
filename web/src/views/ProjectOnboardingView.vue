@@ -4,11 +4,12 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 import { timezoneOptions } from '@/constants/enum-options'
+import type { CreateProjectTimezone } from '@/api/projects'
 
 const router = useRouter()
 const auth = useAuthStore()
 const projects = useProjectStore()
-const form = reactive({ code: '', name: '', timezone: 'Asia/Shanghai', origins: '' })
+const form = reactive({ code: '', name: '', timezone: 'Asia/Shanghai' as CreateProjectTimezone, origins: '' })
 const writeKey = ref('')
 const error = ref('')
 const codeValid = computed(() => /^[a-z][a-z0-9_-]{1,63}$/.test(form.code))

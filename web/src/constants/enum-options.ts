@@ -1,90 +1,114 @@
-import type { ProjectRole } from '@/api/projects'
+import type { CreateProjectTimezone, ProjectRole } from '@/api/projects'
+import type { StatisticsGranularity, StatisticsRangeHours } from '@/api/statistics'
 import type {
   BehaviorType,
   CategoryLevel,
   DefinitionState,
   DevelopmentState,
+  Platform,
+  PointProperty,
   PropertyType,
+  TimeBasis,
+  UVMode,
 } from '@/api/tracking'
 
-export interface EnumOption<T extends string> {
+export interface EnumOption<T extends string | number> {
   readonly value: T
   readonly label: string
 }
 
-export type Platform = 'web' | 'ios' | 'android' | 'mini_program' | 'server'
-export type UVMode = 'APPROXIMATE' | 'EXACT'
-export type TimeBasis = 'CLIENT' | 'SERVER'
-export type SupportedTimezone = 'Asia/Shanghai' | 'UTC'
-export type ArrayItemType = Exclude<PropertyType, 'ENUM' | 'ARRAY'>
+type Labels<T extends string | number> = { readonly [Value in T]: string }
+type ArrayItemType = NonNullable<PointProperty['array_item_type']>
 
-export const definitionStateOptions = [
-  { value: 'DRAFT', label: '草稿' },
-  { value: 'PUBLISHED', label: '已发布' },
-  { value: 'DEPRECATED', label: '已废弃' },
-] as const satisfies readonly EnumOption<DefinitionState>[]
+function stringOptions<T extends string>(labels: Labels<T>): readonly EnumOption<T>[] {
+  return Object.entries(labels).map(([value, label]) => ({ value: value as T, label: label as string }))
+}
 
-export const developmentStateOptions = [
-  { value: 'PENDING', label: '待开发' },
-  { value: 'DEVELOPING', label: '开发中' },
-  { value: 'TESTING', label: '测试中' },
-  { value: 'ONLINE', label: '已上线' },
-] as const satisfies readonly EnumOption<DevelopmentState>[]
+function numberOptions<T extends number>(labels: Labels<T>): readonly EnumOption<T>[] {
+  return Object.entries(labels).map(([value, label]) => ({ value: Number(value) as T, label: label as string }))
+}
 
-export const behaviorTypeOptions = [
-  { value: 'PAGE_VIEW', label: '页面浏览' },
-  { value: 'ELEMENT_EXPOSE', label: '元素曝光' },
-  { value: 'ELEMENT_CLICK', label: '元素点击' },
-  { value: 'BUSINESS_ACTION', label: '业务操作' },
-  { value: 'BUSINESS_RESULT', label: '业务结果' },
-  { value: 'CUSTOM', label: '自定义' },
-] as const satisfies readonly EnumOption<BehaviorType>[]
+export const definitionStateOptions = stringOptions<DefinitionState>({
+  DRAFT: '草稿',
+  PUBLISHED: '已发布',
+  DEPRECATED: '已废弃',
+})
 
-export const categoryLevelOptions = [
-  { value: 'DOMAIN', label: '业务域' },
-  { value: 'MODULE', label: '业务模块' },
-  { value: 'SCENE', label: '业务场景' },
-] as const satisfies readonly EnumOption<CategoryLevel>[]
+export const developmentStateOptions = stringOptions<DevelopmentState>({
+  PENDING: '待开发',
+  DEVELOPING: '开发中',
+  TESTING: '测试中',
+  ONLINE: '已上线',
+})
 
-export const platformOptions = [
-  { value: 'web', label: 'Web' },
-  { value: 'ios', label: 'iOS' },
-  { value: 'android', label: 'Android' },
-  { value: 'mini_program', label: '小程序' },
-  { value: 'server', label: '服务端' },
-] as const satisfies readonly EnumOption<Platform>[]
+export const behaviorTypeOptions = stringOptions<BehaviorType>({
+  PAGE_VIEW: '页面浏览',
+  ELEMENT_EXPOSE: '元素曝光',
+  ELEMENT_CLICK: '元素点击',
+  BUSINESS_ACTION: '业务操作',
+  BUSINESS_RESULT: '业务结果',
+  CUSTOM: '自定义',
+})
 
-export const propertyTypeOptions = [
-  { value: 'STRING', label: '字符串' },
-  { value: 'INTEGER', label: '整数' },
-  { value: 'DECIMAL', label: '小数' },
-  { value: 'BOOLEAN', label: '布尔值' },
-  { value: 'DATETIME', label: '日期时间' },
-  { value: 'ENUM', label: '枚举' },
-  { value: 'ARRAY', label: '数组' },
-] as const satisfies readonly EnumOption<PropertyType>[]
+export const categoryLevelOptions = stringOptions<CategoryLevel>({
+  DOMAIN: '业务域',
+  MODULE: '业务模块',
+  SCENE: '业务场景',
+})
 
-export const arrayItemTypeOptions = propertyTypeOptions.filter(
-  (option): option is Extract<(typeof propertyTypeOptions)[number], { value: ArrayItemType }> =>
-    option.value !== 'ENUM' && option.value !== 'ARRAY',
-)
+export const platformOptions = stringOptions<Platform>({
+  web: 'Web',
+  ios: 'iOS',
+  android: 'Android',
+  mini_program: '小程序',
+  server: '服务端',
+})
 
-export const uvModeOptions = [
-  { value: 'APPROXIMATE', label: '近似统计（HLL）' },
-  { value: 'EXACT', label: '精确统计' },
-] as const satisfies readonly EnumOption<UVMode>[]
+export const propertyTypeOptions = stringOptions<PropertyType>({
+  STRING: '字符串',
+  INTEGER: '整数',
+  DECIMAL: '小数',
+  BOOLEAN: '布尔值',
+  DATETIME: '日期时间',
+  ENUM: '枚举',
+  ARRAY: '数组',
+})
 
-export const timeBasisOptions = [
-  { value: 'CLIENT', label: '客户端事件时间' },
-  { value: 'SERVER', label: '服务端接收时间' },
-] as const satisfies readonly EnumOption<TimeBasis>[]
+export const arrayItemTypeOptions = stringOptions<ArrayItemType>({
+  STRING: '字符串',
+  INTEGER: '整数',
+  DECIMAL: '小数',
+  BOOLEAN: '布尔值',
+  DATETIME: '日期时间',
+})
 
-export const projectRoleOptions = [
-  { value: 'ADMIN', label: '管理员' },
-  { value: 'VIEWER', label: '只读用户' },
-] as const satisfies readonly EnumOption<ProjectRole>[]
+export const uvModeOptions = stringOptions<UVMode>({
+  APPROXIMATE: '近似统计（HLL）',
+  EXACT: '精确统计',
+})
 
-export const timezoneOptions = [
-  { value: 'Asia/Shanghai', label: '上海时区（UTC+8）' },
-  { value: 'UTC', label: '协调世界时（UTC）' },
-] as const satisfies readonly EnumOption<SupportedTimezone>[]
+export const timeBasisOptions = stringOptions<TimeBasis>({
+  CLIENT: '客户端事件时间',
+  SERVER: '服务端接收时间',
+})
+
+export const projectRoleOptions = stringOptions<ProjectRole>({
+  ADMIN: '管理员',
+  VIEWER: '只读用户',
+})
+
+export const timezoneOptions = stringOptions<CreateProjectTimezone>({
+  'Asia/Shanghai': '上海时区（UTC+8）',
+  UTC: '协调世界时（UTC）',
+})
+
+export const statisticsRangeOptions = numberOptions<StatisticsRangeHours>({
+  24: '24 小时',
+  168: '7 天',
+  720: '30 天',
+})
+
+export const statisticsGranularityOptions = stringOptions<StatisticsGranularity>({
+  hour: '小时',
+  day: '天',
+})

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import PointWizard from './PointWizard.vue'
 import PointDetailView from '@/views/PointDetailView.vue'
 import * as trackingApi from '@/api/tracking'
+import type { Point } from '@/api/tracking'
 
 vi.mock('@/api/tracking', async () => {
   const actual = await vi.importActual<typeof import('@/api/tracking')>('@/api/tracking')
@@ -11,7 +12,7 @@ vi.mock('@/api/tracking', async () => {
 
 const scene = { id: 3, project_id: 9, parent_id: 2, code: 'detail', name: '商品详情', level: 'SCENE' as const, sort_order: 0, active: true, created_by: 1 }
 const moduleCategory = { ...scene, id: 2, level: 'MODULE' as const }
-const baseDraft = {
+const baseDraft: Point = {
   id: 7, project_id: 9, category_id: 3, category: scene, category_path: [], code: 'product_detail_view', name: '商品详情浏览',
   behavior_type: 'PAGE_VIEW' as const, definition_state: 'DRAFT' as const, development_state: 'PENDING' as const,
   count_pv: true, count_uv: true, uv_mode: 'APPROXIMATE' as const, time_basis: 'CLIENT' as const,

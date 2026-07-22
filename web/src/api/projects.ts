@@ -1,6 +1,7 @@
 import { apiClient } from './client'
 
 export type ProjectRole = 'ADMIN' | 'VIEWER'
+export type CreateProjectTimezone = 'Asia/Shanghai' | 'UTC'
 
 interface ApiProject {
   id: number
@@ -28,7 +29,7 @@ export interface CreateProjectInput {
   code: string
   name: string
   allowedOrigins: string[]
-  timezone: string
+  timezone: CreateProjectTimezone
 }
 
 export interface CreatedProject {
@@ -75,7 +76,7 @@ export async function createProject(input: CreateProjectInput): Promise<CreatedP
   })
   return { project: mapProject(data.project), writeKey: data.write_key }
 }
-export async function updateProjectSettings(projectId: number, input: Pick<CreateProjectInput, 'timezone'|'allowedOrigins'>) {
+export async function updateProjectSettings(projectId: number, input: { timezone: string; allowedOrigins: string[] }) {
   const { data } = await apiClient.patch<ApiProject>(`/projects/${projectId}/settings`, { timezone: input.timezone, allowed_origins: input.allowedOrigins })
   return mapProject(data)
 }

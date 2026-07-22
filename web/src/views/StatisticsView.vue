@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
-import { completedDayRange, completedHourRange, getRealtime, getSummary, getTrend, type StatisticsSummary, type TrendPoint } from '@/api/statistics'
+import { completedDayRange, completedHourRange, getRealtime, getSummary, getTrend, type StatisticsGranularity, type StatisticsRangeHours, type StatisticsSummary, type TrendPoint } from '@/api/statistics'
 import TrendChart from '@/components/statistics/TrendChart.vue'
+import { statisticsGranularityOptions, statisticsRangeOptions } from '@/constants/enum-options'
 
 const projects = useProjectStore()
 const project = computed(() => projects.currentProject)
-const filters = reactive({ hours: 24, granularity: 'hour' as 'hour'|'day', domain: '', module: '', scene: '', point: '', platform: '', channel: '' })
+const filters = reactive({ hours: 24 as StatisticsRangeHours, granularity: 'hour' as StatisticsGranularity, domain: '', module: '', scene: '', point: '', platform: '', channel: '' })
 const summary = ref<StatisticsSummary>(); const realtime = ref<StatisticsSummary>(); const trend = ref<TrendPoint[]>([])
 const loading = ref(false); const error = ref(''); let controller: AbortController | undefined
 async function load() {
@@ -28,8 +29,8 @@ watch(() => projects.currentProjectId, load, { immediate: true }); onBeforeUnmou
 <template>
   <section aria-labelledby="statistics-title"><header class="page-heading"><div><p class="eyebrow">ANALYTICS</p><h1 id="statistics-title">统计分析</h1><p>ClickHouse 历史趋势约 1 分钟延迟；指定单一同口径点位后可查询 Redis 实时数据。</p></div></header>
     <el-form class="filter-panel" label-position="top" @submit.prevent="load">
-      <el-form-item label="范围"><el-select v-model="filters.hours"><el-option label="24 小时" :value="24"/><el-option label="7 天" :value="168"/><el-option label="30 天" :value="720"/></el-select></el-form-item>
-      <el-form-item label="粒度"><el-select v-model="filters.granularity"><el-option label="小时" value="hour"/><el-option label="天" value="day"/></el-select></el-form-item>
+      <el-form-item label="范围"><el-select v-model="filters.hours"><el-option v-for="option in statisticsRangeOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select></el-form-item>
+      <el-form-item label="粒度"><el-select v-model="filters.granularity"><el-option v-for="option in statisticsGranularityOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select></el-form-item>
       <el-form-item label="业务域编码"><el-input v-model="filters.domain"/></el-form-item><el-form-item label="模块编码"><el-input v-model="filters.module"/></el-form-item><el-form-item label="场景编码"><el-input v-model="filters.scene"/></el-form-item>
       <el-form-item label="点位编码"><el-input v-model="filters.point" placeholder="实时查询必须填写"/></el-form-item><el-form-item label="平台"><el-input v-model="filters.platform"/></el-form-item><el-form-item label="渠道"><el-input v-model="filters.channel"/></el-form-item>
       <el-button native-type="submit" type="primary" :loading="loading">查询</el-button>

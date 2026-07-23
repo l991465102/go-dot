@@ -3,6 +3,7 @@ package reporting
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -339,6 +340,56 @@ func TestQueryDailyHasNoTotalUVJSONField(t *testing.T) {
 	}
 }
 
+func TestQueryDailyOnlyBuildsSelectedPropertySectionsAndFillsDimensionZeros(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.FixedZone("Shanghai", 8*60*60))
+	repo := newFakeRepository()
+	repo.points[3] = PointRef{ID: 3, Code: "checkout", Name: "结算", DefinitionState: tracking.Published, UVMode: tracking.Exact}
+	repo.properties = map[string]PropertyRef{
+		"3:amount": {
+			PropertySelection: PropertySelection{PointID: 3, PropertyCode: "amount"},
+			PointCode:         "checkout", PropertyName: "金额", Type: tracking.Decimal,
+			Analytics: tracking.PropertyAnalytics{Mode: tracking.AnalyticsMetric, Aggregations: []tracking.MetricAggregation{tracking.AggregateCount, tracking.AggregateSum, tracking.AggregateAvg}},
+			UVMode:    tracking.Exact,
+		},
+		"3:status": {
+			PropertySelection: PropertySelection{PointID: 3, PropertyCode: "status"},
+			PointCode:         "checkout", PropertyName: "状态", Type: tracking.Enum, EnumValues: []string{"success", "fail"},
+			Analytics: tracking.PropertyAnalytics{Mode: tracking.AnalyticsDimension}, UVMode: tracking.Exact,
+		},
+	}
+	propertyStore := &fakePropertyDailyStore{data: PropertyDailyData{
+		Metrics:    []MetricAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "amount", Count: 2, Sum: "6", Min: "2", Max: "4"}},
+		Dimensions: []DimensionAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "status", Value: "success", EventCount: 3, UV: 2}},
+	}}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, &fakeDailyStore{}, nil, func() time.Time { return now }).
+		SetPropertyDailyStore(propertyStore)
+
+	result, err := service.QueryDaily(context.Background(), 7, DailyQuery{
+		ProjectID: 9, StartDate: "2026-07-19", EndDate: "2026-07-20", PointIDs: []uint64{3},
+		PropertySelections: []PropertySelection{
+			{PointID: 3, PropertyCode: "amount", Aggregations: []tracking.MetricAggregation{tracking.AggregateSum, tracking.AggregateAvg}},
+			{PointID: 3, PropertyCode: "status"},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.MetricSections, 1)
+	require.Equal(t, []string{"checkout_amount_sum", "checkout_amount_avg"}, []string{
+		result.MetricSections[0].Columns[0].Key, result.MetricSections[0].Columns[1].Key,
+	})
+	require.Equal(t, "2026-07-20", result.MetricSections[0].Rows[0].Date)
+	require.Equal(t, "0", *result.MetricSections[0].Rows[0].Values["checkout_amount_sum"])
+	require.Nil(t, result.MetricSections[0].Rows[0].Values["checkout_amount_avg"])
+	require.Equal(t, "3", *result.MetricSections[0].Rows[1].Values["checkout_amount_avg"])
+	require.Len(t, result.DimensionSections, 1)
+	require.Equal(t, []string{"success", "fail"}, []string{
+		result.DimensionSections[0].Rows[2].Value, result.DimensionSections[0].Rows[3].Value,
+	})
+	require.EqualValues(t, 3, result.DimensionSections[0].Rows[2].EventCount)
+	require.Equal(t, []string{"2026-07-20"}, result.IncompleteDates)
+	require.Equal(t, []string{"amount", "status"}, []string{propertyStore.properties[0].PropertyCode, propertyStore.properties[1].PropertyCode})
+	require.Equal(t, []tracking.MetricAggregation{tracking.AggregateSum, tracking.AggregateAvg}, propertyStore.properties[0].Aggregations)
+}
+
 func TestExportDailyQueriesCurrentResultAndBuildsWorkbook(t *testing.T) {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	require.NoError(t, err)
@@ -494,6 +545,7 @@ func (a *fakeAuthorizer) RequireRole(_ context.Context, _, _ uint64, allowed ...
 type fakeRepository struct {
 	reports           []Report
 	points            map[uint64]PointRef
+	properties        map[string]PropertyRef
 	lastInput         ReportInput
 	lastPointIDs      []uint64
 	createCalls       int
@@ -582,11 +634,32 @@ func (r *fakeRepository) ResolvePoints(_ context.Context, projectID uint64, ids 
 	return resolved, nil
 }
 
+func (r *fakeRepository) ResolveProperties(_ context.Context, _ uint64, selections []PropertySelection) ([]PropertyRef, error) {
+	resolved := make([]PropertyRef, 0, len(selections))
+	for _, selection := range selections {
+		if property, ok := r.properties[fmt.Sprintf("%d:%s", selection.PointID, selection.PropertyCode)]; ok {
+			property.PropertySelection = selection
+			resolved = append(resolved, property)
+		}
+	}
+	return resolved, nil
+}
+
 type fakeDailyStore struct {
 	items  []DailyAggregate
 	err    error
 	calls  int
 	filter DailyFilter
+}
+
+type fakePropertyDailyStore struct {
+	data       PropertyDailyData
+	properties []PropertyRef
+}
+
+func (s *fakePropertyDailyStore) QueryPropertyDaily(_ context.Context, _ PropertyDailyFilter, properties []PropertyRef) (PropertyDailyData, error) {
+	s.properties = append([]PropertyRef(nil), properties...)
+	return s.data, nil
 }
 
 type fakeExporter struct {

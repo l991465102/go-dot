@@ -52,7 +52,11 @@ func runScheduler(ctx context.Context) error {
 		return fmt.Errorf("ping redis: %w", err)
 	}
 	projectRepo := mysqladapter.NewProjectRepository(mysqlDB)
-	aggregate := statistics.NewAggregatorWithLookback(clickhouseadapter.NewStatisticsStore(chDB), projectRepo, nil, cfg.Scheduler.AggregateLookbackHours)
+	aggregateStores := statistics.ProjectHourRefresherGroup{
+		clickhouseadapter.NewStatisticsStore(chDB),
+		clickhouseadapter.NewPropertyStatisticsStore(chDB),
+	}
+	aggregate := statistics.NewAggregatorWithLookback(aggregateStores, projectRepo, nil, cfg.Scheduler.AggregateLookbackHours)
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))
 	metrics := observability.NewMetrics()
 	logger := observability.NewJSONLogger(os.Stdout, "scheduler")

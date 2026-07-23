@@ -4,9 +4,9 @@ import { useRoute } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import {
   createReport, deleteReport, exportDaily, getReport, listReports, queryDaily, updateReport,
-  type DailyResult, type ReportMutation, type ReportPoint, type SavedReport,
+  type DailyResult, type PropertySelection, type ReportMutation, type ReportPoint, type SavedReport,
 } from '@/api/reports'
-import { listCategories, listPoints, type Category } from '@/api/tracking'
+import { listCategories, listPoints, type Category, type MetricAggregation, type PointProperty } from '@/api/tracking'
 import { formatShanghaiDateTime } from '@/utils/datetime'
 import { buildDailyWideTable } from '@/utils/report-wide-table'
 
@@ -47,6 +47,7 @@ const editable = reactive({
   name: '', description: '', defaultDays: 30,
   dateRange: null as string[] | null,
   points: [] as ReportPoint[],
+  propertySelections: [] as PropertySelection[],
 })
 
 const hasMorePoints = computed(() => pointPage.value > 0 && (
@@ -120,6 +121,13 @@ function validQuery() {
   if (!range) return
   if (!editable.points.length) { error.value = '请至少选择一个点位'; return }
   if (editable.points.length > 100) { error.value = '最多选择 100 个点位'; return }
+  if (editable.propertySelections.length > 20) { error.value = '最多选择 20 个统计属性'; return }
+  if (editable.propertySelections.filter((selection) => propertyDefinition(selection)?.analytics?.mode === 'DIMENSION').length > 5) { error.value = '最多选择 5 个分类维度'; return }
+  for (const selection of editable.propertySelections) {
+    const property = propertyDefinition(selection)
+    if (!property) { error.value = '所选属性已不在点位定义中，请重新选择'; return }
+    if (property.analytics?.mode === 'METRIC' && !selection.aggregations?.length) { error.value = `请为 ${property.name} 至少选择一种聚合方式`; return }
+  }
   return range
 }
 function mutation(): ReportMutation | undefined {
@@ -127,14 +135,18 @@ function mutation(): ReportMutation | undefined {
   const days = Number(editable.defaultDays)
   if (!Number.isInteger(days) || days < 1 || days > 90) { error.value = '默认天数必须是 1 至 90 的整数'; return }
   if (!validQuery()) return
-  return { name: editable.name.trim(), description: editable.description.trim(), default_days: days, point_ids: editable.points.map((point) => point.id) }
+  return { name: editable.name.trim(), description: editable.description.trim(), default_days: days, point_ids: editable.points.map((point) => point.id), property_selections: normalizedSelections() }
 }
 function snapshot(report: SavedReport): SavedReport {
-  return { ...report, points: report.points?.map((point) => ({ ...point })) }
+  return {
+    ...report,
+    points: report.points?.map((point) => ({ ...point, properties: point.properties?.map((property) => ({ ...property, analytics: property.analytics ? { ...property.analytics, aggregations: [...(property.analytics.aggregations ?? [])] } : undefined })) })),
+    properties: report.properties?.map((property) => ({ ...property, aggregations: [...(property.aggregations ?? [])], analytics: { ...property.analytics, aggregations: [...(property.analytics.aggregations ?? [])] } })),
+  }
 }
 function resetEditable(days = 30) {
   editable.name = ''; editable.description = ''; editable.defaultDays = days
-  editable.dateRange = rangeForDays(days); editable.points = []; lastResult.value = undefined
+  editable.dateRange = rangeForDays(days); editable.points = []; editable.propertySelections = []; lastResult.value = undefined
 }
 function setSelectedReportId(value: number | undefined) {
   suppressSelectionWatch = true
@@ -154,12 +166,16 @@ function invalidateContext(includeProject = false) {
 }
 function rebuildAvailablePoints() {
   const merged = new Map<number, ReportPoint>()
+  editable.points = editable.points.map((point) => {
+    const loaded = pointResults.get(point.id)
+    return loaded ? { ...loaded, ...point, properties: loaded.properties ?? point.properties } : point
+  })
   for (const point of editable.points) merged.set(point.id, point)
   for (const point of pointResults.values()) if (!merged.has(point.id)) merged.set(point.id, point)
   availablePoints.value = [...merged.values()]
 }
 function reportPoint(point: Awaited<ReturnType<typeof listPoints>>['items'][number]): ReportPoint {
-  return { id: point.id, code: point.code, name: point.name, definition_state: point.definition_state, uv_mode: point.uv_mode, sort_no: 0 }
+  return { id: point.id, code: point.code, name: point.name, definition_state: point.definition_state, uv_mode: point.uv_mode, sort_no: 0, properties: point.properties }
 }
 
 async function loadPointPage(reset = false) {
@@ -221,6 +237,9 @@ function applySavedReport(report: SavedReport) {
   editable.name = next.name; editable.description = next.description; editable.defaultDays = next.default_days
   editable.dateRange = rangeForDays(next.default_days)
   editable.points = [...(next.points ?? [])].sort((a, b) => a.sort_no - b.sort_no).map((point) => ({ ...point }))
+  editable.propertySelections = [...(next.properties ?? [])].sort((a, b) => (a.sort_no ?? 0) - (b.sort_no ?? 0)).map((property) => ({
+    point_id: property.point_id, property_code: property.property_code, aggregations: [...(property.aggregations ?? [])],
+  }))
   rebuildAvailablePoints(); lastResult.value = undefined
 }
 function enterTemporaryMode() {
@@ -256,6 +275,8 @@ function selectPointIds(value: unknown) {
   if (ids.length > 100) { error.value = '最多选择 100 个点位'; ids = ids.slice(0, 100) }
   const byId = new Map(availablePoints.value.map((point) => [point.id, point]))
   editable.points = ids.flatMap((id) => byId.has(id) ? [{ ...byId.get(id)! }] : [])
+  const selected = new Set(ids)
+  editable.propertySelections = editable.propertySelections.filter((selection) => selected.has(selection.point_id))
   rebuildAvailablePoints()
 }
 function movePoint(index: number, offset: number) {
@@ -263,7 +284,47 @@ function movePoint(index: number, offset: number) {
   if (target < 0 || target >= editable.points.length) return
   const next = [...editable.points]; [next[index], next[target]] = [next[target]!, next[index]!]; editable.points = next
 }
-function removePoint(id: number) { editable.points = editable.points.filter((point) => point.id !== id); rebuildAvailablePoints() }
+function removePoint(id: number) {
+  editable.points = editable.points.filter((point) => point.id !== id)
+  editable.propertySelections = editable.propertySelections.filter((selection) => selection.point_id !== id)
+  rebuildAvailablePoints()
+}
+
+function analyticsProperties(point: ReportPoint): PointProperty[] {
+  return (point.properties ?? []).filter((property) => property.analytics?.mode && property.analytics.mode !== 'NONE')
+}
+function propertySelection(pointId: number, code: string) {
+  return editable.propertySelections.find((selection) => selection.point_id === pointId && selection.property_code === code)
+}
+function propertyDefinition(selection: PropertySelection) {
+  return editable.points.find((point) => point.id === selection.point_id)?.properties?.find((property) => property.code === selection.property_code)
+}
+function toggleProperty(point: ReportPoint, property: PointProperty, checked: boolean) {
+  editable.propertySelections = editable.propertySelections.filter((selection) => !(selection.point_id === point.id && selection.property_code === property.code))
+  if (checked) {
+    if (editable.propertySelections.length >= 20) { error.value = '最多选择 20 个统计属性'; return }
+    if (property.analytics?.mode === 'DIMENSION' && editable.propertySelections.filter((selection) => propertyDefinition(selection)?.analytics?.mode === 'DIMENSION').length >= 5) { error.value = '最多选择 5 个分类维度'; return }
+    editable.propertySelections.push({
+      point_id: point.id, property_code: property.code,
+      aggregations: property.analytics?.mode === 'METRIC' ? [...(property.analytics.aggregations?.slice(0, 1) ?? ['COUNT'])] : undefined,
+    })
+  }
+}
+function toggleReportAggregation(pointId: number, code: string, aggregation: MetricAggregation, checked: boolean) {
+  const selection = propertySelection(pointId, code)
+  if (!selection) return
+  const current = selection.aggregations ?? []
+  selection.aggregations = checked ? [...new Set([...current, aggregation])] : current.filter((item) => item !== aggregation)
+}
+function normalizedSelections(): PropertySelection[] {
+  const order = new Map(editable.points.map((point, index) => [point.id, index]))
+  return editable.propertySelections
+    .map((selection) => ({ ...selection, aggregations: selection.aggregations ? [...selection.aggregations] : undefined }))
+    .sort((a, b) => (order.get(a.point_id) ?? 0) - (order.get(b.point_id) ?? 0) || a.property_code.localeCompare(b.property_code))
+}
+function aggregationLabel(value: MetricAggregation) {
+  return ({ COUNT: '有值次数', SUM: '求和', AVG: '平均值', MIN: '最小值', MAX: '最大值' } as const)[value]
+}
 
 function replaceReport(report: SavedReport) {
   const normalized = snapshot({ ...report, points: report.points ?? editable.points.map((point, index) => ({ ...point, sort_no: index })) })
@@ -314,7 +375,7 @@ async function runQuery() {
   const id = projectId.value; const epoch = contextEpoch
   querying.value = true; success.value = ''; error.value = ''
   try {
-    const result = await queryDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id) }, active.signal)
+    const result = await queryDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_selections: normalizedSelections() }, active.signal)
     if (owns(active, epoch, id, queryController)) lastResult.value = result
   } catch (cause) { if (owns(active, epoch, id, queryController) && !isCanceled(cause)) error.value = userError(cause, '报表查询失败') }
   finally { if (owns(active, epoch, id, queryController)) querying.value = false }
@@ -324,7 +385,7 @@ async function download() {
   const id = projectId.value; const epoch = contextEpoch; const token = ++sequence; exportToken = token
   exporting.value = true; success.value = ''; error.value = ''
   try {
-    const { blob, filename } = await exportDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), report_name: editable.name.trim(), report_description: editable.description.trim() })
+    const { blob, filename } = await exportDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_selections: normalizedSelections(), report_name: editable.name.trim(), report_description: editable.description.trim() })
     if (!operationOwns(token, epoch, id, 'export')) return
     const url = URL.createObjectURL(blob)
     try { const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename; anchor.click() }
@@ -350,6 +411,7 @@ watch(selectedReportId, (value) => {
 watch(categoryId, () => { void loadPointPage(true) })
 watch(() => editable.dateRange?.join('|') ?? '', invalidateQueryForEdit)
 watch(() => editable.points.map((point) => point.id).join(','), invalidateQueryForEdit)
+watch(() => JSON.stringify(editable.propertySelections), invalidateQueryForEdit, { deep: true })
 onBeforeUnmount(() => { invalidateContext(true) })
 </script>
 
@@ -397,6 +459,23 @@ onBeforeUnmount(() => { invalidateContext(true) })
             <el-button :data-test="`move-point-down-${point.id}`" :aria-label="`下移点位 ${point.name}`" :disabled="index === editable.points.length - 1" @click="movePoint(index, 1)">↓</el-button>
             <el-button :data-test="`remove-point-${point.id}`" :aria-label="`移除点位 ${point.name}`" @click="removePoint(point.id)">移除</el-button>
           </div>
+          <div v-if="analyticsProperties(point).length" class="report-property-picker">
+            <strong>需要查看的属性</strong>
+            <div v-for="property in analyticsProperties(point)" :key="property.code" class="report-property-option">
+              <label>
+                <input type="checkbox" :checked="!!propertySelection(point.id, property.code)" @change="toggleProperty(point, property, ($event.target as HTMLInputElement).checked)">
+                {{ property.name }}（{{ property.code }}）
+              </label>
+              <div v-if="property.analytics?.mode === 'METRIC' && propertySelection(point.id, property.code)" class="aggregation-options">
+                <label v-for="aggregation in property.analytics.aggregations ?? []" :key="aggregation">
+                  <input type="checkbox" :checked="propertySelection(point.id, property.code)?.aggregations?.includes(aggregation)" @change="toggleReportAggregation(point.id, property.code, aggregation, ($event.target as HTMLInputElement).checked)">
+                  {{ aggregationLabel(aggregation) }}
+                </label>
+              </div>
+              <small v-else-if="property.analytics?.mode === 'DIMENSION'">分类统计：事件数、UV、占比</small>
+            </div>
+          </div>
+          <small v-else class="field-help">此点位没有启用属性统计</small>
         </div>
       </div>
       <footer class="report-actions"><el-button data-test="query-report" type="primary" :loading="querying" :disabled="mutating" @click="runQuery">查询</el-button><el-button data-test="export-report" :loading="exporting" :disabled="mutating" @click="download">导出 Excel</el-button></footer>
@@ -406,11 +485,32 @@ onBeforeUnmount(() => { invalidateContext(true) })
       <h2 id="report-result-title">查询结果</h2>
       <template v-if="lastResult">
         <p class="report-timezone">统计时区：{{ lastResult.timezone }}</p>
+        <el-alert v-if="lastResult.incomplete_dates?.length" type="warning" :closable="false" :title="`以下日期数据仍可能变化：${lastResult.incomplete_dates.join('、')}`" />
         <div class="report-summary-grid"><el-card><span>点位数</span><strong>{{ lastResult.point_count }}</strong></el-card><el-card><span>天数</span><strong>{{ lastResult.day_count }}</strong></el-card><el-card><span>总 PV</span><strong>{{ lastResult.total_pv }}</strong></el-card></div>
+        <h3>点位统计</h3>
         <el-table :data="wideTable?.rows ?? []" empty-text="暂无统计数据">
           <el-table-column prop="date" label="时间" min-width="120" fixed />
           <el-table-column v-for="column in wideTable?.columns ?? []" :key="column.key" :prop="column.key" :label="column.label" min-width="150" />
         </el-table>
+        <template v-for="(section, sectionIndex) in lastResult.metric_sections ?? []" :key="`metric-${sectionIndex}`">
+          <h3>数值属性</h3>
+          <el-table :data="section.rows" empty-text="暂无数值属性数据">
+            <el-table-column prop="date" label="时间" min-width="120" fixed />
+            <el-table-column v-for="column in section.columns" :key="column.key" :label="column.label" min-width="160">
+              <template #default="{ row }">{{ row.values[column.key] ?? '—' }}</template>
+            </el-table-column>
+          </el-table>
+        </template>
+        <section v-for="section in lastResult.dimension_sections ?? []" :key="`${section.point_id}-${section.property_code}`" class="dimension-result">
+          <h3>分类属性：{{ section.point_code }} / {{ section.property_name }}（{{ section.property_code }}）</h3>
+          <el-table :data="section.rows" empty-text="暂无分类属性数据">
+            <el-table-column prop="date" label="时间" min-width="120" />
+            <el-table-column prop="value" label="属性值" min-width="180" />
+            <el-table-column prop="event_count" label="事件数" min-width="110" />
+            <el-table-column prop="uv" label="UV" min-width="110" />
+            <el-table-column label="占比" min-width="110"><template #default="{ row }">{{ (row.share * 100).toFixed(2) }}%</template></el-table-column>
+          </el-table>
+        </section>
       </template>
       <el-empty v-else description="配置日期和点位后开始查询" />
     </section>

@@ -159,7 +159,7 @@ describe('CustomReportsView', () => {
     await wrapper.get('[data-test="query-report"]').trigger('click')
     await flushPromises()
 
-    expect(reportsApi.queryDaily).toHaveBeenCalledWith({ project_id: 9, start_date: '2026-07-20', end_date: '2026-07-21', point_ids: [2, 1] }, expect.any(AbortSignal))
+    expect(reportsApi.queryDaily).toHaveBeenCalledWith({ project_id: 9, start_date: '2026-07-20', end_date: '2026-07-21', point_ids: [2, 1], property_selections: [] }, expect.any(AbortSignal))
     expect(wrapper.text()).toContain('统计时区：Asia/Shanghai')
     expect(wrapper.text()).toContain('时间')
     expect(wrapper.text()).toContain('deprecated_pv')
@@ -178,13 +178,13 @@ describe('CustomReportsView', () => {
 
     await wrapper.get('[data-test="save-as-report"]').trigger('click')
     await flushPromises()
-    expect(reportsApi.createReport).toHaveBeenCalledWith(9, { name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1] })
+    expect(reportsApi.createReport).toHaveBeenCalledWith(9, { name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], property_selections: [] })
     expect(wrapper.text()).toContain('报表已创建')
 
     await wrapper.get('[data-test="save-report"]').trigger('click')
     await flushPromises()
     expect(reportsApi.updateReport).toHaveBeenCalledWith(9, 7, {
-      name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], expected_updated_at: 'snapshot-v1',
+      name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], property_selections: [], expected_updated_at: 'snapshot-v1',
     })
 
     await wrapper.get('[data-test="save-report"]').trigger('click')
@@ -195,7 +195,7 @@ describe('CustomReportsView', () => {
     await wrapper.get('[data-test="export-report"]').trigger('click')
     await flushPromises()
     expect(reportsApi.exportDaily).toHaveBeenCalledWith({
-      project_id: 9, start_date: '2026-07-19', end_date: '2026-07-20', point_ids: [2, 1],
+      project_id: 9, start_date: '2026-07-19', end_date: '2026-07-20', point_ids: [2, 1], property_selections: [],
       report_name: '核心日报', report_description: '当前编辑',
     })
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
@@ -207,6 +207,40 @@ describe('CustomReportsView', () => {
     await wrapper.get('[data-test="confirm-delete-report"]').trigger('click')
     await flushPromises()
     expect(reportsApi.deleteReport).toHaveBeenCalledWith(9, 7)
+  })
+
+  it('queries only selected properties and selected metric aggregations', async () => {
+    const metricPoint = point(1, 'checkout', '结算', 'PUBLISHED') as unknown as trackingApi.Point
+    metricPoint.properties = [{
+      code: 'amount', name: '金额', type: 'DECIMAL', required: false, sort_order: 0,
+      analytics: { mode: 'METRIC', aggregations: ['COUNT', 'SUM', 'AVG'] },
+    }]
+    vi.mocked(trackingApi.listPoints).mockReset()
+    vi.mocked(trackingApi.listPoints)
+      .mockResolvedValueOnce({ items: [metricPoint], total: 1 })
+      .mockResolvedValueOnce({ items: [], total: 0 })
+    vi.mocked(reportsApi.queryDaily).mockResolvedValue({
+      timezone: 'Asia/Shanghai', start_date: '2026-06-22', end_date: '2026-07-21',
+      point_count: 1, day_count: 30, total_pv: 0, items: [],
+      metric_sections: [{ columns: [], rows: [] }],
+    })
+
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+    componentByTest(wrapper, 'point-select').vm.$emit('update:modelValue', [1])
+    await wrapper.vm.$nextTick()
+    const propertyCheckbox = wrapper.find('.report-property-option > label input')
+    await propertyCheckbox.setValue(true)
+    const sumCheckbox = wrapper.findAll('.report-property-option .aggregation-options input')
+      .find((input) => input.element.parentElement?.textContent?.includes('求和'))
+    await sumCheckbox!.setValue(true)
+    await wrapper.get('[data-test="query-report"]').trigger('click')
+    await flushPromises()
+
+    expect(reportsApi.queryDaily).toHaveBeenCalledWith(expect.objectContaining({
+      point_ids: [1],
+      property_selections: [{ point_id: 1, property_code: 'amount', aggregations: ['COUNT', 'SUM'] }],
+    }), expect.any(AbortSignal))
   })
 
   it('lets viewers load, query, and export while hiding every mutation control', async () => {

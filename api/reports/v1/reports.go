@@ -7,30 +7,32 @@ import (
 )
 
 type CreateReq struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	DefaultDays int      `json:"default_days"`
-	PointIDs    []uint64 `json:"point_ids"`
+	Name               string                        `json:"name"`
+	Description        string                        `json:"description"`
+	DefaultDays        int                           `json:"default_days"`
+	PointIDs           []uint64                      `json:"point_ids"`
+	PropertySelections []reporting.PropertySelection `json:"property_selections"`
 }
 
 func (r CreateReq) ReportInput() reporting.ReportInput {
 	return reporting.ReportInput{
-		Name: r.Name, Description: r.Description, DefaultDays: r.DefaultDays, PointIDs: r.PointIDs,
+		Name: r.Name, Description: r.Description, DefaultDays: r.DefaultDays, PointIDs: r.PointIDs, PropertySelections: r.PropertySelections,
 	}
 }
 
 type UpdateReq struct {
-	Name              string     `json:"name"`
-	Description       string     `json:"description"`
-	DefaultDays       int        `json:"default_days"`
-	PointIDs          []uint64   `json:"point_ids"`
-	ExpectedUpdatedAt *time.Time `json:"expected_updated_at"`
+	Name               string                        `json:"name"`
+	Description        string                        `json:"description"`
+	DefaultDays        int                           `json:"default_days"`
+	PointIDs           []uint64                      `json:"point_ids"`
+	PropertySelections []reporting.PropertySelection `json:"property_selections"`
+	ExpectedUpdatedAt  *time.Time                    `json:"expected_updated_at"`
 }
 
 func (r UpdateReq) ReportInput() reporting.ReportInput {
 	return reporting.ReportInput{
 		Name: r.Name, Description: r.Description, DefaultDays: r.DefaultDays, PointIDs: r.PointIDs,
-		ExpectedUpdatedAt: r.ExpectedUpdatedAt,
+		PropertySelections: r.PropertySelections, ExpectedUpdatedAt: r.ExpectedUpdatedAt,
 	}
 }
 

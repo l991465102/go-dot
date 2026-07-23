@@ -1,0 +1,30 @@
+package clickhouse
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestPropertyStatisticsRefreshBuildsMetricDimensionAndGeneration(t *testing.T) {
+	db := &statisticsRecordingDB{}
+	store := NewPropertyStatisticsStore(db)
+	hour := time.Date(2026, 7, 23, 8, 0, 0, 0, time.UTC)
+
+	require.NoError(t, store.RefreshProjectHour(context.Background(), 9, hour, 77))
+	require.Len(t, db.execs, 4)
+	metric := strings.Join(strings.Fields(db.execs[0]), " ")
+	approximate := strings.Join(strings.Fields(db.execs[1]), " ")
+	exact := strings.Join(strings.Fields(db.execs[2]), " ")
+	require.Contains(t, metric, "tracking_property_event FINAL")
+	require.Contains(t, metric, "GROUP BY project_id, event_id, property_code")
+	require.Contains(t, metric, "sum(value_decimal)")
+	require.Contains(t, approximate, "uniqCombined64State(visitor_hash)")
+	require.Contains(t, exact, "uniqExactState(visitor_hash)")
+	require.Contains(t, exact, "uv_mode = 'EXACT'")
+	require.Contains(t, db.execs[3], "property_stat_hour_generation")
+	require.Equal(t, []any{uint64(9), hour, uint64(77)}, db.args[3])
+}

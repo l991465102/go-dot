@@ -1,0 +1,111 @@
+package clickhouse
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/lzw7758/go-dot/internal/reporting"
+	"github.com/lzw7758/go-dot/internal/tracking"
+)
+
+func (s *PropertyStatisticsStore) QueryPropertyDaily(ctx context.Context, filter reporting.PropertyDailyFilter, properties []reporting.PropertyRef) (reporting.PropertyDailyData, error) {
+	var result reporting.PropertyDailyData
+	if s == nil || s.db == nil {
+		return result, errors.New("ClickHouse property statistics executor is required")
+	}
+	if filter.ProjectID == 0 || filter.Start.IsZero() || !filter.End.After(filter.Start) || filter.Timezone != "Asia/Shanghai" {
+		return result, errors.New("project, Asia/Shanghai timezone, and valid time range are required")
+	}
+	for _, table := range []string{s.metricTable, s.approximateTable, s.exactTable, s.generationTable} {
+		if !identifierPattern.MatchString(table) {
+			return result, errors.New("invalid ClickHouse property statistics table name")
+		}
+	}
+	for _, property := range properties {
+		switch property.Analytics.Mode {
+		case tracking.AnalyticsMetric:
+			items, err := s.queryMetricDaily(ctx, filter, property)
+			if err != nil {
+				return result, err
+			}
+			result.Metrics = append(result.Metrics, items...)
+		case tracking.AnalyticsDimension:
+			items, err := s.queryDimensionDaily(ctx, filter, property)
+			if err != nil {
+				return result, err
+			}
+			result.Dimensions = append(result.Dimensions, items...)
+		default:
+			return result, fmt.Errorf("unsupported analytics mode %s", property.Analytics.Mode)
+		}
+	}
+	return result, nil
+}
+
+func (s *PropertyStatisticsStore) queryMetricDaily(ctx context.Context, filter reporting.PropertyDailyFilter, property reporting.PropertyRef) ([]reporting.MetricAggregate, error) {
+	inner := `SELECT s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version,
+any(s.value_count) AS value_count,any(s.value_sum) AS value_sum,any(s.value_min) AS value_min,any(s.value_max) AS value_max
+FROM ` + s.metricTable + ` AS s
+INNER JOIN ` + s.generationTable + ` AS g FINAL
+ON s.project_id=g.project_id AND s.hour=g.hour AND s.version=g.generation
+WHERE s.project_id=? AND s.hour>=? AND s.hour<? AND s.point_id=? AND s.property_code=?
+GROUP BY s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version`
+	query := `SELECT toString(toDate(hour,'Asia/Shanghai')),point_id,point_code,property_code,
+sum(value_count),toString(sum(value_sum)),toString(min(value_min)),toString(max(value_max))
+FROM (` + inner + `) GROUP BY toDate(hour,'Asia/Shanghai'),point_id,point_code,property_code ORDER BY 1 DESC`
+	rows, err := s.db.QueryContext(ctx, query, filter.ProjectID, filter.Start.UTC(), filter.End.UTC(), property.PointID, property.PropertyCode)
+	if err != nil {
+		return nil, fmt.Errorf("query metric property %s: %w", property.PropertyCode, err)
+	}
+	defer rows.Close()
+	var result []reporting.MetricAggregate
+	for rows.Next() {
+		var item reporting.MetricAggregate
+		if err := rows.Scan(&item.Date, &item.PointID, &item.PointCode, &item.PropertyCode, &item.Count, &item.Sum, &item.Min, &item.Max); err != nil {
+			return nil, fmt.Errorf("scan metric property %s: %w", property.PropertyCode, err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *PropertyStatisticsStore) queryDimensionDaily(ctx context.Context, filter reporting.PropertyDailyFilter, property reporting.PropertyRef) ([]reporting.DimensionAggregate, error) {
+	table, mergeState, merge := s.approximateTable, "uniqCombined64MergeState", "uniqCombined64Merge"
+	if property.UVMode == tracking.Exact {
+		table, mergeState, merge = s.exactTable, "uniqExactMergeState", "uniqExactMerge"
+	}
+	hourly := `SELECT s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.property_value,s.version,
+any(s.event_count) AS event_count,any(s.uv_state) AS uv_state
+FROM ` + table + ` AS s
+INNER JOIN ` + s.generationTable + ` AS g FINAL
+ON s.project_id=g.project_id AND s.hour=g.hour AND s.version=g.generation
+WHERE s.project_id=? AND s.hour>=? AND s.hour<? AND s.point_id=? AND s.property_code=?
+GROUP BY s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.property_value,s.version`
+	byValue := `SELECT toString(toDate(hour,'Asia/Shanghai')) AS date,point_id,any(point_code) AS point_code,property_code,property_value,
+sum(event_count) AS event_count,` + mergeState + `(uv_state) AS uv_state
+FROM (` + hourly + `) GROUP BY date,point_id,property_code,property_value`
+	query := `SELECT date,point_id,point_code,property_code,property_value,event_count,` + merge + `(uv_state)
+FROM (` + byValue + `) ORDER BY date DESC,event_count DESC,property_value`
+	if property.Type == tracking.String {
+		ranked := `SELECT *,row_number() OVER (PARTITION BY date ORDER BY event_count DESC,property_value) AS value_rank FROM (` + byValue + `)`
+		query = `SELECT date,point_id,any(point_code),property_code,if(value_rank<=50,property_value,'其他') AS property_bucket,
+sum(event_count),` + merge + `(uv_state)
+FROM (` + ranked + `)
+GROUP BY date,point_id,property_code,property_bucket ORDER BY date DESC,sum(event_count) DESC,property_bucket`
+	}
+	rows, err := s.db.QueryContext(ctx, query, filter.ProjectID, filter.Start.UTC(), filter.End.UTC(), property.PointID, property.PropertyCode)
+	if err != nil {
+		return nil, fmt.Errorf("query dimension property %s: %w", property.PropertyCode, err)
+	}
+	defer rows.Close()
+	var result []reporting.DimensionAggregate
+	for rows.Next() {
+		var item reporting.DimensionAggregate
+		if err := rows.Scan(&item.Date, &item.PointID, &item.PointCode, &item.PropertyCode, &item.Value, &item.EventCount, &item.UV); err != nil {
+			return nil, fmt.Errorf("scan dimension property %s: %w", property.PropertyCode, err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}

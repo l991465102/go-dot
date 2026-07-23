@@ -76,7 +76,8 @@ func runAPI(ctx context.Context) error {
 	statisticsService := statistics.NewService(projectService, rediscounter.New(redisClient), statisticsStore, snapshotCache,
 		statistics.CompositeDiagnostics{Events: statisticsStore, DeadLetters: queue}, time.Now)
 	reportRepository := mysqladapter.NewReportRepository(db)
-	reportService := reporting.NewService(projectService, reportRepository, statisticsStore, reporting.ExcelExporter{}, time.Now)
+	reportService := reporting.NewService(projectService, reportRepository, statisticsStore, reporting.ExcelExporter{}, time.Now).
+		SetPropertyDailyStore(clickhouseadapter.NewPropertyStatisticsStore(chDB))
 	collector := ingestion.NewCollector(snapshotCache, observedQueue, ingestion.Config{MaxEvents: cfg.Tracking.MaxBatchEvents, EventStream: cfg.Queue.EventStream, InvalidStream: cfg.Queue.InvalidStream})
 	observedCollector := observability.ObservedCollectService{Next: collector, Metrics: metrics, Logger: logger}
 	overviewService := overview.NewService(projectService, statisticsStore, queue, trackingRepo, time.Now)

@@ -71,21 +71,22 @@ type CollectResult struct {
 
 type NormalizedEvent struct {
 	Event
-	ProjectID       uint64                 `json:"project_id"`
-	SnapshotID      uint64                 `json:"snapshot_id"`
-	PointID         uint64                 `json:"point_id"`
-	PointVersion    uint                   `json:"point_version"`
-	CategoryID      uint64                 `json:"category_id"`
-	CategoryCode    string                 `json:"category_code"`
-	CategoryPath    []tracking.CategoryRef `json:"category_path"`
-	UVMode          tracking.UVMode        `json:"uv_mode"`
-	CountPV         bool                   `json:"count_pv"`
-	CountUV         bool                   `json:"count_uv"`
-	ProjectTimezone string                 `json:"project_timezone"`
-	ReceivedAt      time.Time              `json:"received_at"`
-	ClientTime      time.Time              `json:"client_time"`
-	StatTime        time.Time              `json:"stat_time"`
-	TimeCorrected   bool                   `json:"time_corrected"`
+	ProjectID           uint64                 `json:"project_id"`
+	SnapshotID          uint64                 `json:"snapshot_id"`
+	PointID             uint64                 `json:"point_id"`
+	PointVersion        uint                   `json:"point_version"`
+	CategoryID          uint64                 `json:"category_id"`
+	CategoryCode        string                 `json:"category_code"`
+	CategoryPath        []tracking.CategoryRef `json:"category_path"`
+	UVMode              tracking.UVMode        `json:"uv_mode"`
+	CountPV             bool                   `json:"count_pv"`
+	CountUV             bool                   `json:"count_uv"`
+	ProjectTimezone     string                 `json:"project_timezone"`
+	ReceivedAt          time.Time              `json:"received_at"`
+	ClientTime          time.Time              `json:"client_time"`
+	StatTime            time.Time              `json:"stat_time"`
+	TimeCorrected       bool                   `json:"time_corrected"`
+	AnalyticsProperties []tracking.Property    `json:"analytics_properties,omitempty"`
 }
 
 type invalidEvent struct {
@@ -233,7 +234,13 @@ func (c *Collector) normalize(ctx context.Context, p project.Project, now time.T
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return NormalizedEvent{}, fmt.Errorf("invalid project timezone")
 	}
-	return NormalizedEvent{Event: event, ProjectID: p.ID, SnapshotID: snapshot.ID, PointID: snapshot.PointID, PointVersion: snapshot.Version, CategoryID: snapshot.CategoryID, CategoryCode: snapshot.CategoryCode, CategoryPath: snapshot.CategoryPath, UVMode: snapshot.UVMode, CountPV: snapshot.CountPV, CountUV: snapshot.CountUV, ProjectTimezone: timezone, ReceivedAt: now, ClientTime: clientTime, StatTime: statTime, TimeCorrected: corrected}, nil
+	analyticsProperties := make([]tracking.Property, 0, len(snapshot.Properties))
+	for _, property := range snapshot.Properties {
+		if property.Analytics.Mode != "" && property.Analytics.Mode != tracking.AnalyticsNone {
+			analyticsProperties = append(analyticsProperties, property)
+		}
+	}
+	return NormalizedEvent{Event: event, ProjectID: p.ID, SnapshotID: snapshot.ID, PointID: snapshot.PointID, PointVersion: snapshot.Version, CategoryID: snapshot.CategoryID, CategoryCode: snapshot.CategoryCode, CategoryPath: snapshot.CategoryPath, UVMode: snapshot.UVMode, CountPV: snapshot.CountPV, CountUV: snapshot.CountUV, ProjectTimezone: timezone, ReceivedAt: now, ClientTime: clientTime, StatTime: statTime, TimeCorrected: corrected, AnalyticsProperties: analyticsProperties}, nil
 }
 
 func stableBatchID(projectID uint64, events []Event) (string, error) {

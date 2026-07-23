@@ -7,6 +7,8 @@ import type {
   DevelopmentState,
   Platform,
   PointProperty,
+  PropertyAnalyticsMode,
+  MetricAggregation,
   PropertyType,
   TimeBasis,
   UVMode,
@@ -72,6 +74,20 @@ export const propertyTypeOptions = stringOptions<PropertyType>({
   DATETIME: '日期时间',
   ENUM: '枚举',
   ARRAY: '数组',
+})
+
+export const propertyAnalyticsModeOptions = stringOptions<PropertyAnalyticsMode>({
+  NONE: '不参与统计',
+  METRIC: '数值指标',
+  DIMENSION: '分类维度',
+})
+
+export const metricAggregationOptions = stringOptions<MetricAggregation>({
+  COUNT: '有值次数',
+  SUM: '求和',
+  AVG: '平均值',
+  MIN: '最小值',
+  MAX: '最大值',
 })
 
 export const arrayItemTypeOptions = stringOptions<ArrayItemType>({

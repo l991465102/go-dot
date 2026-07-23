@@ -14,32 +14,40 @@ type EventStore interface {
 }
 
 type StoredEvent struct {
-	EventID            string
-	ProjectID          uint64
-	PointID            uint64
-	PointCode          string
-	PointVersion       uint32
-	DomainCategoryID   uint64
-	DomainCategoryCode string
-	ModuleCategoryID   uint64
-	ModuleCategoryCode string
-	SceneCategoryID    uint64
-	SceneCategoryCode  string
-	VisitorHash        uint64
-	Platform           string
-	Channel            string
-	AppVersion         string
-	SessionHash        string
-	ClientEventAt      time.Time
-	ReceivedAt         time.Time
-	StatisticAt        time.Time
-	ProjectTimezone    string
-	TimeCorrected      bool
-	CountPV            bool
-	CountUV            bool
-	UVMode             string
-	Properties         map[string]any
-	Version            uint64
+	EventID             string
+	ProjectID           uint64
+	PointID             uint64
+	PointCode           string
+	PointVersion        uint32
+	DomainCategoryID    uint64
+	DomainCategoryCode  string
+	ModuleCategoryID    uint64
+	ModuleCategoryCode  string
+	SceneCategoryID     uint64
+	SceneCategoryCode   string
+	VisitorHash         uint64
+	Platform            string
+	Channel             string
+	AppVersion          string
+	SessionHash         string
+	ClientEventAt       time.Time
+	ReceivedAt          time.Time
+	StatisticAt         time.Time
+	ProjectTimezone     string
+	TimeCorrected       bool
+	CountPV             bool
+	CountUV             bool
+	UVMode              string
+	Properties          map[string]any
+	AnalyticsProperties []StoredProperty
+	Version             uint64
+}
+
+type StoredProperty struct {
+	Code          string
+	Type          string
+	AnalyticsMode string
+	Value         any
 }
 
 type InvalidEvent struct {

@@ -34,9 +34,9 @@ func TestExcelExporterBuildsTwoSheetWorkbook(t *testing.T) {
 	book, err := excelize.OpenReader(bytes.NewReader(contents))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, book.Close()) })
-	require.Equal(t, []string{"数据明细", "报表说明"}, book.GetSheetList())
+	require.Equal(t, []string{"点位统计", "报表说明"}, book.GetSheetList())
 
-	detailRows, err := book.GetRows("数据明细")
+	detailRows, err := book.GetRows("点位统计")
 	require.NoError(t, err)
 	require.Equal(t, []string{"时间", "checkout_pv", "checkout_uv", "view_pv", "view_uv"}, detailRows[0])
 	require.Equal(t, []string{"2026-07-20", "10", "7", "0", "0"}, detailRows[1])
@@ -75,18 +75,54 @@ func TestExcelExporterProtectsEveryUserControlledTextCellFromFormulaInjection(t 
 
 	require.Equal(t, "'"+dangerous, cellValue(t, book, "报表说明", "B2"))
 	require.Equal(t, "'@description", cellValue(t, book, "报表说明", "B3"))
-	require.Equal(t, "'=user", cellValue(t, book, "报表说明", "B8"))
-	require.Equal(t, "'+code_pv", cellValue(t, book, "数据明细", "B1"))
-	require.Equal(t, "'+code_uv", cellValue(t, book, "数据明细", "C1"))
+	require.Equal(t, "'=user", cellValue(t, book, "报表说明", "B9"))
+	require.Equal(t, "'+code_pv", cellValue(t, book, "点位统计", "B1"))
+	require.Equal(t, "'+code_uv", cellValue(t, book, "点位统计", "C1"))
 	for _, target := range []struct{ sheet, cell string }{
 		{sheet: "报表说明", cell: "B2"}, {sheet: "报表说明", cell: "B3"},
-		{sheet: "报表说明", cell: "B8"}, {sheet: "数据明细", cell: "B1"},
-		{sheet: "数据明细", cell: "C1"},
+		{sheet: "报表说明", cell: "B9"}, {sheet: "点位统计", cell: "B1"},
+		{sheet: "点位统计", cell: "C1"},
 	} {
 		formula, err := book.GetCellFormula(target.sheet, target.cell)
 		require.NoError(t, err)
 		require.Empty(t, formula)
 	}
+}
+
+func TestExcelExporterAddsOnlySelectedPropertySheets(t *testing.T) {
+	sum, avg := "12.5", "6.25"
+	document := ExportDocument{
+		Result: DailyResult{
+			StartDate: "2026-07-19", EndDate: "2026-07-20", IncompleteDates: []string{"2026-07-20"},
+			MetricSections: []MetricSection{{
+				Columns: []MetricColumn{
+					{Key: "checkout_amount_sum", Label: "checkout_amount_sum", Aggregation: tracking.AggregateSum},
+					{Key: "checkout_amount_avg", Label: "checkout_amount_avg", Aggregation: tracking.AggregateAvg},
+				},
+				Rows: []MetricRow{{Date: "2026-07-20", Values: map[string]*string{"checkout_amount_sum": &sum, "checkout_amount_avg": &avg}}},
+			}},
+			DimensionSections: []DimensionSection{{
+				PointID: 3, PointCode: "checkout", PropertyCode: "status", PropertyName: "状态",
+				Rows: []DimensionRow{{Date: "2026-07-20", Value: "success", EventCount: 3, UV: 2, Share: 1}},
+			}},
+		},
+		ExportedAt: time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC),
+	}
+
+	contents, err := (ExcelExporter{}).Build(document)
+	require.NoError(t, err)
+	book, err := excelize.OpenReader(bytes.NewReader(contents))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, book.Close()) })
+	require.Equal(t, []string{"点位统计", "数值属性", "分类-checkout_status", "报表说明"}, book.GetSheetList())
+	metricRows, err := book.GetRows("数值属性")
+	require.NoError(t, err)
+	require.Equal(t, []string{"时间", "checkout_amount_sum", "checkout_amount_avg"}, metricRows[0])
+	require.Equal(t, []string{"2026-07-20", "12.5", "6.25"}, metricRows[1])
+	dimensionRows, err := book.GetRows("分类-checkout_status")
+	require.NoError(t, err)
+	require.Equal(t, []string{"2026-07-20", "success", "3", "2", "1"}, dimensionRows[1])
+	require.Equal(t, "2026-07-20", cellValue(t, book, "报表说明", "B7"))
 }
 
 func TestSafeSpreadsheetTextDetectsOperatorsAfterIgnorablePrefix(t *testing.T) {

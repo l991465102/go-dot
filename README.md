@@ -76,7 +76,7 @@ npm --prefix web run dev
 
 API、Worker、Scheduler 必须使用相同的数据库、Redis Stream 名称、consumer group 和密钥配置。API 不能代替 Worker 或 Scheduler。
 
-升级已有部署时，先备份 MySQL 和 ClickHouse，再用与目标版本完全相同的配置执行迁移；`0002_custom_reports.sql` 会创建自定义报表配置表。迁移完成后需重启 API、Worker、Scheduler，并重新构建/发布 Web，不能只刷新浏览器静态文件：
+升级已有部署时，先备份 MySQL 和 ClickHouse，再用与目标版本完全相同的配置执行迁移；`0002_custom_reports.sql` 会创建自定义报表配置表，MySQL `0003_property_analytics.sql` 与 ClickHouse `0007_property_analytics.sql` 会增加属性统计配置、明细和小时聚合表。迁移完成后需重启 API、Worker、Scheduler，并重新构建/发布 Web，不能只刷新浏览器静态文件：
 
 ```bash
 make migrate
@@ -167,7 +167,9 @@ res, err := http.DefaultClient.Do(req)
 - 新建临时报表默认最近 30 个上海自然日；一次查询/保存最多 90 个自然日、100 个点位，至少选择 1 个已发布或已废弃点位。
 - 日期边界固定为 `Asia/Shanghai`。当天数据标为“未完整”，Scheduler 尚未提交的新小时可能暂未显示；不要把它解读为最终日结值。
 - 事件、聚合和 API 中的绝对时间仍以 UTC 存储/传输；后台和 Excel 的绝对时间统一显示为 `Asia/Shanghai` 的 `YYYY-MM-DD HH:mm:ss`。
-- 导出的 XLSX 恰好包含 `数据明细`、`报表说明` 两个工作表。日期×点位组合完整输出，无数据组合为 0；名称、说明、点位文案等用户文本会阻止以 `= + - @` 开头的内容成为 Excel 公式。
+- 点位属性 Schema 中，`INTEGER`、`DECIMAL` 可开启“数值指标”并配置 `COUNT/SUM/AVG/MIN/MAX`；`STRING`、`ENUM`、`BOOLEAN` 可开启“分类维度”，固定查看事件数、UV 和占比；`DATETIME`、`ARRAY` 第一期不支持属性统计。
+- 报表只查询、显示和导出当前勾选的属性及聚合方式。一次最多选择 20 个统计属性，其中分类维度最多 5 个；字符串维度每天显示前 50 个值，其余合并为“其他”。
+- 导出的 XLSX 始终包含 `点位统计`、`报表说明`；选择数值属性时增加 `数值属性`，每个分类属性增加一个 `分类-...` 工作表。日期按降序输出，无数据的 PV/UV 与 COUNT/SUM 为 0，AVG/MIN/MAX 无有效值时留空；用户文本会阻止以 `= + - @` 开头的内容成为 Excel 公式。
 
 先登录取得 access token，再可直接调用查询接口：
 
@@ -180,7 +182,18 @@ curl -fsS http://127.0.0.1:8080/api/v1/statistics/daily-by-point/query \
     "project_id": 1,
     "start_date": "2026-07-01",
     "end_date": "2026-07-30",
-    "point_ids": [101, 102]
+    "point_ids": [101, 102],
+    "property_selections": [
+      {
+        "point_id": 101,
+        "property_code": "amount",
+        "aggregations": ["COUNT", "SUM", "AVG"]
+      },
+      {
+        "point_id": 102,
+        "property_code": "phone_type"
+      }
+    ]
   }'
 ```
 
@@ -195,6 +208,13 @@ curl -fS http://127.0.0.1:8080/api/v1/statistics/daily-by-point/export \
     "start_date": "2026-07-01",
     "end_date": "2026-07-30",
     "point_ids": [101, 102],
+    "property_selections": [
+      {
+        "point_id": 101,
+        "property_code": "amount",
+        "aggregations": ["SUM", "AVG"]
+      }
+    ],
     "report_name": "月度经营报表",
     "report_description": "精确与近似 UV 点位合并展示"
   }' \

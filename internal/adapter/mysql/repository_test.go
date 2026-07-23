@@ -227,7 +227,7 @@ func TestAuthRepositoryUserLookupFailureRollsBackAndOldTokenRemainsUsable(t *tes
 
 func TestTrackingPublishLocksDraftAndCommitsSnapshotStateAndAuditTogether(t *testing.T) {
 	pointRow := trackingPointRow("DRAFT")
-	propertyRow := []driver.Value{"product_id", "Product ID", "STRING", true, nil, nil, nil, nil, 0}
+	propertyRow := []driver.Value{"product_id", "Product ID", "STRING", true, nil, nil, nil, nil, "NONE", nil, 0}
 	script, db := openScriptedDB(t, nil)
 	script.queryRows = [][]driver.Value{
 		{uint64(3)},

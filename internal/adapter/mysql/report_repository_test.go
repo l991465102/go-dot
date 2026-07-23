@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lzw7758/go-dot/internal/reporting"
+	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
 func TestReportRepositoryCreateCommitsReportOrderedPointsAndAuditTogether(t *testing.T) {
@@ -104,6 +105,7 @@ func TestReportRepositoryUpdateReplacesMappingsAndAuditsInOneTransaction(t *test
 	script.execResults = []driver.Result{
 		scriptResult{affected: 1},
 		scriptResult{affected: 2},
+		scriptResult{affected: 0},
 		scriptResult{affected: 1},
 		scriptResult{affected: 1},
 		scriptResult{affected: 1},
@@ -114,18 +116,19 @@ func TestReportRepositoryUpdateReplacesMappingsAndAuditsInOneTransaction(t *test
 	})
 	require.NoError(t, err)
 	require.Equal(t, updatedAt, updated.UpdatedAt)
-	require.Len(t, script.execQueries, 5)
+	require.Len(t, script.execQueries, 6)
 	require.Contains(t, script.execQueries[1], "DELETE rp FROM custom_report_point")
-	for _, index := range []int{2, 3} {
+	require.Contains(t, script.execQueries[2], "DELETE cp FROM custom_report_property")
+	for _, index := range []int{3, 4} {
 		require.Contains(t, script.execQueries[index], "p.project_id=?")
 		require.Contains(t, script.execQueries[index], "definition_state IN ('PUBLISHED','DEPRECATED')")
 	}
-	require.Contains(t, script.execQueries[4], "audit_log")
-	require.EqualValues(t, 9, script.execArgs[4][0].Value)
-	require.EqualValues(t, 3, script.execArgs[4][1].Value)
-	require.Equal(t, "UPDATE_REPORT", script.execArgs[4][2].Value)
-	require.Equal(t, "CUSTOM_REPORT", script.execArgs[4][3].Value)
-	require.EqualValues(t, 12, script.execArgs[4][4].Value)
+	require.Contains(t, script.execQueries[5], "audit_log")
+	require.EqualValues(t, 9, script.execArgs[5][0].Value)
+	require.EqualValues(t, 3, script.execArgs[5][1].Value)
+	require.Equal(t, "UPDATE_REPORT", script.execArgs[5][2].Value)
+	require.Equal(t, "CUSTOM_REPORT", script.execArgs[5][3].Value)
+	require.EqualValues(t, 12, script.execArgs[5][4].Value)
 	require.Equal(t, 1, script.commits)
 	require.Zero(t, script.rollbacks)
 }
@@ -146,6 +149,28 @@ func TestReportRepositoryResolvePointsFiltersDeduplicatesAndRestoresInputOrder(t
 	require.Contains(t, script.queries[0], "definition_state IN ('PUBLISHED','DEPRECATED')")
 }
 
+func TestReportRepositoryResolvePropertiesRestoresSelectionOrderAndAnalytics(t *testing.T) {
+	script, db := openScriptedDB(t, nil)
+	script.queryRowSets = [][][]driver.Value{{
+		{uint64(7), "checkout", "EXACT", "status", "状态", "ENUM", []byte(`["success","fail"]`), "DIMENSION", nil},
+		{uint64(7), "checkout", "EXACT", "amount", "金额", "DECIMAL", nil, "METRIC", []byte(`["COUNT","SUM","AVG"]`)},
+	}}
+	requested := []reporting.PropertySelection{
+		{PointID: 7, PropertyCode: "amount", Aggregations: []tracking.MetricAggregation{tracking.AggregateSum}},
+		{PointID: 7, PropertyCode: "status"},
+	}
+
+	properties, err := NewReportRepository(db).ResolveProperties(context.Background(), 9, requested)
+	require.NoError(t, err)
+	require.Equal(t, []string{"amount", "status"}, []string{properties[0].PropertyCode, properties[1].PropertyCode})
+	require.Equal(t, tracking.AnalyticsMetric, properties[0].Analytics.Mode)
+	require.Equal(t, []tracking.MetricAggregation{tracking.AggregateCount, tracking.AggregateSum, tracking.AggregateAvg}, properties[0].Analytics.Aggregations)
+	require.Equal(t, []tracking.MetricAggregation{tracking.AggregateSum}, properties[0].Aggregations)
+	require.Equal(t, []string{"success", "fail"}, properties[1].EnumValues)
+	require.Contains(t, script.queries[0], "pp.code=?")
+	require.NotContains(t, script.queries[0], "pp.property_code")
+}
+
 func TestReportRepositoryGetScopesReportAndPointReadsToProject(t *testing.T) {
 	created := time.Date(2026, 7, 20, 7, 0, 0, 0, time.UTC)
 	updated := created.Add(time.Hour)
@@ -159,7 +184,7 @@ func TestReportRepositoryGetScopesReportAndPointReadsToProject(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), report.ID)
 	require.Len(t, report.Points, 1)
-	require.Len(t, script.queries, 2)
+	require.Len(t, script.queries, 3)
 	for _, query := range script.queries {
 		require.Contains(t, query, "project_id=?")
 	}

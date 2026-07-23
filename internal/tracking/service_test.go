@@ -108,6 +108,47 @@ func TestPropertySchemaUsesExactGovernedTypes(t *testing.T) {
 	require.NoError(t, validatePropertySchema([]Property{{Code: "kind", Name: "Kind", Type: Enum, EnumValues: []string{"a", "b"}}, {Code: "amount", Name: "Amount", Type: Decimal}}))
 }
 
+func TestPropertyAnalyticsValidation(t *testing.T) {
+	require.NoError(t, validatePropertySchema([]Property{{
+		Code: "quantity", Name: "Quantity", Type: Integer,
+		Analytics: PropertyAnalytics{Mode: AnalyticsMetric, Aggregations: []MetricAggregation{AggregateCount, AggregateSum, AggregateAvg, AggregateMin, AggregateMax}},
+	}, {
+		Code: "phone_type", Name: "Phone type", Type: Enum, EnumValues: []string{"ios", "android"},
+		Analytics: PropertyAnalytics{Mode: AnalyticsDimension},
+	}}))
+
+	for name, property := range map[string]Property{
+		"metric requires numeric type": {
+			Code: "name", Name: "Name", Type: String,
+			Analytics: PropertyAnalytics{Mode: AnalyticsMetric, Aggregations: []MetricAggregation{AggregateCount}},
+		},
+		"metric requires aggregation": {
+			Code: "quantity", Name: "Quantity", Type: Integer,
+			Analytics: PropertyAnalytics{Mode: AnalyticsMetric},
+		},
+		"dimension requires supported type": {
+			Code: "quantity", Name: "Quantity", Type: Integer,
+			Analytics: PropertyAnalytics{Mode: AnalyticsDimension},
+		},
+		"dimension has fixed metrics": {
+			Code: "kind", Name: "Kind", Type: Boolean,
+			Analytics: PropertyAnalytics{Mode: AnalyticsDimension, Aggregations: []MetricAggregation{AggregateCount}},
+		},
+		"aggregations must be unique": {
+			Code: "quantity", Name: "Quantity", Type: Decimal,
+			Analytics: PropertyAnalytics{Mode: AnalyticsMetric, Aggregations: []MetricAggregation{AggregateSum, AggregateSum}},
+		},
+		"unsupported aggregation": {
+			Code: "quantity", Name: "Quantity", Type: Decimal,
+			Analytics: PropertyAnalytics{Mode: AnalyticsMetric, Aggregations: []MetricAggregation{"MEDIAN"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.ErrorContains(t, validatePropertySchema([]Property{property}), "PROPERTY_SCHEMA_INVALID")
+		})
+	}
+}
+
 func TestIntegerPreservesJSONNumberPrecision(t *testing.T) {
 	s := Snapshot{PointID: 1, Version: 1, SupportedPlatforms: []string{"web"}, Properties: []Property{{Code: "id", Name: "ID", Type: Integer}}}
 	require.NoError(t, s.Validate("web", map[string]any{"id": json.Number("9007199254740993")}))

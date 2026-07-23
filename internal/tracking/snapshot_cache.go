@@ -107,6 +107,7 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	for i, property := range snapshot.Properties {
 		clone.Properties[i] = property
 		clone.Properties[i].EnumValues = append([]string(nil), property.EnumValues...)
+		clone.Properties[i].Analytics.Aggregations = append([]MetricAggregation(nil), property.Analytics.Aggregations...)
 		clone.Properties[i].ExampleValue = cloneSnapshotValue(property.ExampleValue)
 	}
 	return clone

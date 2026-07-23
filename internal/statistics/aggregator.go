@@ -10,8 +10,12 @@ import (
 	"github.com/lzw7758/go-dot/internal/ports"
 )
 
+type ProjectHourRefresher interface {
+	RefreshProjectHour(context.Context, uint64, time.Time, uint64) error
+}
+
 type Aggregator struct {
-	store       ports.ProjectStatisticsStore
+	store       ProjectHourRefresher
 	projects    ports.StatisticsProjectSource
 	now         func() time.Time
 	lookback    int
@@ -19,11 +23,11 @@ type Aggregator struct {
 	lastVersion uint64
 }
 
-func NewAggregator(store ports.ProjectStatisticsStore, projects ports.StatisticsProjectSource, now func() time.Time) *Aggregator {
+func NewAggregator(store ProjectHourRefresher, projects ports.StatisticsProjectSource, now func() time.Time) *Aggregator {
 	return NewAggregatorWithLookback(store, projects, now, 2)
 }
 
-func NewAggregatorWithLookback(store ports.ProjectStatisticsStore, projects ports.StatisticsProjectSource, now func() time.Time, lookbackHours int) *Aggregator {
+func NewAggregatorWithLookback(store ProjectHourRefresher, projects ports.StatisticsProjectSource, now func() time.Time, lookbackHours int) *Aggregator {
 	if now == nil {
 		now = time.Now
 	}
@@ -31,6 +35,21 @@ func NewAggregatorWithLookback(store ports.ProjectStatisticsStore, projects port
 		lookbackHours = 2
 	}
 	return &Aggregator{store: store, projects: projects, now: now, lookback: lookbackHours}
+}
+
+type ProjectHourRefresherGroup []ProjectHourRefresher
+
+func (g ProjectHourRefresherGroup) RefreshProjectHour(ctx context.Context, projectID uint64, hour time.Time, version uint64) error {
+	var refreshErrors []error
+	for _, refresher := range g {
+		if refresher == nil {
+			continue
+		}
+		if err := refresher.RefreshProjectHour(ctx, projectID, hour, version); err != nil {
+			refreshErrors = append(refreshErrors, err)
+		}
+	}
+	return errors.Join(refreshErrors...)
 }
 
 func ProjectHourRange(at time.Time, location *time.Location) (time.Time, time.Time) {

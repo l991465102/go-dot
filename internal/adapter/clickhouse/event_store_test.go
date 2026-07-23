@@ -33,6 +33,27 @@ func TestSaveValidUsesReliableDeduplicatedInsertAndCanonicalJSON(t *testing.T) {
 	require.Equal(t, "batch-1", settings["insert_deduplication_token"])
 }
 
+func TestSaveValidAlsoPersistsConfiguredPropertyValues(t *testing.T) {
+	db := &recordingExecutor{}
+	store := New(db)
+	event := validEvent()
+	event.AnalyticsProperties = []ports.StoredProperty{
+		{Code: "amount", Type: "DECIMAL", AnalyticsMode: "METRIC", Value: json.Number("12.50")},
+		{Code: "source", Type: "STRING", AnalyticsMode: "DIMENSION", Value: ""},
+		{Code: "paid", Type: "BOOLEAN", AnalyticsMode: "DIMENSION", Value: false},
+	}
+
+	require.NoError(t, store.SaveValid(context.Background(), "batch-properties", []ports.StoredEvent{event}))
+	require.Len(t, db.calls, 2)
+	require.Contains(t, db.calls[1].query, "INSERT INTO tracking_property_event")
+	require.Len(t, db.calls[1].args, 48)
+	require.Equal(t, "amount", db.calls[1].args[5])
+	require.Equal(t, "source", db.calls[1].args[21])
+	require.Equal(t, "", db.calls[1].args[23], "empty strings are valid dimension values")
+	require.Equal(t, "paid", db.calls[1].args[37])
+	require.Equal(t, "false", db.calls[1].args[39])
+}
+
 func TestSaveInvalidPreservesErrorAndCanonicalOriginalPayload(t *testing.T) {
 	db := &recordingExecutor{}
 	store := New(db)

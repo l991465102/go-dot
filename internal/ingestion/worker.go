@@ -132,6 +132,16 @@ func (w *Worker) handleValid(ctx context.Context, msg ports.Message) error {
 			return permanent(fmt.Errorf("event %d: visitor identity is required", i))
 		}
 		domain, module, scene := event.CategoryPath[0], event.CategoryPath[1], event.CategoryPath[2]
+		analyticsProperties := make([]ports.StoredProperty, 0, len(event.AnalyticsProperties))
+		for _, property := range event.AnalyticsProperties {
+			value, exists := event.Properties[property.Code]
+			if !exists || value == nil {
+				continue
+			}
+			analyticsProperties = append(analyticsProperties, ports.StoredProperty{
+				Code: property.Code, Type: string(property.Type), AnalyticsMode: string(property.Analytics.Mode), Value: value,
+			})
+		}
 		stored = append(stored, ports.StoredEvent{
 			EventID: event.EventID, ProjectID: event.ProjectID, PointID: event.PointID, PointCode: event.PointCode,
 			PointVersion: uint32(event.PointVersion), DomainCategoryID: domain.ID, DomainCategoryCode: domain.Code,
@@ -140,7 +150,7 @@ func (w *Worker) handleValid(ctx context.Context, msg ports.Message) error {
 			SessionHash: opaqueSession(w.cfg.VisitorMasterKey, event.ProjectID, event.SessionID), ClientEventAt: event.ClientTime,
 			ReceivedAt: event.ReceivedAt, StatisticAt: event.StatTime, ProjectTimezone: event.ProjectTimezone,
 			TimeCorrected: event.TimeCorrected, CountPV: event.CountPV, CountUV: event.CountUV, UVMode: string(event.UVMode),
-			Properties: event.Properties, Version: uint64(event.ReceivedAt.UnixMilli()),
+			Properties: event.Properties, AnalyticsProperties: analyticsProperties, Version: uint64(event.ReceivedAt.UnixMilli()),
 		})
 		counted = append(counted, ports.CountEvent{EventID: event.EventID, ProjectID: event.ProjectID, PointID: event.PointID,
 			Platform: event.Platform, Channel: event.Channel, StatTime: event.StatTime, ProjectTimezone: event.ProjectTimezone,

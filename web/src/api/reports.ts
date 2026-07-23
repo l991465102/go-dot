@@ -1,5 +1,6 @@
 import { AxiosHeaders } from 'axios'
 import { apiClient } from './client'
+import type { MetricAggregation, PointProperty, PropertyAnalyticsMode, PropertyType } from './tracking'
 
 export type ReportPointState = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED'
 export type UVMode = 'APPROXIMATE' | 'EXACT'
@@ -11,6 +12,23 @@ export interface ReportPoint {
   definition_state: ReportPointState
   uv_mode: UVMode
   sort_no: number
+  properties?: PointProperty[]
+}
+
+export interface PropertySelection {
+  point_id: number
+  property_code: string
+  aggregations?: MetricAggregation[]
+  sort_no?: number
+}
+
+export interface ReportProperty extends PropertySelection {
+  point_code: string
+  property_name: string
+  type: PropertyType
+  analytics: { mode: PropertyAnalyticsMode; aggregations?: MetricAggregation[] }
+  enum_values?: string[]
+  uv_mode: UVMode
 }
 
 export interface SavedReport {
@@ -20,6 +38,7 @@ export interface SavedReport {
   description: string
   default_days: number
   points?: ReportPoint[]
+  properties?: ReportProperty[]
   created_by: number
   updated_by: number
   created_at: string
@@ -31,6 +50,7 @@ export interface ReportMutation {
   description: string
   default_days: number
   point_ids: number[]
+  property_selections?: PropertySelection[]
 }
 
 export interface DailyQuery {
@@ -38,6 +58,7 @@ export interface DailyQuery {
   start_date: string
   end_date: string
   point_ids: number[]
+  property_selections?: PropertySelection[]
 }
 
 export interface DailyExport extends DailyQuery {
@@ -64,6 +85,23 @@ export interface DailyResult {
   day_count: number
   total_pv: number
   items: DailyItem[]
+  incomplete_dates?: string[]
+  metric_sections?: MetricSection[]
+  dimension_sections?: DimensionSection[]
+}
+
+export interface MetricSection {
+  columns: Array<{ key: string; label: string; point_code: string; property_code: string; aggregation: MetricAggregation }>
+  rows: Array<{ date: string; complete: boolean; values: Record<string, string | null> }>
+}
+
+export interface DimensionSection {
+  point_id: number
+  sort_no: number
+  point_code: string
+  property_code: string
+  property_name: string
+  rows: Array<{ date: string; complete: boolean; value: string; event_count: number; uv: number; share: number }>
 }
 
 export async function listReports(projectId: number, signal?: AbortSignal): Promise<SavedReport[]> {

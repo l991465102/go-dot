@@ -4,15 +4,19 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/xuri/excelize/v2"
+
+	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
 const (
-	detailSheet      = "数据明细"
+	detailSheet      = "点位统计"
+	metricSheet      = "数值属性"
 	explanationSheet = "报表说明"
 )
 
@@ -41,11 +45,35 @@ func (ExcelExporter) Build(document ExportDocument) (contents []byte, returnErr 
 	if _, err = book.NewSheet(detailSheet); err != nil {
 		return nil, err
 	}
+	if len(document.Result.MetricSections) > 0 {
+		if _, err = book.NewSheet(metricSheet); err != nil {
+			return nil, err
+		}
+	}
+	dimensionSheets := make([]string, len(document.Result.DimensionSections))
+	usedSheets := map[string]struct{}{detailSheet: {}, metricSheet: {}, explanationSheet: {}}
+	for index, section := range document.Result.DimensionSections {
+		name := uniqueSheetName("分类-"+section.PointCode+"_"+section.PropertyCode, usedSheets)
+		dimensionSheets[index] = name
+		if _, err = book.NewSheet(name); err != nil {
+			return nil, err
+		}
+	}
 	if _, err = book.NewSheet(explanationSheet); err != nil {
 		return nil, err
 	}
 	if err = writeDetailSheet(book, headerStyle, document.Result); err != nil {
 		return nil, err
+	}
+	if len(document.Result.MetricSections) > 0 {
+		if err = writeMetricSheet(book, headerStyle, document.Result.MetricSections[0]); err != nil {
+			return nil, err
+		}
+	}
+	for index, section := range document.Result.DimensionSections {
+		if err = writeDimensionSheet(book, headerStyle, dimensionSheets[index], section); err != nil {
+			return nil, err
+		}
 	}
 	if err = writeExplanationSheet(book, headerStyle, wrapStyle, document); err != nil {
 		return nil, err
@@ -60,6 +88,126 @@ func (ExcelExporter) Build(document ExportDocument) (contents []byte, returnErr 
 		return nil, err
 	}
 	return buffer.Bytes(), nil
+}
+
+func writeMetricSheet(book *excelize.File, headerStyle int, section MetricSection) (returnErr error) {
+	stream, err := book.NewStreamWriter(metricSheet)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, stream.Flush()) }()
+	if err = stream.SetColWidth(1, 1, 13); err != nil {
+		return err
+	}
+	if len(section.Columns) > 0 {
+		if err = stream.SetColWidth(2, 1+len(section.Columns), 20); err != nil {
+			return err
+		}
+	}
+	if err = stream.SetPanes(&excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"}); err != nil {
+		return err
+	}
+	header := []interface{}{excelize.Cell{StyleID: headerStyle, Value: "时间"}}
+	for _, column := range section.Columns {
+		header = append(header, excelize.Cell{StyleID: headerStyle, Value: safeSpreadsheetText(column.Label)})
+	}
+	if err = stream.SetRow("A1", header); err != nil {
+		return err
+	}
+	for index, item := range section.Rows {
+		row := []interface{}{safeSpreadsheetText(item.Date)}
+		for _, column := range section.Columns {
+			value := item.Values[column.Key]
+			if value == nil {
+				row = append(row, nil)
+			} else {
+				row = append(row, metricExcelValue(column.Aggregation, *value))
+			}
+		}
+		cell, coordinateErr := excelize.CoordinatesToCellName(1, index+2)
+		if coordinateErr != nil {
+			return coordinateErr
+		}
+		if err = stream.SetRow(cell, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func metricExcelValue(aggregation tracking.MetricAggregation, value string) any {
+	if aggregation == tracking.AggregateCount {
+		if parsed, err := strconv.ParseUint(value, 10, 64); err == nil {
+			return parsed
+		}
+	} else if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+		return parsed
+	}
+	return safeSpreadsheetText(value)
+}
+
+func writeDimensionSheet(book *excelize.File, headerStyle int, sheet string, section DimensionSection) (returnErr error) {
+	stream, err := book.NewStreamWriter(sheet)
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, stream.Flush()) }()
+	if err = stream.SetColWidth(1, 5, 18); err != nil {
+		return err
+	}
+	if err = stream.SetPanes(&excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"}); err != nil {
+		return err
+	}
+	header := []interface{}{
+		excelize.Cell{StyleID: headerStyle, Value: "时间"},
+		excelize.Cell{StyleID: headerStyle, Value: "属性值"},
+		excelize.Cell{StyleID: headerStyle, Value: "事件数"},
+		excelize.Cell{StyleID: headerStyle, Value: "UV"},
+		excelize.Cell{StyleID: headerStyle, Value: "占比"},
+	}
+	if err = stream.SetRow("A1", header); err != nil {
+		return err
+	}
+	for index, item := range section.Rows {
+		cell, coordinateErr := excelize.CoordinatesToCellName(1, index+2)
+		if coordinateErr != nil {
+			return coordinateErr
+		}
+		if err = stream.SetRow(cell, []interface{}{safeSpreadsheetText(item.Date), safeSpreadsheetText(item.Value), item.EventCount, item.UV, item.Share}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func uniqueSheetName(raw string, used map[string]struct{}) string {
+	name := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`[]:*?/\\`, r) || unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, raw)
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "分类属性"
+	}
+	runes := []rune(name)
+	if len(runes) > 31 {
+		name = string(runes[:31])
+	}
+	base := name
+	for suffix := 2; ; suffix++ {
+		if _, exists := used[name]; !exists {
+			used[name] = struct{}{}
+			return name
+		}
+		tail := fmt.Sprintf("-%d", suffix)
+		baseRunes := []rune(base)
+		if len(baseRunes)+len([]rune(tail)) > 31 {
+			baseRunes = baseRunes[:31-len([]rune(tail))]
+		}
+		name = string(baseRunes) + tail
+	}
 }
 
 func writeDetailSheet(book *excelize.File, headerStyle int, result DailyResult) (returnErr error) {
@@ -173,6 +321,7 @@ func writeExplanationSheet(book *excelize.File, headerStyle, wrapStyle int, docu
 		{"查询范围", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.Result.StartDate + " 至 " + document.Result.EndDate)}},
 		{"统计时区", excelize.Cell{StyleID: wrapStyle, Value: "Asia/Shanghai"}},
 		{"点位清单", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(pointList(document.Result.Items))}},
+		{"未完整日期", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(strings.Join(document.Result.IncompleteDates, "、"))}},
 		{"导出时间", excelize.Cell{StyleID: wrapStyle, Value: document.ExportedAt.In(location).Format("2006-01-02 15:04:05")}},
 		{"导出用户", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.ExportedBy)}},
 	}

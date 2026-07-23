@@ -75,7 +75,7 @@ func TestReportControllerDailyQueryForViewer(t *testing.T) {
 	response := serveReportRequest(controller, project.Viewer, http.MethodPost, "/api/v1/statistics/daily-by-point/query", `{"project_id":9,"start_date":"2026-07-20","end_date":"2026-07-20","point_ids":[3]}`)
 
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
-	require.JSONEq(t, `{"timezone":"Asia/Shanghai","start_date":"2026-07-20","end_date":"2026-07-20","point_count":1,"day_count":1,"total_pv":12,"items":[{"date":"2026-07-20","complete":false,"point_id":3,"point_code":"checkout","point_name":"下单","pv":12,"uv":5,"uv_mode":"EXACT"}]}`, response.Body.String())
+	require.JSONEq(t, `{"timezone":"Asia/Shanghai","start_date":"2026-07-20","end_date":"2026-07-20","point_count":1,"day_count":1,"total_pv":12,"incomplete_dates":["2026-07-20"],"items":[{"date":"2026-07-20","complete":false,"point_id":3,"point_code":"checkout","point_name":"下单","pv":12,"uv":5,"uv_mode":"EXACT"}]}`, response.Body.String())
 }
 
 func TestReportControllerRejectsInvalidAndNonStrictJSON(t *testing.T) {

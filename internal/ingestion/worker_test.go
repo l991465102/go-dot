@@ -250,6 +250,22 @@ func validWorkerMessage() ports.Message {
 	return ports.Message{ID: "1-0", Stream: EventStream, BatchID: "batch-1", Payload: payload, Deliveries: 1}
 }
 
+func TestWorkerOnlyPersistsPresentConfiguredAnalyticsProperties(t *testing.T) {
+	message := validWorkerMessage()
+	var payload batchPayload[NormalizedEvent]
+	require.NoError(t, json.Unmarshal(message.Payload, &payload))
+	payload.Events[0].AnalyticsProperties = []tracking.Property{
+		{Code: "a", Type: tracking.Integer, Analytics: tracking.PropertyAnalytics{Mode: tracking.AnalyticsMetric, Aggregations: []tracking.MetricAggregation{tracking.AggregateCount}}},
+		{Code: "missing", Type: tracking.String, Analytics: tracking.PropertyAnalytics{Mode: tracking.AnalyticsDimension}},
+	}
+	message.Payload, _ = json.Marshal(payload)
+	store := &workerStore{}
+
+	require.NoError(t, testWorker(&workerQueue{}, store, &workerCounter{}).Handle(context.Background(), message))
+	require.Len(t, store.valid, 1)
+	require.Equal(t, []ports.StoredProperty{{Code: "a", Type: "INTEGER", AnalyticsMode: "METRIC", Value: json.Number("1")}}, store.valid[0].AnalyticsProperties)
+}
+
 type callLog struct{ entries []string }
 
 func (l *callLog) add(entry string) { l.entries = append(l.entries, entry) }
@@ -258,6 +274,7 @@ type workerStore struct {
 	log                *callLog
 	err                error
 	validCalls         int
+	valid              []ports.StoredEvent
 	invalidCalls       int
 	invalid            []ports.InvalidEvent
 	blockUntilCanceled bool
@@ -267,6 +284,7 @@ type workerStore struct {
 
 func (s *workerStore) SaveValid(ctx context.Context, _ string, events []ports.StoredEvent) error {
 	s.validCalls++
+	s.valid = append(s.valid, events...)
 	if s.log != nil {
 		s.log.add("store-valid")
 	}

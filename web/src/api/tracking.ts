@@ -5,6 +5,8 @@ export type DefinitionState = 'DRAFT' | 'PUBLISHED' | 'DEPRECATED'
 export type DevelopmentState = 'PENDING' | 'DEVELOPING' | 'TESTING' | 'ONLINE'
 export type BehaviorType = 'PAGE_VIEW' | 'ELEMENT_EXPOSE' | 'ELEMENT_CLICK' | 'BUSINESS_ACTION' | 'BUSINESS_RESULT' | 'CUSTOM'
 export type PropertyType = 'STRING' | 'INTEGER' | 'DECIMAL' | 'BOOLEAN' | 'DATETIME' | 'ENUM' | 'ARRAY'
+export type PropertyAnalyticsMode = 'NONE' | 'METRIC' | 'DIMENSION'
+export type MetricAggregation = 'COUNT' | 'SUM' | 'AVG' | 'MIN' | 'MAX'
 export type Platform = 'web' | 'ios' | 'android' | 'mini_program' | 'server'
 export type UVMode = 'APPROXIMATE' | 'EXACT'
 export type TimeBasis = 'CLIENT' | 'SERVER'
@@ -12,7 +14,11 @@ export type TimeBasis = 'CLIENT' | 'SERVER'
 export interface Category { id: number; project_id: number; parent_id?: number; code: string; name: string; level: CategoryLevel; description?: string; sort_order: number; active: boolean; created_by: number }
 export interface CategoryInput { parent_id?: number; code: string; name: string; level: CategoryLevel; description?: string; sort_order: number }
 export interface CategoryUpdate { name: string; description?: string; sort_order: number; active: boolean }
-export interface PointProperty { code: string; name: string; type: PropertyType | ''; required: boolean; enum_values?: string[]; array_item_type?: Exclude<PropertyType, 'ENUM' | 'ARRAY'>; example_value?: unknown; description?: string; sort_order: number }
+export interface PointProperty {
+  code: string; name: string; type: PropertyType | ''; required: boolean; enum_values?: string[];
+  array_item_type?: Exclude<PropertyType, 'ENUM' | 'ARRAY'>; example_value?: unknown; description?: string;
+  analytics?: { mode: PropertyAnalyticsMode; aggregations?: MetricAggregation[] }; sort_order: number
+}
 export interface Point {
   id: number; project_id: number; category_id: number; category: Category; category_path: Array<Pick<Category, 'id'|'code'|'name'|'level'>>;
   code: string; name: string; description?: string; behavior_type: BehaviorType | ''; definition_state: DefinitionState; development_state: DevelopmentState;

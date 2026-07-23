@@ -45,6 +45,10 @@ func (r *ReportRepository) List(ctx context.Context, projectID uint64) ([]report
 		if err != nil {
 			return nil, err
 		}
+		items[i].Properties, err = loadReportProperties(ctx, r.db, projectID, items[i].ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return items, nil
 }
@@ -59,6 +63,9 @@ func (r *ReportRepository) Get(ctx context.Context, projectID, reportID uint64) 
 		return report, err
 	}
 	report.Points, err = loadReportPoints(ctx, r.db, projectID, reportID)
+	if err == nil {
+		report.Properties, err = loadReportProperties(ctx, r.db, projectID, reportID)
+	}
 	return report, err
 }
 
@@ -83,6 +90,9 @@ func (r *ReportRepository) Create(ctx context.Context, projectID, actorID uint64
 		Points: pointRefs(in.PointIDs),
 	}
 	if err = insertPointMappings(ctx, tx, projectID, created.ID, in.PointIDs); err != nil {
+		return created, err
+	}
+	if err = insertPropertyMappings(ctx, tx, created.ID, in.PropertySelections); err != nil {
 		return created, err
 	}
 	if err = tx.QueryRowContext(ctx, `SELECT created_at,updated_at FROM custom_report WHERE id=? AND project_id=?`, created.ID, projectID).Scan(&created.CreatedAt, &created.UpdatedAt); err != nil {
@@ -124,7 +134,13 @@ WHERE id=? AND project_id=? AND updated_at=?`, in.Name, in.Description, in.Defau
 	if _, err = tx.ExecContext(ctx, `DELETE rp FROM custom_report_point rp JOIN custom_report r ON r.id=rp.report_id WHERE rp.report_id=? AND r.project_id=?`, reportID, projectID); err != nil {
 		return updated, err
 	}
+	if _, err = tx.ExecContext(ctx, `DELETE cp FROM custom_report_property cp JOIN custom_report r ON r.id=cp.report_id WHERE cp.report_id=? AND r.project_id=?`, reportID, projectID); err != nil {
+		return updated, err
+	}
 	if err = insertPointMappings(ctx, tx, projectID, reportID, in.PointIDs); err != nil {
+		return updated, err
+	}
+	if err = insertPropertyMappings(ctx, tx, reportID, in.PropertySelections); err != nil {
 		return updated, err
 	}
 	updated = reporting.Report{
@@ -145,6 +161,58 @@ WHERE id=? AND project_id=? AND updated_at=?`, in.Name, in.Description, in.Defau
 		return updated, err
 	}
 	return updated, nil
+}
+
+func (r *ReportRepository) ResolveProperties(ctx context.Context, projectID uint64, requested []reporting.PropertySelection) ([]reporting.PropertyRef, error) {
+	if len(requested) == 0 {
+		return []reporting.PropertyRef{}, nil
+	}
+	conditions := make([]string, 0, len(requested))
+	args := []any{projectID}
+	for _, selection := range requested {
+		conditions = append(conditions, "(p.id=? AND pp.code=?)")
+		args = append(args, selection.PointID, selection.PropertyCode)
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT p.id,p.code,p.uv_mode,pp.code,pp.name,pp.data_type,
+pp.enum_values,pp.analytics_mode,pp.analytics_aggregations
+FROM tracking_point p JOIN tracking_point_property pp ON pp.point_id=p.id
+WHERE p.project_id=? AND p.definition_state IN ('PUBLISHED','DEPRECATED') AND (`+strings.Join(conditions, " OR ")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	found := make(map[string]reporting.PropertyRef, len(requested))
+	for rows.Next() {
+		var ref reporting.PropertyRef
+		var enumJSON, aggregationJSON []byte
+		if err := rows.Scan(&ref.PointID, &ref.PointCode, &ref.UVMode, &ref.PropertyCode, &ref.PropertyName,
+			&ref.Type, &enumJSON, &ref.Analytics.Mode, &aggregationJSON); err != nil {
+			return nil, err
+		}
+		if len(enumJSON) > 0 {
+			if err := json.Unmarshal(enumJSON, &ref.EnumValues); err != nil {
+				return nil, err
+			}
+		}
+		if len(aggregationJSON) > 0 {
+			if err := json.Unmarshal(aggregationJSON, &ref.Analytics.Aggregations); err != nil {
+				return nil, err
+			}
+		}
+		found[fmt.Sprintf("%d:%s", ref.PointID, ref.PropertyCode)] = ref
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	resolved := make([]reporting.PropertyRef, 0, len(requested))
+	for i, selection := range requested {
+		if ref, ok := found[fmt.Sprintf("%d:%s", selection.PointID, selection.PropertyCode)]; ok {
+			ref.PropertySelection = selection
+			ref.SortNo = i
+			resolved = append(resolved, ref)
+		}
+	}
+	return resolved, nil
 }
 
 func (r *ReportRepository) Delete(ctx context.Context, projectID, reportID uint64) (err error) {
@@ -228,6 +296,44 @@ func loadReportPoints(ctx context.Context, q queryer, projectID, reportID uint64
 	return points, rows.Err()
 }
 
+func loadReportProperties(ctx context.Context, q queryer, projectID, reportID uint64) ([]reporting.PropertyRef, error) {
+	rows, err := q.QueryContext(ctx, `SELECT p.id,p.code,p.uv_mode,pp.code,pp.name,pp.data_type,
+pp.enum_values,pp.analytics_mode,pp.analytics_aggregations,cp.aggregations,cp.sort_no
+FROM custom_report_property cp
+JOIN custom_report r ON r.id=cp.report_id
+JOIN tracking_point p ON p.id=cp.point_id AND p.project_id=r.project_id
+JOIN tracking_point_property pp ON pp.point_id=p.id AND pp.code=cp.property_code
+WHERE r.project_id=? AND cp.report_id=? ORDER BY cp.sort_no`, projectID, reportID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]reporting.PropertyRef, 0)
+	for rows.Next() {
+		var ref reporting.PropertyRef
+		var enumJSON, allowedJSON, selectedJSON []byte
+		if err := rows.Scan(&ref.PointID, &ref.PointCode, &ref.UVMode, &ref.PropertyCode, &ref.PropertyName,
+			&ref.Type, &enumJSON, &ref.Analytics.Mode, &allowedJSON, &selectedJSON, &ref.SortNo); err != nil {
+			return nil, err
+		}
+		if len(enumJSON) > 0 {
+			if err := json.Unmarshal(enumJSON, &ref.EnumValues); err != nil {
+				return nil, err
+			}
+		}
+		if len(allowedJSON) > 0 {
+			if err := json.Unmarshal(allowedJSON, &ref.Analytics.Aggregations); err != nil {
+				return nil, err
+			}
+		}
+		if err := json.Unmarshal(selectedJSON, &ref.Aggregations); err != nil {
+			return nil, err
+		}
+		result = append(result, ref)
+	}
+	return result, rows.Err()
+}
+
 func insertPointMappings(ctx context.Context, tx *sql.Tx, projectID, reportID uint64, pointIDs []uint64) error {
 	for sortNo, pointID := range pointIDs {
 		result, err := tx.ExecContext(ctx, `INSERT INTO custom_report_point(report_id,point_id,sort_no)
@@ -242,6 +348,21 @@ WHERE p.id=? AND p.project_id=? AND p.definition_state IN ('PUBLISHED','DEPRECAT
 		}
 		if affected != 1 {
 			return reporting.ErrInvalid
+		}
+	}
+	return nil
+}
+
+func insertPropertyMappings(ctx context.Context, tx *sql.Tx, reportID uint64, selections []reporting.PropertySelection) error {
+	for sortNo, selection := range selections {
+		aggregations, err := json.Marshal(selection.Aggregations)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO custom_report_property(report_id,point_id,property_code,aggregations,sort_no) VALUES(?,?,?,?,?)`,
+			reportID, selection.PointID, selection.PropertyCode, aggregations, sortNo)
+		if err != nil {
+			return reportConflict(err)
 		}
 	}
 	return nil

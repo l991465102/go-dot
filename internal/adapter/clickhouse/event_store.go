@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	ch "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/lzw7758/go-dot/internal/ports"
+	"github.com/shopspring/decimal"
 )
 
 type Executor interface {
@@ -21,17 +23,22 @@ type Executor interface {
 }
 
 type EventStore struct {
-	db           Executor
-	validTable   string
-	invalidTable string
+	db            Executor
+	validTable    string
+	invalidTable  string
+	propertyTable string
 }
 
 func New(db Executor) *EventStore {
-	return newWithTables(db, "tracking_event", "tracking_invalid_event")
+	return newWithAllTables(db, "tracking_event", "tracking_invalid_event", "tracking_property_event")
 }
 
 func newWithTables(db Executor, validTable, invalidTable string) *EventStore {
-	return &EventStore{db: db, validTable: validTable, invalidTable: invalidTable}
+	return newWithAllTables(db, validTable, invalidTable, "")
+}
+
+func newWithAllTables(db Executor, validTable, invalidTable, propertyTable string) *EventStore {
+	return &EventStore{db: db, validTable: validTable, invalidTable: invalidTable, propertyTable: propertyTable}
 }
 
 func (s *EventStore) SaveValid(ctx context.Context, token string, events []ports.StoredEvent) error {
@@ -71,7 +78,115 @@ func (s *EventStore) SaveValid(ctx context.Context, token string, events []ports
 	if _, err := s.db.ExecContext(insertContext(ctx, token), query, args...); err != nil {
 		return fmt.Errorf("insert valid events: %w", err)
 	}
+	return s.saveProperties(ctx, token, events)
+}
+
+func (s *EventStore) saveProperties(ctx context.Context, token string, events []ports.StoredEvent) error {
+	if s.propertyTable == "" {
+		return nil
+	}
+	const columns = `(event_id,project_id,point_id,point_code,point_version,property_code,property_type,value_string,value_integer,value_decimal,visitor_hash,uv_mode,statistic_at,statistic_date,received_at,version)`
+	rows := make([]string, 0)
+	args := make([]any, 0)
+	for eventIndex, event := range events {
+		statisticDate, err := localDate(event.StatisticAt, event.ProjectTimezone)
+		if err != nil {
+			return fmt.Errorf("property event %d: %w", eventIndex, err)
+		}
+		version := event.Version
+		if version == 0 {
+			version = timestampVersion(event.ReceivedAt)
+		}
+		for _, property := range event.AnalyticsProperties {
+			valueString, valueInteger, valueDecimal, err := storedPropertyValues(property)
+			if err != nil {
+				return fmt.Errorf("property event %d property %s: %w", eventIndex, property.Code, err)
+			}
+			rows = append(rows, placeholders(16))
+			args = append(args,
+				event.EventID, event.ProjectID, event.PointID, event.PointCode, event.PointVersion,
+				property.Code, property.Type, valueString, valueInteger, valueDecimal,
+				fmt.Sprintf("%064x", event.VisitorHash), event.UVMode, event.StatisticAt.UTC(),
+				statisticDate, event.ReceivedAt.UTC(), version,
+			)
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	query := `INSERT INTO ` + s.propertyTable + ` ` + columns + ` VALUES ` + strings.Join(rows, ",")
+	if _, err := s.db.ExecContext(insertContext(ctx, token+":properties"), query, args...); err != nil {
+		return fmt.Errorf("insert property events: %w", err)
+	}
 	return nil
+}
+
+func storedPropertyValues(property ports.StoredProperty) (string, any, any, error) {
+	switch property.AnalyticsMode {
+	case "METRIC":
+		number, err := decimalFromValue(property.Value)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		if property.Type == "INTEGER" {
+			integer := number.IntPart()
+			exact := number.Equal(decimal.NewFromInt(integer))
+			if !exact {
+				return "", nil, nil, errors.New("INTEGER analytics value must be an integer")
+			}
+			return "", integer, number, nil
+		}
+		if property.Type != "DECIMAL" {
+			return "", nil, nil, fmt.Errorf("unsupported METRIC property type %s", property.Type)
+		}
+		return "", nil, number, nil
+	case "DIMENSION":
+		switch value := property.Value.(type) {
+		case string:
+			return value, nil, nil, nil
+		case bool:
+			return strconv.FormatBool(value), nil, nil, nil
+		default:
+			return "", nil, nil, fmt.Errorf("unsupported DIMENSION value type %T", property.Value)
+		}
+	default:
+		return "", nil, nil, fmt.Errorf("unsupported analytics mode %s", property.AnalyticsMode)
+	}
+}
+
+func decimalFromValue(value any) (decimal.Decimal, error) {
+	switch number := value.(type) {
+	case json.Number:
+		return decimal.NewFromString(number.String())
+	case string:
+		return decimal.NewFromString(number)
+	case int:
+		return decimal.NewFromInt(int64(number)), nil
+	case int8:
+		return decimal.NewFromInt(int64(number)), nil
+	case int16:
+		return decimal.NewFromInt(int64(number)), nil
+	case int32:
+		return decimal.NewFromInt(int64(number)), nil
+	case int64:
+		return decimal.NewFromInt(number), nil
+	case uint:
+		return decimal.NewFromString(strconv.FormatUint(uint64(number), 10))
+	case uint8:
+		return decimal.NewFromInt(int64(number)), nil
+	case uint16:
+		return decimal.NewFromInt(int64(number)), nil
+	case uint32:
+		return decimal.NewFromInt(int64(number)), nil
+	case uint64:
+		return decimal.NewFromString(strconv.FormatUint(number, 10))
+	case float32:
+		return decimal.NewFromString(strconv.FormatFloat(float64(number), 'g', -1, 32))
+	case float64:
+		return decimal.NewFromString(strconv.FormatFloat(number, 'g', -1, 64))
+	default:
+		return decimal.Decimal{}, fmt.Errorf("unsupported numeric value type %T", value)
+	}
 }
 
 func (s *EventStore) SaveInvalid(ctx context.Context, token string, events []ports.InvalidEvent) error {
@@ -111,7 +226,8 @@ func validateStore(store *EventStore, token string) error {
 	if strings.TrimSpace(token) == "" {
 		return errors.New("ClickHouse insert deduplication token is required")
 	}
-	if !identifierPattern.MatchString(store.validTable) || !identifierPattern.MatchString(store.invalidTable) {
+	if !identifierPattern.MatchString(store.validTable) || !identifierPattern.MatchString(store.invalidTable) ||
+		(store.propertyTable != "" && !identifierPattern.MatchString(store.propertyTable)) {
 		return errors.New("invalid ClickHouse event table name")
 	}
 	return nil

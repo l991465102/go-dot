@@ -466,7 +466,7 @@ func findPoint(ctx context.Context, q queryer, id uint64, lock bool, projectIDs 
 const pointSelectSQL = `SELECT p.id,p.project_id,p.category_id,p.code,p.name,p.description,p.behavior_type,p.definition_state,p.development_state,p.trigger_page,p.trigger_timing,p.trigger_count_rule,p.abnormal_trigger_rule,p.count_pv,p.count_uv,p.uv_mode,p.time_basis,p.supported_platforms,p.supported_channels,p.product_owner,p.developer_owner,p.requirement_url,p.published_version,p.deprecation_reason,p.replacement_point_id,p.created_by,p.updated_by,c.id,c.project_id,c.level,c.is_active,c.code,c.name,c.parent_id FROM tracking_point p JOIN tracking_category c ON c.id=p.category_id`
 
 func findProperties(ctx context.Context, q queryer, pointID uint64) ([]tracking.Property, error) {
-	rows, err := q.QueryContext(ctx, `SELECT code,name,data_type,is_required,enum_values,array_item_type,example_value,description,sort_order FROM tracking_point_property WHERE point_id=? ORDER BY sort_order,id`, pointID)
+	rows, err := q.QueryContext(ctx, `SELECT code,name,data_type,is_required,enum_values,array_item_type,example_value,description,analytics_mode,analytics_aggregations,sort_order FROM tracking_point_property WHERE point_id=? ORDER BY sort_order,id`, pointID)
 	if err != nil {
 		return nil, err
 	}
@@ -474,9 +474,9 @@ func findProperties(ctx context.Context, q queryer, pointID uint64) ([]tracking.
 	properties := []tracking.Property{}
 	for rows.Next() {
 		var p tracking.Property
-		var enums, example []byte
+		var enums, example, aggregations []byte
 		var item, description sql.NullString
-		if err := rows.Scan(&p.Code, &p.Name, &p.Type, &p.Required, &enums, &item, &example, &description, &p.SortOrder); err != nil {
+		if err := rows.Scan(&p.Code, &p.Name, &p.Type, &p.Required, &enums, &item, &example, &description, &p.Analytics.Mode, &aggregations, &p.SortOrder); err != nil {
 			return nil, err
 		}
 		p.ArrayItemType = tracking.PropertyType(item.String)
@@ -488,6 +488,11 @@ func findProperties(ctx context.Context, q queryer, pointID uint64) ([]tracking.
 		}
 		if len(example) > 0 {
 			if err := json.Unmarshal(example, &p.ExampleValue); err != nil {
+				return nil, err
+			}
+		}
+		if len(aggregations) > 0 {
+			if err := json.Unmarshal(aggregations, &p.Analytics.Aggregations); err != nil {
 				return nil, err
 			}
 		}
@@ -810,7 +815,7 @@ func (r *TrackingRepository) Deprecate(ctx context.Context, projectID, id, actor
 
 func insertProperties(ctx context.Context, tx *sql.Tx, pointID uint64, properties []tracking.Property) error {
 	for _, p := range properties {
-		var enums, example any
+		var enums, example, aggregations any
 		if len(p.EnumValues) > 0 {
 			b, err := json.Marshal(p.EnumValues)
 			if err != nil {
@@ -825,7 +830,18 @@ func insertProperties(ctx context.Context, tx *sql.Tx, pointID uint64, propertie
 			}
 			example = b
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tracking_point_property(point_id,code,name,data_type,is_required,enum_values,array_item_type,example_value,description,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?)`, pointID, p.Code, p.Name, p.Type, p.Required, enums, nullable(string(p.ArrayItemType)), example, nullable(p.Description), p.SortOrder); err != nil {
+		if len(p.Analytics.Aggregations) > 0 {
+			b, err := json.Marshal(p.Analytics.Aggregations)
+			if err != nil {
+				return err
+			}
+			aggregations = b
+		}
+		mode := p.Analytics.Mode
+		if mode == "" {
+			mode = tracking.AnalyticsNone
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO tracking_point_property(point_id,code,name,data_type,is_required,enum_values,array_item_type,example_value,description,analytics_mode,analytics_aggregations,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, pointID, p.Code, p.Name, p.Type, p.Required, enums, nullable(string(p.ArrayItemType)), example, nullable(p.Description), mode, aggregations, p.SortOrder); err != nil {
 			return err
 		}
 	}

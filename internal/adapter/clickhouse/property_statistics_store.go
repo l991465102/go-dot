@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,25 @@ import (
 type PropertyStatisticsStore struct {
 	db                                                                   StatisticsExecutor
 	rawTable, metricTable, approximateTable, exactTable, generationTable string
+}
+
+func (s *PropertyStatisticsStore) ConfigureRetention(ctx context.Context, days int) error {
+	if s == nil || s.db == nil {
+		return errors.New("ClickHouse property statistics executor is required")
+	}
+	if days < 90 {
+		return errors.New("property aggregate retention must be at least 90 days")
+	}
+	for _, table := range []string{s.metricTable, s.approximateTable, s.exactTable} {
+		if !identifierPattern.MatchString(table) {
+			return errors.New("invalid ClickHouse property statistics table name")
+		}
+		query := `ALTER TABLE ` + table + ` MODIFY TTL hour + INTERVAL ` + strconv.Itoa(days) + ` DAY DELETE`
+		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("configure property aggregate retention for %s: %w", table, err)
+		}
+	}
+	return nil
 }
 
 func NewPropertyStatisticsStore(db StatisticsExecutor) *PropertyStatisticsStore {

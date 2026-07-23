@@ -75,12 +75,12 @@ func TestExcelExporterProtectsEveryUserControlledTextCellFromFormulaInjection(t 
 
 	require.Equal(t, "'"+dangerous, cellValue(t, book, "报表说明", "B2"))
 	require.Equal(t, "'@description", cellValue(t, book, "报表说明", "B3"))
-	require.Equal(t, "'=user", cellValue(t, book, "报表说明", "B9"))
+	require.Equal(t, "'=user", cellValue(t, book, "报表说明", "B10"))
 	require.Equal(t, "'+code_pv", cellValue(t, book, "点位统计", "B1"))
 	require.Equal(t, "'+code_uv", cellValue(t, book, "点位统计", "C1"))
 	for _, target := range []struct{ sheet, cell string }{
 		{sheet: "报表说明", cell: "B2"}, {sheet: "报表说明", cell: "B3"},
-		{sheet: "报表说明", cell: "B9"}, {sheet: "点位统计", cell: "B1"},
+		{sheet: "报表说明", cell: "B10"}, {sheet: "点位统计", cell: "B1"},
 		{sheet: "点位统计", cell: "C1"},
 	} {
 		formula, err := book.GetCellFormula(target.sheet, target.cell)
@@ -96,14 +96,17 @@ func TestExcelExporterAddsOnlySelectedPropertySheets(t *testing.T) {
 			StartDate: "2026-07-19", EndDate: "2026-07-20", IncompleteDates: []string{"2026-07-20"},
 			MetricSections: []MetricSection{{
 				Columns: []MetricColumn{
-					{Key: "checkout_amount_sum", Label: "checkout_amount_sum", Aggregation: tracking.AggregateSum},
-					{Key: "checkout_amount_avg", Label: "checkout_amount_avg", Aggregation: tracking.AggregateAvg},
+					{Key: "checkout_amount_sum", Label: "checkout_amount_sum", PointCode: "checkout", PropertyCode: "amount", Aggregation: tracking.AggregateSum},
+					{Key: "checkout_amount_avg", Label: "checkout_amount_avg", PointCode: "checkout", PropertyCode: "amount", Aggregation: tracking.AggregateAvg},
 				},
 				Rows: []MetricRow{{Date: "2026-07-20", Values: map[string]*string{"checkout_amount_sum": &sum, "checkout_amount_avg": &avg}}},
 			}},
 			DimensionSections: []DimensionSection{{
 				PointID: 3, PointCode: "checkout", PropertyCode: "status", PropertyName: "状态",
-				Rows: []DimensionRow{{Date: "2026-07-20", Value: "success", EventCount: 3, UV: 2, Share: 1}},
+				Rows: []DimensionRow{
+					{Date: "2026-07-20", Value: "success", EventCount: 3, UV: 2, Share: 1},
+					{Date: "2026-07-20", Value: "", EventCount: 1, UV: 1, Share: 0.25},
+				},
 			}},
 		},
 		ExportedAt: time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC),
@@ -122,7 +125,9 @@ func TestExcelExporterAddsOnlySelectedPropertySheets(t *testing.T) {
 	dimensionRows, err := book.GetRows("分类-checkout_status")
 	require.NoError(t, err)
 	require.Equal(t, []string{"2026-07-20", "success", "3", "2", "1"}, dimensionRows[1])
-	require.Equal(t, "2026-07-20", cellValue(t, book, "报表说明", "B7"))
+	require.Equal(t, "空字符串", dimensionRows[2][1])
+	require.Equal(t, "checkout.amount[SUM]、checkout.amount[AVG]、checkout.status[分类]", cellValue(t, book, "报表说明", "B7"))
+	require.Equal(t, "2026-07-20", cellValue(t, book, "报表说明", "B8"))
 }
 
 func TestSafeSpreadsheetTextDetectsOperatorsAfterIgnorablePrefix(t *testing.T) {

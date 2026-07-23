@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/lzw7758/go-dot/internal/reporting"
 	"github.com/lzw7758/go-dot/internal/tracking"
@@ -40,7 +42,30 @@ func (s *PropertyStatisticsStore) QueryPropertyDaily(ctx context.Context, filter
 			return result, fmt.Errorf("unsupported analytics mode %s", property.Analytics.Mode)
 		}
 	}
+	hours, err := s.queryCommittedPropertyHours(ctx, filter)
+	if err != nil {
+		return result, err
+	}
+	result.CommittedHours = hours
 	return result, nil
+}
+
+func (s *PropertyStatisticsStore) queryCommittedPropertyHours(ctx context.Context, filter reporting.PropertyDailyFilter) ([]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT hour FROM `+s.generationTable+` FINAL WHERE project_id=? AND hour>=? AND hour<? ORDER BY hour`,
+		filter.ProjectID, filter.Start.UTC(), filter.End.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("query committed property hours: %w", err)
+	}
+	defer rows.Close()
+	var hours []time.Time
+	for rows.Next() {
+		var hour time.Time
+		if err := rows.Scan(&hour); err != nil {
+			return nil, fmt.Errorf("scan committed property hour: %w", err)
+		}
+		hours = append(hours, hour.UTC())
+	}
+	return hours, rows.Err()
 }
 
 func (s *PropertyStatisticsStore) queryMetricDaily(ctx context.Context, filter reporting.PropertyDailyFilter, property reporting.PropertyRef) ([]reporting.MetricAggregate, error) {
@@ -51,8 +76,35 @@ INNER JOIN ` + s.generationTable + ` AS g FINAL
 ON s.project_id=g.project_id AND s.hour=g.hour AND s.version=g.generation
 WHERE s.project_id=? AND s.hour>=? AND s.hour<? AND s.point_id=? AND s.property_code=?
 GROUP BY s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version`
-	query := `SELECT toString(toDate(hour,'Asia/Shanghai')),point_id,point_code,property_code,
-sum(value_count),toString(sum(value_sum)),toString(min(value_min)),toString(max(value_max))
+	needCount, needSum, needMin, needMax := false, false, false, false
+	for _, aggregation := range property.Aggregations {
+		switch aggregation {
+		case tracking.AggregateCount:
+			needCount = true
+		case tracking.AggregateSum:
+			needSum = true
+		case tracking.AggregateAvg:
+			needCount, needSum = true, true
+		case tracking.AggregateMin:
+			needMin = true
+		case tracking.AggregateMax:
+			needMax = true
+		}
+	}
+	metrics := make([]string, 0, 4)
+	if needCount {
+		metrics = append(metrics, "sum(value_count)")
+	}
+	if needSum {
+		metrics = append(metrics, "toString(sum(value_sum))")
+	}
+	if needMin {
+		metrics = append(metrics, "toString(min(value_min))")
+	}
+	if needMax {
+		metrics = append(metrics, "toString(max(value_max))")
+	}
+	query := `SELECT toString(toDate(hour,'Asia/Shanghai')),point_id,point_code,property_code,` + strings.Join(metrics, ",") + `
 FROM (` + inner + `) GROUP BY toDate(hour,'Asia/Shanghai'),point_id,point_code,property_code ORDER BY 1 DESC`
 	rows, err := s.db.QueryContext(ctx, query, filter.ProjectID, filter.Start.UTC(), filter.End.UTC(), property.PointID, property.PropertyCode)
 	if err != nil {
@@ -62,7 +114,20 @@ FROM (` + inner + `) GROUP BY toDate(hour,'Asia/Shanghai'),point_id,point_code,p
 	var result []reporting.MetricAggregate
 	for rows.Next() {
 		var item reporting.MetricAggregate
-		if err := rows.Scan(&item.Date, &item.PointID, &item.PointCode, &item.PropertyCode, &item.Count, &item.Sum, &item.Min, &item.Max); err != nil {
+		destinations := []any{&item.Date, &item.PointID, &item.PointCode, &item.PropertyCode}
+		if needCount {
+			destinations = append(destinations, &item.Count)
+		}
+		if needSum {
+			destinations = append(destinations, &item.Sum)
+		}
+		if needMin {
+			destinations = append(destinations, &item.Min)
+		}
+		if needMax {
+			destinations = append(destinations, &item.Max)
+		}
+		if err := rows.Scan(destinations...); err != nil {
 			return nil, fmt.Errorf("scan metric property %s: %w", property.PropertyCode, err)
 		}
 		result = append(result, item)

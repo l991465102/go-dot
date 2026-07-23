@@ -173,7 +173,7 @@ func writeDimensionSheet(book *excelize.File, headerStyle int, sheet string, sec
 		if coordinateErr != nil {
 			return coordinateErr
 		}
-		if err = stream.SetRow(cell, []interface{}{safeSpreadsheetText(item.Date), safeSpreadsheetText(item.Value), item.EventCount, item.UV, item.Share}); err != nil {
+		if err = stream.SetRow(cell, []interface{}{safeSpreadsheetText(item.Date), safeSpreadsheetText(dimensionDisplayValue(item.Value)), item.EventCount, item.UV, item.Share}); err != nil {
 			return err
 		}
 	}
@@ -321,6 +321,7 @@ func writeExplanationSheet(book *excelize.File, headerStyle, wrapStyle int, docu
 		{"查询范围", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.Result.StartDate + " 至 " + document.Result.EndDate)}},
 		{"统计时区", excelize.Cell{StyleID: wrapStyle, Value: "Asia/Shanghai"}},
 		{"点位清单", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(pointList(document.Result.Items))}},
+		{"属性选择", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(propertySelectionList(document.Result))}},
 		{"未完整日期", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(strings.Join(document.Result.IncompleteDates, "、"))}},
 		{"导出时间", excelize.Cell{StyleID: wrapStyle, Value: document.ExportedAt.In(location).Format("2006-01-02 15:04:05")}},
 		{"导出用户", excelize.Cell{StyleID: wrapStyle, Value: safeSpreadsheetText(document.ExportedBy)}},
@@ -335,6 +336,26 @@ func writeExplanationSheet(book *excelize.File, headerStyle, wrapStyle int, docu
 		}
 	}
 	return nil
+}
+
+func propertySelectionList(result DailyResult) string {
+	selections := make([]string, 0)
+	for _, section := range result.MetricSections {
+		for _, column := range section.Columns {
+			selections = append(selections, fmt.Sprintf("%s.%s[%s]", column.PointCode, column.PropertyCode, column.Aggregation))
+		}
+	}
+	for _, section := range result.DimensionSections {
+		selections = append(selections, fmt.Sprintf("%s.%s[分类]", section.PointCode, section.PropertyCode))
+	}
+	return strings.Join(selections, "、")
+}
+
+func dimensionDisplayValue(value string) string {
+	if value == "" {
+		return "空字符串"
+	}
+	return value
 }
 
 func pointList(items []DailyItem) string {

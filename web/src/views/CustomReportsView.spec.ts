@@ -159,7 +159,7 @@ describe('CustomReportsView', () => {
     await wrapper.get('[data-test="query-report"]').trigger('click')
     await flushPromises()
 
-    expect(reportsApi.queryDaily).toHaveBeenCalledWith({ project_id: 9, start_date: '2026-07-20', end_date: '2026-07-21', point_ids: [2, 1], property_selections: [] }, expect.any(AbortSignal))
+    expect(reportsApi.queryDaily).toHaveBeenCalledWith({ project_id: 9, start_date: '2026-07-20', end_date: '2026-07-21', point_ids: [2, 1], property_queries: [] }, expect.any(AbortSignal))
     expect(wrapper.text()).toContain('统计时区：Asia/Shanghai')
     expect(wrapper.text()).toContain('时间')
     expect(wrapper.text()).toContain('deprecated_pv')
@@ -178,13 +178,13 @@ describe('CustomReportsView', () => {
 
     await wrapper.get('[data-test="save-as-report"]').trigger('click')
     await flushPromises()
-    expect(reportsApi.createReport).toHaveBeenCalledWith(9, { name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], property_selections: [] })
+    expect(reportsApi.createReport).toHaveBeenCalledWith(9, { name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], property_queries: [] })
     expect(wrapper.text()).toContain('报表已创建')
 
     await wrapper.get('[data-test="save-report"]').trigger('click')
     await flushPromises()
     expect(reportsApi.updateReport).toHaveBeenCalledWith(9, 7, {
-      name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], property_selections: [], expected_updated_at: 'snapshot-v1',
+      name: '核心日报', description: '当前编辑', default_days: 30, point_ids: [2, 1], property_queries: [], expected_updated_at: 'snapshot-v1',
     })
 
     await wrapper.get('[data-test="save-report"]').trigger('click')
@@ -195,7 +195,7 @@ describe('CustomReportsView', () => {
     await wrapper.get('[data-test="export-report"]').trigger('click')
     await flushPromises()
     expect(reportsApi.exportDaily).toHaveBeenCalledWith({
-      project_id: 9, start_date: '2026-07-19', end_date: '2026-07-20', point_ids: [2, 1], property_selections: [],
+      project_id: 9, start_date: '2026-07-19', end_date: '2026-07-20', point_ids: [2, 1], property_queries: [],
       report_name: '核心日报', report_description: '当前编辑',
     })
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
@@ -239,8 +239,44 @@ describe('CustomReportsView', () => {
 
     expect(reportsApi.queryDaily).toHaveBeenCalledWith(expect.objectContaining({
       point_ids: [1],
-      property_selections: [{ point_id: 1, property_code: 'amount', aggregations: ['COUNT', 'SUM'] }],
+      property_queries: [{ point_id: 1, property_code: 'amount', aggregations: ['COUNT', 'SUM'] }],
     }), expect.any(AbortSignal))
+  })
+
+  it('restores saved properties outside the loaded point page and labels empty string values', async () => {
+    const saved = {
+      id: 12, project_id: 9, name: '历史分类报表', description: '', default_days: 7,
+      points: [{ id: 99, code: 'legacy', name: '历史点位', definition_state: 'DEPRECATED', uv_mode: 'EXACT', sort_no: 0 }],
+      properties: [{
+        point_id: 99, property_code: 'status', aggregations: [], sort_no: 0,
+        point_code: 'legacy', property_name: '状态', type: 'STRING',
+        analytics: { mode: 'DIMENSION', aggregations: [] }, enum_values: [], uv_mode: 'EXACT',
+      }],
+      created_by: 1, updated_by: 1, created_at: '2026-07-20T01:00:00Z', updated_at: 'v1',
+    } satisfies reportsApi.SavedReport
+    vi.mocked(reportsApi.listReports).mockResolvedValue([saved])
+    vi.mocked(reportsApi.getReport).mockResolvedValue(saved)
+    vi.mocked(reportsApi.queryDaily).mockResolvedValue({
+      timezone: 'Asia/Shanghai', start_date: '2026-07-15', end_date: '2026-07-21',
+      point_count: 1, day_count: 7, total_pv: 1, items: [],
+      dimension_sections: [{
+        point_id: 99, sort_no: 0, point_code: 'legacy', property_code: 'status', property_name: '状态',
+        rows: [{ date: '2026-07-20', complete: true, value: '', event_count: 1, uv: 1, share: 1 }],
+      }],
+    })
+
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+    wrapper.findAllComponents(ElSelect)[0]!.vm.$emit('update:modelValue', 12)
+    await flushPromises()
+    await wrapper.get('[data-test="query-report"]').trigger('click')
+    await flushPromises()
+
+    expect(reportsApi.queryDaily).toHaveBeenCalledWith(expect.objectContaining({
+      point_ids: [99],
+      property_queries: [{ point_id: 99, property_code: 'status', aggregations: [] }],
+    }), expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('空字符串')
   })
 
   it('lets viewers load, query, and export while hiding every mutation control', async () => {

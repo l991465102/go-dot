@@ -197,7 +197,7 @@ func parsePositivePathID(value string) (uint64, error) {
 }
 
 func reportError(w http.ResponseWriter, r *http.Request, err error) {
-	status, message := http.StatusInternalServerError, "reporting service unavailable"
+	status, message := http.StatusServiceUnavailable, "reporting service unavailable"
 	switch {
 	case errors.Is(err, reporting.ErrInvalid):
 		status, message = http.StatusBadRequest, "invalid report request"

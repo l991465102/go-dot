@@ -361,6 +361,9 @@ func TestQueryDailyOnlyBuildsSelectedPropertySectionsAndFillsDimensionZeros(t *t
 		Metrics:    []MetricAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "amount", Count: 2, Sum: "6", Min: "2", Max: "4"}},
 		Dimensions: []DimensionAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "status", Value: "success", EventCount: 3, UV: 2}},
 	}}
+	for hour := 0; hour < 24; hour++ {
+		propertyStore.data.CommittedHours = append(propertyStore.data.CommittedHours, time.Date(2026, 7, 18, 16+hour, 0, 0, 0, time.UTC))
+	}
 	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, &fakeDailyStore{}, nil, func() time.Time { return now }).
 		SetPropertyDailyStore(propertyStore)
 

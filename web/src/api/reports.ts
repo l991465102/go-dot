@@ -50,7 +50,7 @@ export interface ReportMutation {
   description: string
   default_days: number
   point_ids: number[]
-  property_selections?: PropertySelection[]
+  property_queries?: PropertySelection[]
 }
 
 export interface DailyQuery {
@@ -58,7 +58,7 @@ export interface DailyQuery {
   start_date: string
   end_date: string
   point_ids: number[]
-  property_selections?: PropertySelection[]
+  property_queries?: PropertySelection[]
 }
 
 export interface DailyExport extends DailyQuery {

@@ -54,6 +54,7 @@ const hasMorePoints = computed(() => pointPage.value > 0 && (
   publishedLoaded.value < publishedTotal.value || deprecatedLoaded.value < deprecatedTotal.value
 ))
 const wideTable = computed(() => lastResult.value ? buildDailyWideTable(lastResult.value, editable.points) : undefined)
+const selectedDimensionCount = computed(() => editable.propertySelections.filter((selection) => propertyDefinition(selection)?.analytics?.mode === 'DIMENSION').length)
 
 let projectController: AbortController | undefined
 let reportController: AbortController | undefined
@@ -135,7 +136,7 @@ function mutation(): ReportMutation | undefined {
   const days = Number(editable.defaultDays)
   if (!Number.isInteger(days) || days < 1 || days > 90) { error.value = '默认天数必须是 1 至 90 的整数'; return }
   if (!validQuery()) return
-  return { name: editable.name.trim(), description: editable.description.trim(), default_days: days, point_ids: editable.points.map((point) => point.id), property_selections: normalizedSelections() }
+  return { name: editable.name.trim(), description: editable.description.trim(), default_days: days, point_ids: editable.points.map((point) => point.id), property_queries: normalizedSelections() }
 }
 function snapshot(report: SavedReport): SavedReport {
   return {
@@ -236,7 +237,13 @@ function applySavedReport(report: SavedReport) {
   selectedReport.value = next; savedSnapshot.value = snapshot(report)
   editable.name = next.name; editable.description = next.description; editable.defaultDays = next.default_days
   editable.dateRange = rangeForDays(next.default_days)
-  editable.points = [...(next.points ?? [])].sort((a, b) => a.sort_no - b.sort_no).map((point) => ({ ...point }))
+  editable.points = [...(next.points ?? [])].sort((a, b) => a.sort_no - b.sort_no).map((point) => {
+    const selectedProperties = (next.properties ?? []).filter((property) => property.point_id === point.id).map((property) => ({
+      code: property.property_code, name: property.property_name, type: property.type, required: false,
+      enum_values: property.enum_values, analytics: property.analytics, sort_order: property.sort_no ?? 0,
+    }))
+    return { ...point, properties: point.properties?.length ? point.properties : selectedProperties }
+  })
   editable.propertySelections = [...(next.properties ?? [])].sort((a, b) => (a.sort_no ?? 0) - (b.sort_no ?? 0)).map((property) => ({
     point_id: property.point_id, property_code: property.property_code, aggregations: [...(property.aggregations ?? [])],
   }))
@@ -320,11 +327,12 @@ function normalizedSelections(): PropertySelection[] {
   const order = new Map(editable.points.map((point, index) => [point.id, index]))
   return editable.propertySelections
     .map((selection) => ({ ...selection, aggregations: selection.aggregations ? [...selection.aggregations] : undefined }))
-    .sort((a, b) => (order.get(a.point_id) ?? 0) - (order.get(b.point_id) ?? 0) || a.property_code.localeCompare(b.property_code))
+    .sort((a, b) => (order.get(a.point_id) ?? 0) - (order.get(b.point_id) ?? 0))
 }
 function aggregationLabel(value: MetricAggregation) {
   return ({ COUNT: '有值次数', SUM: '求和', AVG: '平均值', MIN: '最小值', MAX: '最大值' } as const)[value]
 }
+function dimensionValueLabel(value: string) { return value === '' ? '空字符串' : value }
 
 function replaceReport(report: SavedReport) {
   const normalized = snapshot({ ...report, points: report.points ?? editable.points.map((point, index) => ({ ...point, sort_no: index })) })
@@ -375,7 +383,7 @@ async function runQuery() {
   const id = projectId.value; const epoch = contextEpoch
   querying.value = true; success.value = ''; error.value = ''
   try {
-    const result = await queryDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_selections: normalizedSelections() }, active.signal)
+    const result = await queryDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_queries: normalizedSelections() }, active.signal)
     if (owns(active, epoch, id, queryController)) lastResult.value = result
   } catch (cause) { if (owns(active, epoch, id, queryController) && !isCanceled(cause)) error.value = userError(cause, '报表查询失败') }
   finally { if (owns(active, epoch, id, queryController)) querying.value = false }
@@ -385,7 +393,7 @@ async function download() {
   const id = projectId.value; const epoch = contextEpoch; const token = ++sequence; exportToken = token
   exporting.value = true; success.value = ''; error.value = ''
   try {
-    const { blob, filename } = await exportDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_selections: normalizedSelections(), report_name: editable.name.trim(), report_description: editable.description.trim() })
+    const { blob, filename } = await exportDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_queries: normalizedSelections(), report_name: editable.name.trim(), report_description: editable.description.trim() })
     if (!operationOwns(token, epoch, id, 'export')) return
     const url = URL.createObjectURL(blob)
     try { const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename; anchor.click() }
@@ -451,6 +459,7 @@ onBeforeUnmount(() => { invalidateContext(true) })
         </el-form-item>
       </el-form>
       <div class="ordered-points" aria-label="已选点位顺序">
+        <p class="report-selection-count">属性 {{ editable.propertySelections.length }}/20，分类 {{ selectedDimensionCount }}/5</p>
         <div v-if="!editable.points.length" class="empty-state">尚未选择点位</div>
         <div v-for="(point, index) in editable.points" :key="point.id" class="ordered-point-row">
           <span class="ordered-point-index">{{ index + 1 }}</span><span><strong>{{ point.name }}</strong><small>{{ point.code }} · {{ point.definition_state }}</small></span>
@@ -505,7 +514,7 @@ onBeforeUnmount(() => { invalidateContext(true) })
           <h3>分类属性：{{ section.point_code }} / {{ section.property_name }}（{{ section.property_code }}）</h3>
           <el-table :data="section.rows" empty-text="暂无分类属性数据">
             <el-table-column prop="date" label="时间" min-width="120" />
-            <el-table-column prop="value" label="属性值" min-width="180" />
+            <el-table-column label="属性值" min-width="180"><template #default="{ row }">{{ dimensionValueLabel(row.value) }}</template></el-table-column>
             <el-table-column prop="event_count" label="事件数" min-width="110" />
             <el-table-column prop="uv" label="UV" min-width="110" />
             <el-table-column label="占比" min-width="110"><template #default="{ row }">{{ (row.share * 100).toFixed(2) }}%</template></el-table-column>

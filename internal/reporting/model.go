@@ -52,7 +52,7 @@ type ReportInput struct {
 	Description        string              `json:"description"`
 	DefaultDays        int                 `json:"default_days"`
 	PointIDs           []uint64            `json:"point_ids"`
-	PropertySelections []PropertySelection `json:"property_selections"`
+	PropertySelections []PropertySelection `json:"property_queries"`
 	ExpectedUpdatedAt  *time.Time          `json:"expected_updated_at,omitempty"`
 }
 
@@ -74,7 +74,7 @@ type DailyQuery struct {
 	StartDate          string              `json:"start_date"`
 	EndDate            string              `json:"end_date"`
 	PointIDs           []uint64            `json:"point_ids"`
-	PropertySelections []PropertySelection `json:"property_selections"`
+	PropertySelections []PropertySelection `json:"property_queries"`
 }
 
 type DailyFilter struct {
@@ -143,8 +143,9 @@ type DimensionAggregate struct {
 }
 
 type PropertyDailyData struct {
-	Metrics    []MetricAggregate
-	Dimensions []DimensionAggregate
+	Metrics        []MetricAggregate
+	Dimensions     []DimensionAggregate
+	CommittedHours []time.Time
 }
 
 type PropertyDailyStore interface {

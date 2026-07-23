@@ -11,7 +11,7 @@ type CreateReq struct {
 	Description        string                        `json:"description"`
 	DefaultDays        int                           `json:"default_days"`
 	PointIDs           []uint64                      `json:"point_ids"`
-	PropertySelections []reporting.PropertySelection `json:"property_selections"`
+	PropertySelections []reporting.PropertySelection `json:"property_queries"`
 }
 
 func (r CreateReq) ReportInput() reporting.ReportInput {
@@ -25,7 +25,7 @@ type UpdateReq struct {
 	Description        string                        `json:"description"`
 	DefaultDays        int                           `json:"default_days"`
 	PointIDs           []uint64                      `json:"point_ids"`
-	PropertySelections []reporting.PropertySelection `json:"property_selections"`
+	PropertySelections []reporting.PropertySelection `json:"property_queries"`
 	ExpectedUpdatedAt  *time.Time                    `json:"expected_updated_at"`
 }
 

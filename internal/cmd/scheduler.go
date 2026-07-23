@@ -52,9 +52,13 @@ func runScheduler(ctx context.Context) error {
 		return fmt.Errorf("ping redis: %w", err)
 	}
 	projectRepo := mysqladapter.NewProjectRepository(mysqlDB)
+	propertyStatisticsStore := clickhouseadapter.NewPropertyStatisticsStore(chDB)
+	if err := propertyStatisticsStore.ConfigureRetention(ctx, cfg.Scheduler.PropertyAggregateRetentionDays); err != nil {
+		return fmt.Errorf("configure property aggregate retention: %w", err)
+	}
 	aggregateStores := statistics.ProjectHourRefresherGroup{
 		clickhouseadapter.NewStatisticsStore(chDB),
-		clickhouseadapter.NewPropertyStatisticsStore(chDB),
+		propertyStatisticsStore,
 	}
 	aggregate := statistics.NewAggregatorWithLookback(aggregateStores, projectRepo, nil, cfg.Scheduler.AggregateLookbackHours)
 	queue := redisqueue.New(redisClient, redisqueue.WithDeadStream(cfg.Queue.DeadStream), redisqueue.WithPublishDedupTTL(cfg.Queue.PublishDedupTTL), redisqueue.WithOverviewStreams([]string{cfg.Queue.EventStream, cfg.Queue.InvalidStream}, cfg.Queue.ConsumerGroup))

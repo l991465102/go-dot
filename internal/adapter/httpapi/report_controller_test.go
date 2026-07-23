@@ -145,7 +145,7 @@ func TestReportControllerBuildsExportBeforeWritingHeaders(t *testing.T) {
 
 	response := serveReportRequest(controller, project.Viewer, http.MethodPost, "/api/v1/statistics/daily-by-point/export", body)
 
-	require.Equal(t, http.StatusInternalServerError, response.Code, response.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
 	require.Equal(t, "application/json", response.Header().Get("Content-Type"))
 	require.Empty(t, response.Header().Get("Content-Disposition"))
 	require.NotContains(t, response.Body.String(), "secret")

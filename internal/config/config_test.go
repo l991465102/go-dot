@@ -43,6 +43,20 @@ func TestLoadProvidesQueueDefaults(t *testing.T) {
 	require.Equal(t, time.Minute, cfg.Scheduler.ReclaimIdle)
 	require.Equal(t, 2*time.Minute, cfg.Scheduler.LeaseTTL)
 	require.Equal(t, 100, cfg.Scheduler.BatchSize)
+	require.Equal(t, 400, cfg.Scheduler.PropertyAggregateRetentionDays)
+}
+
+func TestLoadValidatesPropertyAggregateRetentionDays(t *testing.T) {
+	t.Setenv("GO_DOT_JWT_SECRET", "test-secret")
+	t.Setenv("GO_DOT_VISITOR_MASTER_KEY", "test-visitor-key")
+	t.Setenv("GO_DOT_PROPERTY_AGGREGATE_RETENTION_DAYS", "89")
+	_, err := Load(context.Background())
+	require.ErrorContains(t, err, "GO_DOT_PROPERTY_AGGREGATE_RETENTION_DAYS")
+
+	t.Setenv("GO_DOT_PROPERTY_AGGREGATE_RETENTION_DAYS", "730")
+	cfg, err := Load(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 730, cfg.Scheduler.PropertyAggregateRetentionDays)
 }
 
 func TestLoadValidatesSchedulerAggregateLookbackHours(t *testing.T) {

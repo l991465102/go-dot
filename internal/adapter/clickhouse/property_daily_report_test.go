@@ -41,10 +41,13 @@ func TestPropertyDailyMetricQueryOnlyRequestsSelectedProperty(t *testing.T) {
 	_, _ = store.QueryPropertyDaily(context.Background(), reporting.PropertyDailyFilter{
 		ProjectID: 9, Start: start, End: start.Add(24 * time.Hour), Timezone: "Asia/Shanghai",
 	}, []reporting.PropertyRef{{
-		PropertySelection: reporting.PropertySelection{PointID: 7, PropertyCode: "amount"},
+		PropertySelection: reporting.PropertySelection{PointID: 7, PropertyCode: "amount", Aggregations: []tracking.MetricAggregation{tracking.AggregateMin}},
 		Analytics:         tracking.PropertyAnalytics{Mode: tracking.AnalyticsMetric},
 	}})
 	require.Len(t, db.queries, 1)
 	require.Contains(t, db.queries[0], "s.point_id=? AND s.property_code=?")
+	require.Contains(t, db.queries[0], "toString(min(value_min))")
+	require.NotContains(t, db.queries[0], "sum(value_count)")
+	require.NotContains(t, db.queries[0], "sum(value_sum)")
 	require.Equal(t, []any{uint64(9), start, start.Add(24 * time.Hour), uint64(7), "amount"}, db.queryArgs[0])
 }

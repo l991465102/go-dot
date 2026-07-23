@@ -170,6 +170,7 @@ res, err := http.DefaultClient.Do(req)
 - 点位属性 Schema 中，`INTEGER`、`DECIMAL` 可开启“数值指标”并配置 `COUNT/SUM/AVG/MIN/MAX`；`STRING`、`ENUM`、`BOOLEAN` 可开启“分类维度”，固定查看事件数、UV 和占比；`DATETIME`、`ARRAY` 第一期不支持属性统计。
 - 报表只查询、显示和导出当前勾选的属性及聚合方式。一次最多选择 20 个统计属性，其中分类维度最多 5 个；字符串维度每天显示前 50 个值，其余合并为“其他”。
 - 导出的 XLSX 始终包含 `点位统计`、`报表说明`；选择数值属性时增加 `数值属性`，每个分类属性增加一个 `分类-...` 工作表。日期按降序输出，无数据的 PV/UV 与 COUNT/SUM 为 0，AVG/MIN/MAX 无有效值时留空；用户文本会阻止以 `= + - @` 开头的内容成为 Excel 公式。
+- 属性小时聚合默认保留 400 天，可通过 `GO_DOT_PROPERTY_AGGREGATE_RETENTION_DAYS` 调整（最少 90 天）；Scheduler 启动时会同步 ClickHouse TTL。
 
 先登录取得 access token，再可直接调用查询接口：
 
@@ -183,7 +184,7 @@ curl -fsS http://127.0.0.1:8080/api/v1/statistics/daily-by-point/query \
     "start_date": "2026-07-01",
     "end_date": "2026-07-30",
     "point_ids": [101, 102],
-    "property_selections": [
+    "property_queries": [
       {
         "point_id": 101,
         "property_code": "amount",
@@ -208,7 +209,7 @@ curl -fS http://127.0.0.1:8080/api/v1/statistics/daily-by-point/export \
     "start_date": "2026-07-01",
     "end_date": "2026-07-30",
     "point_ids": [101, 102],
-    "property_selections": [
+    "property_queries": [
       {
         "point_id": 101,
         "property_code": "amount",

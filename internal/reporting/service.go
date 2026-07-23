@@ -224,7 +224,17 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 		if err != nil {
 			return DailyResult{}, err
 		}
-		result.MetricSections, result.DimensionSections = buildPropertySections(start, end, today, propertyRefs, data)
+		completeByDate := propertyCompleteness(start, end, today, location, data.CommittedHours)
+		result.IncompleteDates = result.IncompleteDates[:0]
+		for date := end; !date.Before(start); date = date.AddDate(0, 0, -1) {
+			if !completeByDate[date.Format(time.DateOnly)] {
+				result.IncompleteDates = append(result.IncompleteDates, date.Format(time.DateOnly))
+			}
+		}
+		for i := range result.Items {
+			result.Items[i].Complete = completeByDate[result.Items[i].Date]
+		}
+		result.MetricSections, result.DimensionSections = buildPropertySections(start, end, propertyRefs, data, completeByDate)
 	}
 	return result, nil
 }
@@ -395,7 +405,32 @@ func (s *Service) resolvePropertySelections(ctx context.Context, projectID uint6
 	return resolved, nil
 }
 
-func buildPropertySections(start, end, today time.Time, refs []PropertyRef, data PropertyDailyData) ([]MetricSection, []DimensionSection) {
+func propertyCompleteness(start, end, today time.Time, location *time.Location, committedHours []time.Time) map[string]bool {
+	committed := make(map[int64]struct{}, len(committedHours))
+	for _, hour := range committedHours {
+		committed[hour.UTC().Truncate(time.Hour).Unix()] = struct{}{}
+	}
+	result := make(map[string]bool)
+	for date := start; !date.After(end); date = date.AddDate(0, 0, 1) {
+		dateText := date.Format(time.DateOnly)
+		if !date.Before(today) {
+			result[dateText] = false
+			continue
+		}
+		next := date.AddDate(0, 0, 1)
+		complete := true
+		for hour := date.In(location).UTC(); hour.Before(next.In(location).UTC()); hour = hour.Add(time.Hour) {
+			if _, ok := committed[hour.Unix()]; !ok {
+				complete = false
+				break
+			}
+		}
+		result[dateText] = complete
+	}
+	return result
+}
+
+func buildPropertySections(start, end time.Time, refs []PropertyRef, data PropertyDailyData, completeByDate map[string]bool) ([]MetricSection, []DimensionSection) {
 	metricRefs := make([]PropertyRef, 0)
 	dimensionRefs := make([]PropertyRef, 0)
 	for _, ref := range refs {
@@ -421,7 +456,7 @@ func buildPropertySections(start, end, today time.Time, refs []PropertyRef, data
 	if len(metric.Columns) > 0 {
 		for date := end; !date.Before(start); date = date.AddDate(0, 0, -1) {
 			dateText := date.Format(time.DateOnly)
-			row := MetricRow{Date: dateText, Complete: date.Before(today), Values: make(map[string]*string)}
+			row := MetricRow{Date: dateText, Complete: completeByDate[dateText], Values: make(map[string]*string)}
 			for _, ref := range metricRefs {
 				aggregate := metricIndex[fmt.Sprintf("%s:%d:%s", dateText, ref.PointID, ref.PropertyCode)]
 				for _, aggregation := range ref.Aggregations {
@@ -478,7 +513,7 @@ func buildPropertySections(start, end, today time.Time, refs []PropertyRef, data
 					share = float64(value.EventCount) / float64(total)
 				}
 				section.Rows = append(section.Rows, DimensionRow{
-					Date: dateText, Complete: date.Before(today), Value: value.Value,
+					Date: dateText, Complete: completeByDate[dateText], Value: value.Value,
 					EventCount: value.EventCount, UV: value.UV, Share: share,
 				})
 			}

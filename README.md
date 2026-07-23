@@ -1,5 +1,7 @@
 # go-dot 业务埋点统计平台
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 go-dot 是基于 GoFrame v2 的埋点治理与 PV/UV 统计平台。它把“点位定义、客户端上报、异步消费、实时统计、历史聚合和数据诊断”放在一个可独立部署的仓库中。
 
 ```text
@@ -312,3 +314,7 @@ make test-e2e
 ## 当前验证边界
 
 单元、静态配置、前端类型和构建可在开发机直接验证。集成、浏览器 E2E、ClickHouse 恢复、DLQ 与 2,000 events/s k6 结果只在实际执行并记录后才算通过；本仓库不把脚本存在等同于生产容量证明。当前机器/执行记录见 operations 文档。
+
+## 开源许可
+
+本项目基于 [MIT License](LICENSE) 开源。你可以使用、复制、修改、合并、发布和分发本项目，但需要保留原始版权与许可声明。

@@ -38,9 +38,9 @@ func TestExcelExporterBuildsTwoSheetWorkbook(t *testing.T) {
 
 	detailRows, err := book.GetRows("数据明细")
 	require.NoError(t, err)
-	require.Equal(t, []string{"日期", "数据状态", "点位编码", "点位名称", "PV", "UV", "UV口径"}, detailRows[0])
-	require.Equal(t, []string{"2026-07-20", "未完成", "checkout", "结算", "10", "7", "精确"}, detailRows[1])
-	require.Equal(t, []string{"2026-07-19", "完整", "view", "浏览", "5", "4", "近似"}, detailRows[2])
+	require.Equal(t, []string{"时间", "checkout_pv", "checkout_uv", "view_pv", "view_uv"}, detailRows[0])
+	require.Equal(t, []string{"2026-07-20", "10", "7", "0", "0"}, detailRows[1])
+	require.Equal(t, []string{"2026-07-19", "0", "0", "5", "4"}, detailRows[2])
 
 	explanationRows, err := book.GetRows("报表说明")
 	require.NoError(t, err)
@@ -76,12 +76,12 @@ func TestExcelExporterProtectsEveryUserControlledTextCellFromFormulaInjection(t 
 	require.Equal(t, "'"+dangerous, cellValue(t, book, "报表说明", "B2"))
 	require.Equal(t, "'@description", cellValue(t, book, "报表说明", "B3"))
 	require.Equal(t, "'=user", cellValue(t, book, "报表说明", "B8"))
-	require.Equal(t, "'+code", cellValue(t, book, "数据明细", "C2"))
-	require.Equal(t, "'-name", cellValue(t, book, "数据明细", "D2"))
+	require.Equal(t, "'+code_pv", cellValue(t, book, "数据明细", "B1"))
+	require.Equal(t, "'+code_uv", cellValue(t, book, "数据明细", "C1"))
 	for _, target := range []struct{ sheet, cell string }{
 		{sheet: "报表说明", cell: "B2"}, {sheet: "报表说明", cell: "B3"},
-		{sheet: "报表说明", cell: "B8"}, {sheet: "数据明细", cell: "C2"},
-		{sheet: "数据明细", cell: "D2"},
+		{sheet: "报表说明", cell: "B8"}, {sheet: "数据明细", cell: "B1"},
+		{sheet: "数据明细", cell: "C1"},
 	} {
 		formula, err := book.GetCellFormula(target.sheet, target.cell)
 		require.NoError(t, err)

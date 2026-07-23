@@ -8,6 +8,7 @@ import {
 } from '@/api/reports'
 import { listCategories, listPoints, type Category } from '@/api/tracking'
 import { formatShanghaiDateTime } from '@/utils/datetime'
+import { buildDailyWideTable } from '@/utils/report-wide-table'
 
 const route = useRoute()
 const projects = useProjectStore()
@@ -51,6 +52,7 @@ const editable = reactive({
 const hasMorePoints = computed(() => pointPage.value > 0 && (
   publishedLoaded.value < publishedTotal.value || deprecatedLoaded.value < deprecatedTotal.value
 ))
+const wideTable = computed(() => lastResult.value ? buildDailyWideTable(lastResult.value, editable.points) : undefined)
 
 let projectController: AbortController | undefined
 let reportController: AbortController | undefined
@@ -405,10 +407,9 @@ onBeforeUnmount(() => { invalidateContext(true) })
       <template v-if="lastResult">
         <p class="report-timezone">统计时区：{{ lastResult.timezone }}</p>
         <div class="report-summary-grid"><el-card><span>点位数</span><strong>{{ lastResult.point_count }}</strong></el-card><el-card><span>天数</span><strong>{{ lastResult.day_count }}</strong></el-card><el-card><span>总 PV</span><strong>{{ lastResult.total_pv }}</strong></el-card></div>
-        <el-table :data="lastResult.items" empty-text="暂无统计数据">
-          <el-table-column prop="date" label="日期" min-width="120" />
-          <el-table-column label="状态" min-width="100"><template #default="scope"><el-tag :data-test="`completion-${scope.row.date}-${scope.row.point_id}`" :type="scope.row.complete ? 'success' : 'warning'">{{ scope.row.complete ? '已完成' : '未完整' }}</el-tag></template></el-table-column>
-          <el-table-column prop="point_code" label="点位编码" min-width="160" /><el-table-column prop="point_name" label="点位名称" min-width="160" /><el-table-column prop="pv" label="PV" min-width="90" /><el-table-column prop="uv" label="UV" min-width="90" /><el-table-column prop="uv_mode" label="UV 模式" min-width="130" />
+        <el-table :data="wideTable?.rows ?? []" empty-text="暂无统计数据">
+          <el-table-column prop="date" label="时间" min-width="120" fixed />
+          <el-table-column v-for="column in wideTable?.columns ?? []" :key="column.key" :prop="column.key" :label="column.label" min-width="150" />
         </el-table>
       </template>
       <el-empty v-else description="配置日期和点位后开始查询" />

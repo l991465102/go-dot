@@ -3,13 +3,12 @@ package reporting
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/xuri/excelize/v2"
-
-	"github.com/lzw7758/go-dot/internal/tracking"
 )
 
 const (
@@ -75,51 +74,74 @@ func writeDetailSheet(book *excelize.File, headerStyle int, result DailyResult) 
 	if err = stream.SetColWidth(1, 1, 13); err != nil {
 		return err
 	}
-	if err = stream.SetColWidth(2, 2, 11); err != nil {
-		return err
-	}
-	if err = stream.SetColWidth(3, 4, 24); err != nil {
-		return err
-	}
-	if err = stream.SetColWidth(5, 7, 12); err != nil {
-		return err
-	}
 	if err = stream.SetPanes(&excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"}); err != nil {
 		return err
 	}
-	header := []interface{}{
-		excelize.Cell{StyleID: headerStyle, Value: "日期"},
-		excelize.Cell{StyleID: headerStyle, Value: "数据状态"},
-		excelize.Cell{StyleID: headerStyle, Value: "点位编码"},
-		excelize.Cell{StyleID: headerStyle, Value: "点位名称"},
-		excelize.Cell{StyleID: headerStyle, Value: "PV"},
-		excelize.Cell{StyleID: headerStyle, Value: "UV"},
-		excelize.Cell{StyleID: headerStyle, Value: "UV口径"},
+	points, dates, values := dailyWideLayout(result.Items)
+	if len(points) > 0 {
+		if err = stream.SetColWidth(2, 1+len(points)*2, 18); err != nil {
+			return err
+		}
+	}
+	header := make([]interface{}, 1, 1+len(points)*2)
+	header[0] = excelize.Cell{StyleID: headerStyle, Value: "时间"}
+	for _, point := range points {
+		header = append(header,
+			excelize.Cell{StyleID: headerStyle, Value: safeSpreadsheetText(point.Code + "_pv")},
+			excelize.Cell{StyleID: headerStyle, Value: safeSpreadsheetText(point.Code + "_uv")},
+		)
 	}
 	if err = stream.SetRow("A1", header); err != nil {
 		return err
 	}
-	for index, item := range result.Items {
-		status := "未完成"
-		if item.Complete {
-			status = "完整"
-		}
-		uvMode := "近似"
-		if item.UVMode == tracking.Exact {
-			uvMode = "精确"
-		}
+	for index, date := range dates {
 		cell, coordinateErr := excelize.CoordinatesToCellName(1, index+2)
 		if coordinateErr != nil {
 			return coordinateErr
 		}
-		if err = stream.SetRow(cell, []interface{}{
-			safeSpreadsheetText(item.Date), status, safeSpreadsheetText(item.PointCode),
-			safeSpreadsheetText(item.PointName), item.PV, item.UV, uvMode,
-		}); err != nil {
+		row := make([]interface{}, 1, 1+len(points)*2)
+		row[0] = safeSpreadsheetText(date)
+		for _, point := range points {
+			item := values[dailyWideKey{Date: date, PointID: point.ID}]
+			row = append(row, item.PV, item.UV)
+		}
+		if err = stream.SetRow(cell, row); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type dailyWidePoint struct {
+	ID   uint64
+	Code string
+}
+
+type dailyWideKey struct {
+	Date    string
+	PointID uint64
+}
+
+func dailyWideLayout(items []DailyItem) ([]dailyWidePoint, []string, map[dailyWideKey]DailyItem) {
+	points := make([]dailyWidePoint, 0)
+	dates := make([]string, 0)
+	values := make(map[dailyWideKey]DailyItem, len(items))
+	seenPoints := make(map[uint64]struct{})
+	seenDates := make(map[string]struct{})
+
+	for _, item := range items {
+		if _, exists := seenPoints[item.PointID]; !exists {
+			seenPoints[item.PointID] = struct{}{}
+			points = append(points, dailyWidePoint{ID: item.PointID, Code: item.PointCode})
+		}
+		if _, exists := seenDates[item.Date]; !exists {
+			seenDates[item.Date] = struct{}{}
+			dates = append(dates, item.Date)
+		}
+		values[dailyWideKey{Date: item.Date, PointID: item.PointID}] = item
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(dates)))
+	return points, dates, values
 }
 
 func writeExplanationSheet(book *excelize.File, headerStyle, wrapStyle int, document ExportDocument) (returnErr error) {

@@ -1,13 +1,19 @@
+networks:
+  backend:
+    driver: bridge
+
 services:
   mysql:
     image: mysql:8.4
+    networks:
+      - backend
     environment:
       MYSQL_DATABASE: go_dot
       MYSQL_ROOT_PASSWORD: ${GO_DOT_MYSQL_ROOT_PASSWORD:?copy .env.example to .env and replace GO_DOT_MYSQL_ROOT_PASSWORD}
       TZ: UTC
     command: ["--default-time-zone=+00:00"]
     ports:
-      - "3306:3306"
+      - "3308:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -18,6 +24,8 @@ services:
 
   redis:
     image: redis:8
+    networks:
+      - backend
     ports:
       - "6379:6379"
     volumes:
@@ -30,13 +38,15 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:26.3
+    networks:
+      - backend
     environment:
       CLICKHOUSE_DB: go_dot
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
       TZ: UTC
     ports:
       - "127.0.0.1:8123:8123"
-      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./deploy/clickhouse/users.xml:/etc/clickhouse-server/users.d/go-dot.xml:ro
@@ -50,6 +60,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
+    networks:
+      - backend
     command: ["migrate"]
     environment: &backend-environment
       GO_DOT_MYSQL_DSN: ${GO_DOT_MYSQL_DSN:?copy .env.example to .env and set GO_DOT_MYSQL_DSN}
@@ -91,6 +103,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
+    networks:
+      - backend
     command: ["api"]
     environment: *backend-environment
     ports:
@@ -114,6 +128,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
+    networks:
+      - backend
     command: ["worker"]
     environment:
       <<: *backend-environment
@@ -124,6 +140,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
+    networks:
+      - backend
     command: ["scheduler"]
     environment:
       <<: *backend-environment
@@ -134,6 +152,8 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.web
+    networks:
+      - backend
     ports:
       - "5173:80"
     depends_on:
@@ -147,6 +167,8 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.8.1
+    networks:
+      - backend
     command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
     ports:
       - "127.0.0.1:9090:9090"
@@ -163,7 +185,28 @@ services:
       retries: 12
 
 volumes:
-  mysql_data: 
+  mysql_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /data/mysql_data
+      o: bind
   redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /data/redis_data
+      o: bind
   clickhouse_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /data/clickhouse_data
+      o: bind
   prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /data/prometheus_data
+      o: bind
+

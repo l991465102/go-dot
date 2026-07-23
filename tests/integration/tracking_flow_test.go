@@ -373,26 +373,39 @@ func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportNam
 	require.Equal(t, []string{"数据明细", "报表说明"}, book.GetSheetList())
 	rows, err := book.GetRows("数据明细")
 	require.NoError(t, err)
-	require.Len(t, rows, len(result.Items)+1)
-	require.Equal(t, []string{"日期", "数据状态", "点位编码", "点位名称", "PV", "UV", "UV口径"}, rows[0])
-	for index, item := range result.Items {
+	points := make([]dailyItem, 0, result.PointCount)
+	dates := make([]string, 0, result.DayCount)
+	seenPoints := make(map[uint64]struct{}, result.PointCount)
+	seenDates := make(map[string]struct{}, result.DayCount)
+	values := make(map[string]dailyItem, len(result.Items))
+	for _, item := range result.Items {
+		if _, ok := seenPoints[item.PointID]; !ok {
+			seenPoints[item.PointID] = struct{}{}
+			points = append(points, item)
+		}
+		if _, ok := seenDates[item.Date]; !ok {
+			seenDates[item.Date] = struct{}{}
+			dates = append(dates, item.Date)
+		}
+		values[fmt.Sprintf("%s/%d", item.Date, item.PointID)] = item
+	}
+	require.Equal(t, result.EndDate, dates[0])
+	require.Equal(t, result.StartDate, dates[len(dates)-1])
+	require.Len(t, rows, len(dates)+1)
+	expectedHeader := []string{"时间"}
+	for _, point := range points {
+		expectedHeader = append(expectedHeader, spreadsheetText(point.PointCode+"_pv"), spreadsheetText(point.PointCode+"_uv"))
+	}
+	require.Equal(t, expectedHeader, rows[0])
+	for index, date := range dates {
 		row := rows[index+1]
-		require.GreaterOrEqual(t, len(row), 7)
-		require.Equal(t, item.Date, row[0])
-		expectedStatus := "未完成"
-		if item.Complete {
-			expectedStatus = "完整"
+		require.Len(t, row, 1+len(points)*2)
+		require.Equal(t, date, row[0])
+		for pointIndex, point := range points {
+			item := values[fmt.Sprintf("%s/%d", date, point.PointID)]
+			require.Equal(t, strconv.FormatUint(item.PV, 10), row[1+pointIndex*2])
+			require.Equal(t, strconv.FormatUint(item.UV, 10), row[2+pointIndex*2])
 		}
-		require.Equal(t, expectedStatus, row[1])
-		require.Equal(t, spreadsheetText(item.PointCode), row[2])
-		require.Equal(t, spreadsheetText(item.PointName), row[3])
-		require.Equal(t, strconv.FormatUint(item.PV, 10), row[4])
-		require.Equal(t, strconv.FormatUint(item.UV, 10), row[5])
-		expectedMode := "近似"
-		if item.UVMode == "EXACT" {
-			expectedMode = "精确"
-		}
-		require.Equal(t, expectedMode, row[6])
 	}
 	explanationRows, err := book.GetRows("报表说明")
 	require.NoError(t, err)
@@ -412,8 +425,10 @@ func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportNam
 	} {
 		assertTextCellHasNoFormula(t, book, target.sheet, target.cell)
 	}
-	for row := 2; row <= len(result.Items)+1; row++ {
-		assertTextCellHasNoFormula(t, book, "数据明细", fmt.Sprintf("D%d", row))
+	for column := 2; column <= 1+len(points)*2; column++ {
+		cell, coordinateErr := excelize.CoordinatesToCellName(column, 1)
+		require.NoError(t, coordinateErr)
+		assertTextCellHasNoFormula(t, book, "数据明细", cell)
 	}
 }
 

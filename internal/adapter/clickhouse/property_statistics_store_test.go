@@ -33,10 +33,11 @@ func TestPropertyStatisticsConfigureRetention(t *testing.T) {
 	db := &statisticsRecordingDB{}
 	store := NewPropertyStatisticsStore(db)
 	require.NoError(t, store.ConfigureRetention(context.Background(), 730))
-	require.Len(t, db.execs, 3)
+	require.Len(t, db.execs, 4)
 	require.Contains(t, db.execs[0], "ALTER TABLE property_metric_hourly MODIFY TTL hour + INTERVAL 730 DAY DELETE")
 	require.Contains(t, db.execs[1], "ALTER TABLE property_dimension_hourly_approximate MODIFY TTL hour + INTERVAL 730 DAY DELETE")
 	require.Contains(t, db.execs[2], "ALTER TABLE property_dimension_hourly_exact MODIFY TTL hour + INTERVAL 730 DAY DELETE")
+	require.Contains(t, db.execs[3], "ALTER TABLE property_stat_hour_generation MODIFY TTL hour + INTERVAL 730 DAY DELETE")
 
 	require.ErrorContains(t, store.ConfigureRetention(context.Background(), 89), "at least 90")
 }

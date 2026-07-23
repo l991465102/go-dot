@@ -537,7 +537,7 @@ func metricValue(aggregate MetricAggregate, aggregation tracking.MetricAggregati
 	case tracking.AggregateCount:
 		value = strconv.FormatUint(aggregate.Count, 10)
 	case tracking.AggregateSum:
-		if aggregate.Count == 0 {
+		if !aggregate.Present {
 			value = "0"
 		} else {
 			value = aggregate.Sum
@@ -552,12 +552,12 @@ func metricValue(aggregate MetricAggregate, aggregation tracking.MetricAggregati
 		}
 		value = sum.Div(decimal.NewFromInt(int64(aggregate.Count))).String()
 	case tracking.AggregateMin:
-		if aggregate.Count == 0 {
+		if !aggregate.Present {
 			return nil
 		}
 		value = aggregate.Min
 	case tracking.AggregateMax:
-		if aggregate.Count == 0 {
+		if !aggregate.Present {
 			return nil
 		}
 		value = aggregate.Max

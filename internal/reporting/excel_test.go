@@ -153,6 +153,11 @@ func TestSafeSpreadsheetTextDetectsOperatorsAfterIgnorablePrefix(t *testing.T) {
 	}
 }
 
+func TestMetricExcelValuePreservesFixedPointPrecision(t *testing.T) {
+	value := "99999999999999999999999999999.123456789"
+	require.Equal(t, value, metricExcelValue(tracking.AggregateSum, value))
+}
+
 func cellValue(t *testing.T, book *excelize.File, sheet, cell string) string {
 	t.Helper()
 	value, err := book.GetCellValue(sheet, cell)

@@ -30,7 +30,10 @@ func TestPropertyDailyQueryUsesCommittedGenerationAndTop50OtherForStrings(t *tes
 	require.Contains(t, query, "property_stat_hour_generation AS g FINAL")
 	require.Contains(t, query, "s.version=g.generation")
 	require.Contains(t, query, "row_number() OVER (PARTITION BY date")
-	require.Contains(t, query, "if(value_rank<=50,property_value,'其他')")
+	require.Contains(t, query, "if(value_rank<=50,property_value,'')")
+	require.Contains(t, query, "value_rank>50 AS is_overflow")
+	require.Contains(t, query, "property_bucket,is_overflow")
+	require.NotContains(t, query, "property_value,'其他'")
 	require.Contains(t, query, "uniqExactMerge")
 }
 
@@ -49,5 +52,9 @@ func TestPropertyDailyMetricQueryOnlyRequestsSelectedProperty(t *testing.T) {
 	require.Contains(t, db.queries[0], "toString(min(value_min))")
 	require.NotContains(t, db.queries[0], "sum(value_count)")
 	require.NotContains(t, db.queries[0], "sum(value_sum)")
+	require.Contains(t, db.queries[0], "any(s.value_min) AS value_min")
+	require.NotContains(t, db.queries[0], "any(s.value_count)")
+	require.NotContains(t, db.queries[0], "any(s.value_sum)")
+	require.NotContains(t, db.queries[0], "any(s.value_max)")
 	require.Equal(t, []any{uint64(9), start, start.Add(24 * time.Hour), uint64(7), "amount"}, db.queryArgs[0])
 }

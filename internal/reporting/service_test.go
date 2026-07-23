@@ -358,7 +358,7 @@ func TestQueryDailyOnlyBuildsSelectedPropertySectionsAndFillsDimensionZeros(t *t
 		},
 	}
 	propertyStore := &fakePropertyDailyStore{data: PropertyDailyData{
-		Metrics:    []MetricAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "amount", Count: 2, Sum: "6", Min: "2", Max: "4"}},
+		Metrics:    []MetricAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "amount", Count: 2, Sum: "6", Min: "2", Max: "4", Present: true}},
 		Dimensions: []DimensionAggregate{{Date: "2026-07-19", PointID: 3, PointCode: "checkout", PropertyCode: "status", Value: "success", EventCount: 3, UV: 2}},
 	}}
 	for hour := 0; hour < 24; hour++ {
@@ -391,6 +391,17 @@ func TestQueryDailyOnlyBuildsSelectedPropertySectionsAndFillsDimensionZeros(t *t
 	require.Equal(t, []string{"2026-07-20"}, result.IncompleteDates)
 	require.Equal(t, []string{"amount", "status"}, []string{propertyStore.properties[0].PropertyCode, propertyStore.properties[1].PropertyCode})
 	require.Equal(t, []tracking.MetricAggregation{tracking.AggregateSum, tracking.AggregateAvg}, propertyStore.properties[0].Aggregations)
+}
+
+func TestMetricValueDoesNotRequireCountForOtherSelectedAggregations(t *testing.T) {
+	aggregate := MetricAggregate{Present: true, Sum: "12.340000000", Min: "1.25", Max: "9.75"}
+	require.Equal(t, "12.340000000", *metricValue(aggregate, tracking.AggregateSum))
+	require.Equal(t, "1.25", *metricValue(aggregate, tracking.AggregateMin))
+	require.Equal(t, "9.75", *metricValue(aggregate, tracking.AggregateMax))
+
+	require.Equal(t, "0", *metricValue(MetricAggregate{}, tracking.AggregateSum))
+	require.Nil(t, metricValue(MetricAggregate{}, tracking.AggregateMin))
+	require.Nil(t, metricValue(MetricAggregate{}, tracking.AggregateMax))
 }
 
 func TestExportDailyQueriesCurrentResultAndBuildsWorkbook(t *testing.T) {

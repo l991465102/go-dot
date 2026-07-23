@@ -6,7 +6,7 @@ import {
   createReport, deleteReport, exportDaily, getReport, listReports, queryDaily, updateReport,
   type DailyResult, type PropertySelection, type ReportMutation, type ReportPoint, type SavedReport,
 } from '@/api/reports'
-import { listCategories, listPoints, type Category, type MetricAggregation, type PointProperty } from '@/api/tracking'
+import { getPoint, listCategories, listPoints, type Category, type MetricAggregation, type PointProperty } from '@/api/tracking'
 import { formatShanghaiDateTime } from '@/utils/datetime'
 import { buildDailyWideTable } from '@/utils/report-wide-table'
 
@@ -249,6 +249,16 @@ function applySavedReport(report: SavedReport) {
   }))
   rebuildAvailablePoints(); lastResult.value = undefined
 }
+async function hydrateSavedReportPoints(report: SavedReport, signal: AbortSignal): Promise<SavedReport> {
+  const loaded = new Map(availablePoints.value.map((point) => [point.id, point]))
+  const points = await Promise.all((report.points ?? []).map(async (point) => {
+    const current = loaded.get(point.id)
+    if (current?.properties) return { ...point, properties: current.properties }
+    const detail = await getPoint(report.project_id, point.id, signal)
+    return { ...point, properties: detail.properties }
+  }))
+  return { ...report, points }
+}
 function enterTemporaryMode() {
   invalidateContext()
   setSelectedReportId(undefined); selectedReport.value = undefined; savedSnapshot.value = undefined
@@ -266,7 +276,8 @@ async function selectSavedReport(value: number) {
   success.value = ''; error.value = ''; loadingReport.value = true
   try {
     const report = await getReport(id, value, active.signal)
-    if (owns(active, epoch, id, reportController) && selectedReportId.value === value) applySavedReport(report)
+    const hydrated = await hydrateSavedReportPoints(report, active.signal)
+    if (owns(active, epoch, id, reportController) && selectedReportId.value === value) applySavedReport(hydrated)
   } catch (cause) {
     if (owns(active, epoch, id, reportController) && !isCanceled(cause)) {
       setSelectedReportId(undefined); selectedReport.value = undefined; savedSnapshot.value = undefined; resetEditable(); rebuildAvailablePoints()
@@ -335,7 +346,12 @@ function aggregationLabel(value: MetricAggregation) {
 function dimensionValueLabel(value: string) { return value === '' ? '空字符串' : value }
 
 function replaceReport(report: SavedReport) {
-  const normalized = snapshot({ ...report, points: report.points ?? editable.points.map((point, index) => ({ ...point, sort_no: index })) })
+  const editableByID = new Map(editable.points.map((point) => [point.id, point]))
+  const responsePoints = report.points?.length ? report.points : editable.points.map((point, index) => ({ ...point, sort_no: index }))
+  const normalized = snapshot({
+    ...report,
+    points: responsePoints.map((point) => ({ ...point, properties: point.properties ?? editableByID.get(point.id)?.properties })),
+  })
   const index = reports.value.findIndex((item) => item.id === normalized.id)
   if (index === -1) reports.value.push(normalized); else reports.value[index] = normalized
   setSelectedReportId(normalized.id); selectedReport.value = snapshot(normalized); savedSnapshot.value = snapshot(normalized)

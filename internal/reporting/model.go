@@ -134,6 +134,7 @@ type MetricAggregate struct {
 	PointID                       uint64
 	Count                         uint64
 	Sum, Min, Max                 string
+	Present                       bool
 }
 
 type DimensionAggregate struct {

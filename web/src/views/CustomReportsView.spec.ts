@@ -16,7 +16,7 @@ vi.mock('@/api/reports', () => ({
   queryDaily: vi.fn(),
   exportDaily: vi.fn(),
 }))
-vi.mock('@/api/tracking', () => ({ listPoints: vi.fn(), listCategories: vi.fn() }))
+vi.mock('@/api/tracking', () => ({ listPoints: vi.fn(), listCategories: vi.fn(), getPoint: vi.fn() }))
 vi.mock('vue-router', () => ({ useRoute: () => ({ params: { projectId: '9' } }) }))
 
 const rowsKey = Symbol('rows') as InjectionKey<Ref<Record<string, unknown>[]>>
@@ -113,6 +113,7 @@ describe('CustomReportsView', () => {
     vi.setSystemTime(new Date('2026-07-20T16:30:00Z')) // 2026-07-21 in Shanghai
     vi.mocked(reportsApi.listReports).mockResolvedValue([])
     vi.mocked(trackingApi.listCategories).mockResolvedValue([])
+    vi.mocked(trackingApi.getPoint).mockImplementation(async (_projectId, id) => point(id, `point-${id}`, `点位 ${id}`, 'DEPRECATED'))
     vi.mocked(trackingApi.listPoints)
       .mockResolvedValueOnce({ items: [point(1, 'published', '已发布点位', 'PUBLISHED')], total: 1 })
       .mockResolvedValueOnce({ items: [point(2, 'deprecated', '已废弃点位', 'DEPRECATED')], total: 1 })
@@ -256,6 +257,12 @@ describe('CustomReportsView', () => {
     } satisfies reportsApi.SavedReport
     vi.mocked(reportsApi.listReports).mockResolvedValue([saved])
     vi.mocked(reportsApi.getReport).mockResolvedValue(saved)
+    const fullPoint = point(99, 'legacy', '历史点位', 'DEPRECATED') as unknown as trackingApi.Point
+    fullPoint.properties = [
+      { code: 'status', name: '状态', type: 'STRING', required: false, sort_order: 0, analytics: { mode: 'DIMENSION' } },
+      { code: 'amount', name: '金额', type: 'DECIMAL', required: false, sort_order: 1, analytics: { mode: 'METRIC', aggregations: ['SUM'] } },
+    ]
+    vi.mocked(trackingApi.getPoint).mockResolvedValue(fullPoint)
     vi.mocked(reportsApi.queryDaily).mockResolvedValue({
       timezone: 'Asia/Shanghai', start_date: '2026-07-15', end_date: '2026-07-21',
       point_count: 1, day_count: 7, total_pv: 1, items: [],
@@ -269,6 +276,8 @@ describe('CustomReportsView', () => {
     await flushPromises()
     wrapper.findAllComponents(ElSelect)[0]!.vm.$emit('update:modelValue', 12)
     await flushPromises()
+    expect(trackingApi.getPoint).toHaveBeenCalledWith(9, 99, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('金额')
     await wrapper.get('[data-test="query-report"]').trigger('click')
     await flushPromises()
 

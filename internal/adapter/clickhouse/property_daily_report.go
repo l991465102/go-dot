@@ -69,13 +69,6 @@ func (s *PropertyStatisticsStore) queryCommittedPropertyHours(ctx context.Contex
 }
 
 func (s *PropertyStatisticsStore) queryMetricDaily(ctx context.Context, filter reporting.PropertyDailyFilter, property reporting.PropertyRef) ([]reporting.MetricAggregate, error) {
-	inner := `SELECT s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version,
-any(s.value_count) AS value_count,any(s.value_sum) AS value_sum,any(s.value_min) AS value_min,any(s.value_max) AS value_max
-FROM ` + s.metricTable + ` AS s
-INNER JOIN ` + s.generationTable + ` AS g FINAL
-ON s.project_id=g.project_id AND s.hour=g.hour AND s.version=g.generation
-WHERE s.project_id=? AND s.hour>=? AND s.hour<? AND s.point_id=? AND s.property_code=?
-GROUP BY s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version`
 	needCount, needSum, needMin, needMax := false, false, false, false
 	for _, aggregation := range property.Aggregations {
 		switch aggregation {
@@ -91,6 +84,25 @@ GROUP BY s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_
 			needMax = true
 		}
 	}
+	hourlyMetrics := make([]string, 0, 4)
+	if needCount {
+		hourlyMetrics = append(hourlyMetrics, "any(s.value_count) AS value_count")
+	}
+	if needSum {
+		hourlyMetrics = append(hourlyMetrics, "any(s.value_sum) AS value_sum")
+	}
+	if needMin {
+		hourlyMetrics = append(hourlyMetrics, "any(s.value_min) AS value_min")
+	}
+	if needMax {
+		hourlyMetrics = append(hourlyMetrics, "any(s.value_max) AS value_max")
+	}
+	inner := `SELECT s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version,` + strings.Join(hourlyMetrics, ",") + `
+FROM ` + s.metricTable + ` AS s
+INNER JOIN ` + s.generationTable + ` AS g FINAL
+ON s.project_id=g.project_id AND s.hour=g.hour AND s.version=g.generation
+WHERE s.project_id=? AND s.hour>=? AND s.hour<? AND s.point_id=? AND s.property_code=?
+GROUP BY s.hour,s.project_id,s.point_id,s.point_code,s.point_version,s.property_code,s.version`
 	metrics := make([]string, 0, 4)
 	if needCount {
 		metrics = append(metrics, "sum(value_count)")
@@ -130,6 +142,7 @@ FROM (` + inner + `) GROUP BY toDate(hour,'Asia/Shanghai'),point_id,point_code,p
 		if err := rows.Scan(destinations...); err != nil {
 			return nil, fmt.Errorf("scan metric property %s: %w", property.PropertyCode, err)
 		}
+		item.Present = true
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -152,12 +165,14 @@ sum(event_count) AS event_count,` + mergeState + `(uv_state) AS uv_state
 FROM (` + hourly + `) GROUP BY date,point_id,property_code,property_value`
 	query := `SELECT date,point_id,point_code,property_code,property_value,event_count,` + merge + `(uv_state)
 FROM (` + byValue + `) ORDER BY date DESC,event_count DESC,property_value`
+	hasOverflowFlag := false
 	if property.Type == tracking.String {
 		ranked := `SELECT *,row_number() OVER (PARTITION BY date ORDER BY event_count DESC,property_value) AS value_rank FROM (` + byValue + `)`
-		query = `SELECT date,point_id,any(point_code),property_code,if(value_rank<=50,property_value,'其他') AS property_bucket,
-sum(event_count),` + merge + `(uv_state)
+		query = `SELECT date,point_id,any(point_code),property_code,if(value_rank<=50,property_value,'') AS property_bucket,
+value_rank>50 AS is_overflow,sum(event_count),` + merge + `(uv_state)
 FROM (` + ranked + `)
-GROUP BY date,point_id,property_code,property_bucket ORDER BY date DESC,sum(event_count) DESC,property_bucket`
+GROUP BY date,point_id,property_code,property_bucket,is_overflow ORDER BY date DESC,sum(event_count) DESC,is_overflow,property_bucket`
+		hasOverflowFlag = true
 	}
 	rows, err := s.db.QueryContext(ctx, query, filter.ProjectID, filter.Start.UTC(), filter.End.UTC(), property.PointID, property.PropertyCode)
 	if err != nil {
@@ -167,8 +182,17 @@ GROUP BY date,point_id,property_code,property_bucket ORDER BY date DESC,sum(even
 	var result []reporting.DimensionAggregate
 	for rows.Next() {
 		var item reporting.DimensionAggregate
-		if err := rows.Scan(&item.Date, &item.PointID, &item.PointCode, &item.PropertyCode, &item.Value, &item.EventCount, &item.UV); err != nil {
+		destinations := []any{&item.Date, &item.PointID, &item.PointCode, &item.PropertyCode, &item.Value}
+		var overflow bool
+		if hasOverflowFlag {
+			destinations = append(destinations, &overflow)
+		}
+		destinations = append(destinations, &item.EventCount, &item.UV)
+		if err := rows.Scan(destinations...); err != nil {
 			return nil, fmt.Errorf("scan dimension property %s: %w", property.PropertyCode, err)
+		}
+		if overflow {
+			item.Value = "其他"
 		}
 		result = append(result, item)
 	}

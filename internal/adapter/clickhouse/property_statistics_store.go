@@ -23,7 +23,7 @@ func (s *PropertyStatisticsStore) ConfigureRetention(ctx context.Context, days i
 	if days < 90 {
 		return errors.New("property aggregate retention must be at least 90 days")
 	}
-	for _, table := range []string{s.metricTable, s.approximateTable, s.exactTable} {
+	for _, table := range []string{s.metricTable, s.approximateTable, s.exactTable, s.generationTable} {
 		if !identifierPattern.MatchString(table) {
 			return errors.New("invalid ClickHouse property statistics table name")
 		}

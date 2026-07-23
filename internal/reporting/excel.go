@@ -140,8 +140,6 @@ func metricExcelValue(aggregation tracking.MetricAggregation, value string) any 
 		if parsed, err := strconv.ParseUint(value, 10, 64); err == nil {
 			return parsed
 		}
-	} else if parsed, err := strconv.ParseFloat(value, 64); err == nil {
-		return parsed
 	}
 	return safeSpreadsheetText(value)
 }

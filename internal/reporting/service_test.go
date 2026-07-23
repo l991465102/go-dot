@@ -364,7 +364,8 @@ func TestQueryDailyOnlyBuildsSelectedPropertySectionsAndFillsDimensionZeros(t *t
 	for hour := 0; hour < 24; hour++ {
 		propertyStore.data.CommittedHours = append(propertyStore.data.CommittedHours, time.Date(2026, 7, 18, 16+hour, 0, 0, 0, time.UTC))
 	}
-	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, &fakeDailyStore{}, nil, func() time.Time { return now }).
+	businessDaily := &fakeDailyStore{committedHours: append([]time.Time(nil), propertyStore.data.CommittedHours[:23]...)}
+	service := NewService(&fakeAuthorizer{role: project.Viewer}, repo, businessDaily, nil, func() time.Time { return now }).
 		SetPropertyDailyStore(propertyStore)
 
 	result, err := service.QueryDaily(context.Background(), 7, DailyQuery{
@@ -388,7 +389,8 @@ func TestQueryDailyOnlyBuildsSelectedPropertySectionsAndFillsDimensionZeros(t *t
 		result.DimensionSections[0].Rows[2].Value, result.DimensionSections[0].Rows[3].Value,
 	})
 	require.EqualValues(t, 3, result.DimensionSections[0].Rows[2].EventCount)
-	require.Equal(t, []string{"2026-07-20"}, result.IncompleteDates)
+	require.False(t, result.MetricSections[0].Rows[1].Complete)
+	require.Equal(t, []string{"2026-07-20", "2026-07-19"}, result.IncompleteDates)
 	require.Equal(t, []string{"amount", "status"}, []string{propertyStore.properties[0].PropertyCode, propertyStore.properties[1].PropertyCode})
 	require.Equal(t, []tracking.MetricAggregation{tracking.AggregateSum, tracking.AggregateAvg}, propertyStore.properties[0].Aggregations)
 }
@@ -660,10 +662,12 @@ func (r *fakeRepository) ResolveProperties(_ context.Context, _ uint64, selectio
 }
 
 type fakeDailyStore struct {
-	items  []DailyAggregate
-	err    error
-	calls  int
-	filter DailyFilter
+	items          []DailyAggregate
+	err            error
+	generationErr  error
+	committedHours []time.Time
+	calls          int
+	filter         DailyFilter
 }
 
 type fakePropertyDailyStore struct {
@@ -693,6 +697,20 @@ func (s *fakeDailyStore) QueryDaily(_ context.Context, filter DailyFilter) ([]Da
 	s.calls++
 	s.filter = filter
 	return append([]DailyAggregate(nil), s.items...), s.err
+}
+
+func (s *fakeDailyStore) QueryCommittedHours(_ context.Context, filter DailyFilter) ([]time.Time, error) {
+	if s.generationErr != nil {
+		return nil, s.generationErr
+	}
+	if s.committedHours != nil {
+		return append([]time.Time(nil), s.committedHours...), nil
+	}
+	hours := make([]time.Time, 0, int(filter.End.Sub(filter.Start)/time.Hour))
+	for hour := filter.Start.UTC(); hour.Before(filter.End.UTC()); hour = hour.Add(time.Hour) {
+		hours = append(hours, hour)
+	}
+	return hours, nil
 }
 
 func newAdminServiceForTest() *Service {

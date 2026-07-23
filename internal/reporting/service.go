@@ -183,6 +183,11 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 	if err != nil {
 		return DailyResult{}, err
 	}
+	businessCommittedHours, err := s.daily.QueryCommittedHours(ctx, filter)
+	if err != nil {
+		return DailyResult{}, err
+	}
+	completeByDate := propertyCompleteness(start, end, today, location, businessCommittedHours)
 	type dailyKey struct {
 		date    string
 		pointID uint64
@@ -197,7 +202,7 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 	}
 	for date := end; !date.Before(start); date = date.AddDate(0, 0, -1) {
 		dateText := date.Format(time.DateOnly)
-		complete := date.Before(today)
+		complete := completeByDate[dateText]
 		for _, point := range points {
 			aggregate := indexed[dailyKey{date: dateText, pointID: point.ID}]
 			result.Items = append(result.Items, DailyItem{
@@ -224,7 +229,7 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 		if err != nil {
 			return DailyResult{}, err
 		}
-		completeByDate := propertyCompleteness(start, end, today, location, data.CommittedHours)
+		completeByDate = propertyCompleteness(start, end, today, location, intersectCommittedHours(businessCommittedHours, data.CommittedHours))
 		result.IncompleteDates = result.IncompleteDates[:0]
 		for date := end; !date.Before(start); date = date.AddDate(0, 0, -1) {
 			if !completeByDate[date.Format(time.DateOnly)] {
@@ -237,6 +242,21 @@ func (s *Service) QueryDaily(ctx context.Context, actor uint64, query DailyQuery
 		result.MetricSections, result.DimensionSections = buildPropertySections(start, end, propertyRefs, data, completeByDate)
 	}
 	return result, nil
+}
+
+func intersectCommittedHours(first, second []time.Time) []time.Time {
+	secondSet := make(map[int64]struct{}, len(second))
+	for _, hour := range second {
+		secondSet[hour.UTC().Truncate(time.Hour).Unix()] = struct{}{}
+	}
+	result := make([]time.Time, 0, min(len(first), len(second)))
+	for _, hour := range first {
+		normalized := hour.UTC().Truncate(time.Hour)
+		if _, ok := secondSet[normalized.Unix()]; ok {
+			result = append(result, normalized)
+		}
+	}
+	return result
 }
 
 func (s *Service) ExportDaily(ctx context.Context, actor uint64, username string, in ExportInput) (ExportFile, error) {
@@ -513,7 +533,7 @@ func buildPropertySections(start, end time.Time, refs []PropertyRef, data Proper
 					share = float64(value.EventCount) / float64(total)
 				}
 				section.Rows = append(section.Rows, DimensionRow{
-					Date: dateText, Complete: completeByDate[dateText], Value: value.Value,
+					Date: dateText, Complete: completeByDate[dateText], Value: value.Value, Overflow: value.Overflow,
 					EventCount: value.EventCount, UV: value.UV, Share: share,
 				})
 			}

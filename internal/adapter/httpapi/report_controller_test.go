@@ -246,6 +246,13 @@ type reportHTTPDailyStore struct{ items []reporting.DailyAggregate }
 func (s *reportHTTPDailyStore) QueryDaily(context.Context, reporting.DailyFilter) ([]reporting.DailyAggregate, error) {
 	return s.items, nil
 }
+func (s *reportHTTPDailyStore) QueryCommittedHours(_ context.Context, filter reporting.DailyFilter) ([]time.Time, error) {
+	hours := make([]time.Time, 0, int(filter.End.Sub(filter.Start)/time.Hour))
+	for hour := filter.Start.UTC(); hour.Before(filter.End.UTC()); hour = hour.Add(time.Hour) {
+		hours = append(hours, hour)
+	}
+	return hours, nil
+}
 
 type reportHTTPExporter struct {
 	contents []byte

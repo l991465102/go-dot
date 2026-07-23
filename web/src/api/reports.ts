@@ -101,7 +101,7 @@ export interface DimensionSection {
   point_code: string
   property_code: string
   property_name: string
-  rows: Array<{ date: string; complete: boolean; value: string; event_count: number; uv: number; share: number }>
+  rows: Array<{ date: string; complete: boolean; value: string; is_overflow?: boolean; event_count: number; uv: number; share: number }>
 }
 
 export async function listReports(projectId: number, signal?: AbortSignal): Promise<SavedReport[]> {

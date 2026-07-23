@@ -171,7 +171,7 @@ func writeDimensionSheet(book *excelize.File, headerStyle int, sheet string, sec
 		if coordinateErr != nil {
 			return coordinateErr
 		}
-		if err = stream.SetRow(cell, []interface{}{safeSpreadsheetText(item.Date), safeSpreadsheetText(dimensionDisplayValue(item.Value)), item.EventCount, item.UV, item.Share}); err != nil {
+		if err = stream.SetRow(cell, []interface{}{safeSpreadsheetText(item.Date), safeSpreadsheetText(dimensionDisplayValue(item.Value, item.Overflow)), item.EventCount, item.UV, item.Share}); err != nil {
 			return err
 		}
 	}
@@ -349,7 +349,10 @@ func propertySelectionList(result DailyResult) string {
 	return strings.Join(selections, "、")
 }
 
-func dimensionDisplayValue(value string) string {
+func dimensionDisplayValue(value string, overflow bool) string {
+	if overflow {
+		return "其他（Top 50 以外）"
+	}
 	if value == "" {
 		return "空字符串"
 	}

@@ -96,6 +96,7 @@ type DailyAggregate struct {
 
 type DailyStore interface {
 	QueryDaily(context.Context, DailyFilter) ([]DailyAggregate, error)
+	QueryCommittedHours(context.Context, DailyFilter) ([]time.Time, error)
 }
 
 type DailyItem struct {
@@ -141,6 +142,7 @@ type DimensionAggregate struct {
 	Date, PointCode, PropertyCode, Value string
 	PointID                              uint64
 	EventCount, UV                       uint64
+	Overflow                             bool
 }
 
 type PropertyDailyData struct {
@@ -176,6 +178,7 @@ type DimensionRow struct {
 	Date       string  `json:"date"`
 	Complete   bool    `json:"complete"`
 	Value      string  `json:"value"`
+	Overflow   bool    `json:"is_overflow,omitempty"`
 	EventCount uint64  `json:"event_count"`
 	UV         uint64  `json:"uv"`
 	Share      float64 `json:"share"`

@@ -193,6 +193,7 @@ GROUP BY date,point_id,property_code,property_bucket,is_overflow ORDER BY date D
 		}
 		if overflow {
 			item.Value = "其他"
+			item.Overflow = true
 		}
 		result = append(result, item)
 	}

@@ -53,6 +53,18 @@ func TestDailyReportExactQueryUsesExactMergeAndCommittedGenerations(t *testing.T
 	require.Equal(t, uint64(7), db.queryArgs[0][3])
 }
 
+func TestDailyReportQueriesCommittedBusinessHours(t *testing.T) {
+	db := &statisticsRecordingDB{queryErr: errors.New("recorded")}
+	start := time.Date(2026, 7, 18, 16, 0, 0, 0, time.UTC)
+	_, err := NewStatisticsStore(db).QueryCommittedHours(context.Background(), reporting.DailyFilter{
+		ProjectID: 9, Start: start, End: start.Add(24 * time.Hour), Timezone: "Asia/Shanghai",
+	})
+	require.ErrorContains(t, err, "recorded")
+	require.Len(t, db.queries, 1)
+	require.Contains(t, db.queries[0], "SELECT hour FROM business_stat_hour_generation FINAL")
+	require.Equal(t, []any{uint64(9), start, start.Add(24 * time.Hour)}, db.queryArgs[0])
+}
+
 func TestDailyReportExecutesMixedModeQueriesAndMergesResultSets(t *testing.T) {
 	connector := &dailyTestConnector{batches: []dailyRowsBatch{
 		{rows: [][]driver.Value{{"2026-07-20", int64(2), "view", int64(3), int64(2)}}},

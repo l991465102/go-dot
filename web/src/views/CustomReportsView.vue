@@ -343,7 +343,10 @@ function normalizedSelections(): PropertySelection[] {
 function aggregationLabel(value: MetricAggregation) {
   return ({ COUNT: '有值次数', SUM: '求和', AVG: '平均值', MIN: '最小值', MAX: '最大值' } as const)[value]
 }
-function dimensionValueLabel(value: string) { return value === '' ? '空字符串' : value }
+function dimensionValueLabel(value: string, overflow?: boolean) {
+  if (overflow) return '其他（Top 50 以外）'
+  return value === '' ? '空字符串' : value
+}
 
 function replaceReport(report: SavedReport) {
   const editableByID = new Map(editable.points.map((point) => [point.id, point]))
@@ -530,7 +533,7 @@ onBeforeUnmount(() => { invalidateContext(true) })
           <h3>分类属性：{{ section.point_code }} / {{ section.property_name }}（{{ section.property_code }}）</h3>
           <el-table :data="section.rows" empty-text="暂无分类属性数据">
             <el-table-column prop="date" label="时间" min-width="120" />
-            <el-table-column label="属性值" min-width="180"><template #default="{ row }">{{ dimensionValueLabel(row.value) }}</template></el-table-column>
+            <el-table-column label="属性值" min-width="180"><template #default="{ row }">{{ dimensionValueLabel(row.value, row.is_overflow) }}</template></el-table-column>
             <el-table-column prop="event_count" label="事件数" min-width="110" />
             <el-table-column prop="uv" label="UV" min-width="110" />
             <el-table-column label="占比" min-width="110"><template #default="{ row }">{{ (row.share * 100).toFixed(2) }}%</template></el-table-column>

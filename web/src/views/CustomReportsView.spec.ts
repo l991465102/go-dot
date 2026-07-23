@@ -268,7 +268,10 @@ describe('CustomReportsView', () => {
       point_count: 1, day_count: 7, total_pv: 1, items: [],
       dimension_sections: [{
         point_id: 99, sort_no: 0, point_code: 'legacy', property_code: 'status', property_name: '状态',
-        rows: [{ date: '2026-07-20', complete: true, value: '', event_count: 1, uv: 1, share: 1 }],
+        rows: [
+          { date: '2026-07-20', complete: true, value: '', event_count: 1, uv: 1, share: 0.5 },
+          { date: '2026-07-20', complete: true, value: '其他', is_overflow: true, event_count: 1, uv: 1, share: 0.5 },
+        ],
       }],
     })
 
@@ -286,6 +289,7 @@ describe('CustomReportsView', () => {
       property_queries: [{ point_id: 99, property_code: 'status', aggregations: [] }],
     }), expect.any(AbortSignal))
     expect(wrapper.text()).toContain('空字符串')
+    expect(wrapper.text()).toContain('其他（Top 50 以外）')
   })
 
   it('lets viewers load, query, and export while hiding every mutation control', async () => {

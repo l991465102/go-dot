@@ -4,9 +4,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/lzw7758/go-dot/internal/reporting"
 )
+
+func (s *StatisticsStore) QueryCommittedHours(ctx context.Context, filter reporting.DailyFilter) ([]time.Time, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("ClickHouse statistics executor is required")
+	}
+	if filter.ProjectID == 0 || filter.Start.IsZero() || !filter.End.After(filter.Start) || filter.Timezone != "Asia/Shanghai" {
+		return nil, errors.New("project, Asia/Shanghai timezone, and valid time range are required")
+	}
+	if !identifierPattern.MatchString(s.generationTable) {
+		return nil, errors.New("invalid ClickHouse statistics generation table name")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT hour FROM `+s.generationTable+` FINAL WHERE project_id=? AND hour>=? AND hour<? ORDER BY hour`,
+		filter.ProjectID, filter.Start.UTC(), filter.End.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("query committed business statistic hours: %w", err)
+	}
+	defer rows.Close()
+	var hours []time.Time
+	for rows.Next() {
+		var hour time.Time
+		if err := rows.Scan(&hour); err != nil {
+			return nil, fmt.Errorf("scan committed business statistic hour: %w", err)
+		}
+		hours = append(hours, hour.UTC())
+	}
+	return hours, rows.Err()
+}
 
 func (s *StatisticsStore) QueryDaily(ctx context.Context, filter reporting.DailyFilter) ([]reporting.DailyAggregate, error) {
 	if s == nil || s.db == nil {

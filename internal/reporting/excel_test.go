@@ -106,6 +106,7 @@ func TestExcelExporterAddsOnlySelectedPropertySheets(t *testing.T) {
 				Rows: []DimensionRow{
 					{Date: "2026-07-20", Value: "success", EventCount: 3, UV: 2, Share: 1},
 					{Date: "2026-07-20", Value: "", EventCount: 1, UV: 1, Share: 0.25},
+					{Date: "2026-07-20", Value: "其他", Overflow: true, EventCount: 2, UV: 2, Share: 0.5},
 				},
 			}},
 		},
@@ -126,6 +127,7 @@ func TestExcelExporterAddsOnlySelectedPropertySheets(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"2026-07-20", "success", "3", "2", "1"}, dimensionRows[1])
 	require.Equal(t, "空字符串", dimensionRows[2][1])
+	require.Equal(t, "其他（Top 50 以外）", dimensionRows[3][1])
 	require.Equal(t, "checkout.amount[SUM]、checkout.amount[AVG]、checkout.status[分类]", cellValue(t, book, "报表说明", "B7"))
 	require.Equal(t, "2026-07-20", cellValue(t, book, "报表说明", "B8"))
 }

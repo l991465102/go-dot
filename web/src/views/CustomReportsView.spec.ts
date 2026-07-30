@@ -41,7 +41,14 @@ const ElTableColumn = defineComponent({
 })
 const ElSelect = defineComponent({
   name: 'ElSelect',
-  props: ['modelValue', 'remoteMethod', 'disabled'],
+  props: {
+    modelValue: null,
+    remoteMethod: Function,
+    disabled: Boolean,
+    filterable: Boolean,
+    placeholder: String,
+    noMatchText: String,
+  },
   emits: ['update:modelValue'],
   setup(_, { slots }) { return () => h('div', slots.default?.()) },
 })
@@ -117,6 +124,16 @@ describe('CustomReportsView', () => {
     vi.mocked(trackingApi.listPoints)
       .mockResolvedValueOnce({ items: [point(1, 'published', '已发布点位', 'PUBLISHED')], total: 1 })
       .mockResolvedValueOnce({ items: [point(2, 'deprecated', '已废弃点位', 'DEPRECATED')], total: 1 })
+  })
+
+  it('lets users search saved reports by report name', async () => {
+    const wrapper = setup('ADMIN')
+    await flushPromises()
+
+    const select = componentByTest(wrapper, 'report-select')
+    expect(select.props('filterable')).toBe(true)
+    expect(select.props('placeholder')).toBe('输入报表名称搜索')
+    expect(select.props('noMatchText')).toBe('未找到匹配报表')
   })
 
   it('supports the complete admin query, ordered save, optimistic update, and edited export workflow', async () => {

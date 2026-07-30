@@ -460,7 +460,7 @@ onBeforeUnmount(() => { invalidateContext(true) })
       <h2 id="report-config-title">报表配置</h2>
       <el-form label-position="top" class="report-config-grid" @submit.prevent="runQuery">
         <el-form-item label="已保存报表">
-          <el-select v-model="selectedReportId" data-test="report-select" clearable :disabled="loadingReports || loadingReport || mutating" placeholder="选择报表" aria-label="已保存报表">
+          <el-select v-model="selectedReportId" data-test="report-select" clearable filterable :disabled="loadingReports || loadingReport || mutating" placeholder="输入报表名称搜索" no-match-text="未找到匹配报表" aria-label="已保存报表">
             <el-option v-for="report in reports" :key="report.id" :label="report.name" :value="report.id" />
           </el-select>
           <small v-if="savedSnapshot" class="report-meta">上次更新：{{ formatShanghaiDateTime(savedSnapshot.updated_at) }}</small>

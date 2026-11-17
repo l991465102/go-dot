@@ -28,7 +28,6 @@ import (
 	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/reporting"
-	"github.com/lzw7758/go-dot/internal/requirements"
 	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
@@ -91,7 +90,7 @@ func runAPI(ctx context.Context) error {
 	)
 	testEventStore := mysqladapter.NewTestEventStore(db)
 	testCollectHandler := httpapi.NewCollectHandler(httpapi.NewTestCollectController(ingestion.NewTestCollector(collector, testEventStore), cfg.Tracking.MaxBodyBytes), httpapi.NewWriteKeyMiddleware(projectRepo, time.Now), httpapi.NewRateLimitMiddleware(httpapi.NewRedisTokenBucket(redisClient, 200, 100)))
-	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService, overviewService, reportService, requirements.NewService(db, projectService), httpapi.NewTestEventsController(testEventStore, projectService), funnel.NewService(projectService, statisticsStore, time.Now), charts.NewService(db, projectService))
+	managementHandler := httpapi.NewHandler(authService, projectService, cfg.Auth.SecureCookies, trackingService, statisticsService, overviewService, reportService, httpapi.NewTestEventsController(testEventStore, projectService), funnel.NewService(projectService, statisticsStore, time.Now), charts.NewService(db, projectService))
 	handler := http.NewServeMux()
 	health := httpapi.NewHealthHandler(map[string]httpapi.HealthDependency{"mysql": db, "clickhouse": chDB, "redis": redisHealthDependency{client: redisClient}})
 	handler.Handle("/health/", health)

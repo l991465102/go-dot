@@ -12,7 +12,6 @@ import (
 	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/reporting"
-	"github.com/lzw7758/go-dot/internal/requirements"
 	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
@@ -251,10 +250,6 @@ func NewHandler(authService *auth.Service, projectService *project.Service, secu
 		case *funnel.Service:
 			if typed != nil {
 				NewFunnelController(typed).Register(mux)
-			}
-		case *requirements.Service:
-			if typed != nil {
-				NewRequirementController(typed).Register(mux)
 			}
 		case *reporting.Service:
 			if typed != nil {

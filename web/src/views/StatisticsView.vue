@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useProjectStore } from '@/stores/project'
 import { completedDayRange, completedHourRange, getRealtime, getSummary, getTrend, type StatisticsGranularity, type StatisticsRangeHours, type StatisticsSummary, type TrendPoint } from '@/api/statistics'
 import TrendChart from '@/components/statistics/TrendChart.vue'
+import FunnelPanel from '@/components/statistics/FunnelPanel.vue'
+import CompareTrend from '@/components/statistics/CompareTrend.vue'
 import { statisticsGranularityOptions, statisticsRangeOptions } from '@/constants/enum-options'
 
 const projects = useProjectStore()
@@ -24,6 +26,7 @@ async function load() {
   } catch (cause) { if (!signal.aborted) error.value = cause instanceof Error ? cause.message : '统计查询失败' }
   finally { if (!signal.aborted) loading.value = false }
 }
+const comparisonQuery = computed(() => { if (!project.value) return undefined; const range = filters.granularity === 'day' ? completedDayRange(Math.ceil(filters.hours / 24), project.value.timezone) : completedHourRange(filters.hours, project.value.timezone); return { projectId:project.value.id, ...range, timezone:project.value.timezone, granularity:filters.granularity, domainCategoryCode:filters.domain, moduleCategoryCode:filters.module, sceneCategoryCode:filters.scene, platform:filters.platform, channel:filters.channel } })
 watch(() => projects.currentProjectId, load, { immediate: true }); onBeforeUnmount(() => controller?.abort())
 </script>
 <template>
@@ -37,6 +40,8 @@ watch(() => projects.currentProjectId, load, { immediate: true }); onBeforeUnmou
     </el-form>
     <div v-if="error" class="page-error" role="alert">{{ error }}</div>
     <div class="metric-card-grid"><article class="overview-card"><p>历史 PV</p><strong>{{ summary?.pv ?? '—' }}</strong><small>约 1 分钟延迟</small></article><article class="overview-card"><p>历史 UV{{ summary ? (summary.approximate ? '（近似）':'（精确）'):'' }}</p><strong>{{ summary?.uv ?? '—' }}</strong></article><article class="overview-card"><p>实时 PV</p><strong>{{ realtime?.pv ?? '—' }}</strong><small>{{ filters.point ? 'Redis':'请选择点位' }}</small></article><article class="overview-card"><p>实时 UV{{ realtime ? (realtime.approximate ? '（近似）':'（精确）'):'' }}</p><strong>{{ realtime?.uv ?? '—' }}</strong></article></div>
+    <CompareTrend v-if="comparisonQuery" :query="comparisonQuery" />
+    <FunnelPanel v-if="project" :project-id="project.id" />
     <article class="overview-card"><TrendChart v-if="trend.length" :items="trend" :timezone="project?.timezone ?? 'UTC'"/><el-empty v-else-if="!loading" description="暂无统计数据"/></article>
   </section>
 </template>

@@ -644,6 +644,10 @@ func (r *TrackingRepository) DeleteDraft(ctx context.Context, projectID, id, act
 	}
 	result, e := tx.ExecContext(ctx, `DELETE FROM tracking_point WHERE project_id=? AND id=? AND definition_state='DRAFT'`, projectID, id)
 	if e != nil {
+		var mysqlErr *mysqldriver.MySQLError
+		if errors.As(e, &mysqlErr) && mysqlErr.Number == 1451 {
+			return tracking.ErrConflict
+		}
 		return e
 	}
 	affected, _ := result.RowsAffected()

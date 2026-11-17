@@ -27,6 +27,7 @@ const savedSnapshot = ref<SavedReport>()
 const availablePoints = ref<ReportPoint[]>([])
 const pointResults = new Map<number, ReportPoint>()
 const lastResult = ref<DailyResult>()
+const lastResultPoints = ref<ReportPoint[]>([])
 const loadingReports = ref(false)
 const loadingReport = ref(false)
 const loadingPoints = ref(false)
@@ -53,7 +54,7 @@ const editable = reactive({
 const hasMorePoints = computed(() => pointPage.value > 0 && (
   publishedLoaded.value < publishedTotal.value || deprecatedLoaded.value < deprecatedTotal.value
 ))
-const wideTable = computed(() => lastResult.value ? buildDailyWideTable(lastResult.value, editable.points) : undefined)
+const wideTable = computed(() => lastResult.value ? buildDailyWideTable(lastResult.value, lastResultPoints.value) : undefined)
 const selectedDimensionCount = computed(() => editable.propertySelections.filter((selection) => propertyDefinition(selection)?.analytics?.mode === 'DIMENSION').length)
 
 let projectController: AbortController | undefined
@@ -400,10 +401,11 @@ async function runQuery() {
   queryController?.abort()
   const active = new AbortController(); queryController = active
   const id = projectId.value; const epoch = contextEpoch
+  const queryPoints = editable.points.map((point) => ({ ...point }))
   querying.value = true; success.value = ''; error.value = ''
   try {
-    const result = await queryDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: editable.points.map((point) => point.id), property_queries: normalizedSelections() }, active.signal)
-    if (owns(active, epoch, id, queryController)) lastResult.value = result
+    const result = await queryDaily({ project_id: id, start_date: range.start, end_date: range.end, point_ids: queryPoints.map((point) => point.id), property_queries: normalizedSelections() }, active.signal)
+    if (owns(active, epoch, id, queryController)) { lastResult.value = result; lastResultPoints.value = queryPoints }
   } catch (cause) { if (owns(active, epoch, id, queryController) && !isCanceled(cause)) error.value = userError(cause, '报表查询失败') }
   finally { if (owns(active, epoch, id, queryController)) querying.value = false }
 }
@@ -516,6 +518,7 @@ onBeforeUnmount(() => { invalidateContext(true) })
         <el-alert v-if="lastResult.incomplete_dates?.length" type="warning" :closable="false" :title="`以下日期数据仍可能变化：${lastResult.incomplete_dates.join('、')}`" />
         <div class="report-summary-grid"><el-card><span>点位数</span><strong>{{ lastResult.point_count }}</strong></el-card><el-card><span>天数</span><strong>{{ lastResult.day_count }}</strong></el-card><el-card><span>总 PV</span><strong>{{ lastResult.total_pv }}</strong></el-card></div>
         <h3>点位统计</h3>
+        <p v-for="point in lastResultPoints" :key="point.id">{{ point.code }}：UV {{ point.uv_mode === 'EXACT' ? '精确（EXACT）' : '近似（APPROXIMATE）' }}</p>
         <el-table :data="wideTable?.rows ?? []" empty-text="暂无统计数据">
           <el-table-column prop="date" label="时间" min-width="120" fixed />
           <el-table-column v-for="column in wideTable?.columns ?? []" :key="column.key" :prop="column.key" :label="column.label" min-width="150" />

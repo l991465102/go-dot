@@ -1,0 +1,30 @@
+<script setup lang="ts">
+import SavedCharts from './SavedCharts.vue'
+import type { ChartConfig } from '@/api/charts'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { init, use, type ECharts } from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+import { listPoints, type Point } from '@/api/tracking'
+import { getTrend, type StatisticsQuery, type TrendPoint } from '@/api/statistics'
+const props=defineProps<{query:StatisticsQuery}>()
+type Series = { code:string; name:string; approximate:boolean; items:TrendPoint[] }
+const points=ref<Point[]>([]), selected=ref<string[]>([]), series=ref<Series[]>([]), metric=ref<'pv'|'uv'>('pv'), error=ref(''), loading=ref(false), root=ref<HTMLElement>()
+const savedQuery=ref<StatisticsQuery>()
+const activeQuery=computed(()=>savedQuery.value ?? props.query)
+const chartConfig=computed<ChartConfig>(()=>({point_codes:[...selected.value],start:activeQuery.value.start,end:activeQuery.value.end,metric:metric.value,granularity:activeQuery.value.granularity,timezone:activeQuery.value.timezone,platform:activeQuery.value.platform||'',channel:activeQuery.value.channel||'',domain:activeQuery.value.domainCategoryCode||'',module:activeQuery.value.moduleCategoryCode||'',scene:activeQuery.value.sceneCategoryCode||''}))
+function applyChart(c:ChartConfig){controller?.abort();loading.value=false;selected.value=[...c.point_codes];metric.value=c.metric||'pv';savedQuery.value={projectId:props.query.projectId,start:c.start,end:c.end,timezone:c.timezone||'UTC',granularity:c.granularity||'hour',platform:c.platform,channel:c.channel,domainCategoryCode:c.domain,moduleCategoryCode:c.module,sceneCategoryCode:c.scene};series.value=[]}
+const periods=computed(()=>[...new Set(series.value.flatMap(s=>s.items.map(p=>p.period)))].sort())
+let chart:ECharts|undefined, observer:ResizeObserver|undefined, controller:AbortController|undefined, loadVersion=0
+use([LineChart,GridComponent,LegendComponent,TooltipComponent,CanvasRenderer])
+async function loadPoints(){const version=++loadVersion,project=props.query.projectId;points.value=[];selected.value=[];series.value=[];error.value='';try{const first=await listPoints(project,{page:1,page_size:100});const all=[...first.items];for(let page=2;all.length<first.total;page++){const next=await listPoints(project,{page,page_size:100});if(!next.items.length)break;all.push(...next.items)}if(version===loadVersion)points.value=all.filter(p=>p.definition_state!=='DRAFT')}catch{if(version===loadVersion)error.value='点位列表加载失败'}}
+watch(()=>props.query.projectId,()=>{controller?.abort();void loadPoints()},{immediate:true})
+async function query(){if(selected.value.length<2||selected.value.length>5){error.value='请选择 2～5 个点位。';return}controller?.abort();const current=new AbortController();controller=current;const codes=[...selected.value];loading.value=true;error.value='';series.value=[];try{const data=await Promise.all(codes.map(code=>getTrend({...activeQuery.value,pointCodes:[code]},current.signal)));if(current.signal.aborted)return;series.value=codes.map((code,i)=>({code,name:points.value.find(p=>p.code===code)?.name||code,approximate:data[i]?.items[0]?.approximate ?? points.value.find(p=>p.code===code)?.uv_mode==='APPROXIMATE',items:data[i]?.items||[]}))}catch{if(!current.signal.aborted)error.value='趋势对比查询失败，请检查点位和筛选条件。'}finally{if(controller===current)loading.value=false}}
+function value(s:Series,period:string){const p=s.items.find(item=>item.period===period);return p?.[metric.value] ?? null}
+function draw(){if(!root.value||!series.value.length){chart?.dispose();chart=undefined;observer?.disconnect();observer=undefined;return};chart ||= init(root.value);const fmt=new Intl.DateTimeFormat('zh-CN',{timeZone:activeQuery.value.timezone,month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});chart.setOption({tooltip:{trigger:'axis'},legend:{type:'scroll'},xAxis:{type:'category',data:periods.value.map(p=>fmt.format(new Date(p)))},yAxis:{type:'value'},series:series.value.map(s=>({name:`${s.name} (${s.code})${metric.value==='uv'?(s.approximate?' 近似 UV':' 精确 UV'):''}`,type:'line',connectNulls:false,data:periods.value.map(p=>value(s,p))}))},true);if(!observer){observer=new ResizeObserver(()=>chart?.resize());observer.observe(root.value)}}
+watch(()=>props.query,()=>{controller?.abort();loading.value=false;series.value=[];savedQuery.value=undefined},{deep:true})
+watch([series,metric,root],draw,{deep:true,flush:'post'})
+onBeforeUnmount(()=>{loadVersion++;controller?.abort();observer?.disconnect();chart?.dispose()})
+</script>
+<template><article class="overview-card"><h2>多点位趋势对比</h2><p>使用上方时间范围、粒度、分类、平台和渠道筛选；每个点位独立计算 UV，缺失的时间桶显示为空。</p><p v-if="savedQuery">已加载保存时的固定时间和筛选；更改上方条件可恢复当前筛选。</p><SavedCharts :project-id="props.query.projectId" kind="TREND" :config="chartConfig" @load="applyChart" /><label>选择 2～5 个点位<select v-model="selected" multiple aria-label="对比点位"><option v-for="p in points" :key="p.id" :value="p.code">{{ p.name }}（{{ p.code }}）</option></select></label><label>指标<select v-model="metric"><option value="pv">PV</option><option value="uv">UV</option></select></label><button type="button" :disabled="loading" @click="query">{{ loading?'查询中':'查询对比' }}</button><p v-if="error" role="alert">{{ error }}</p><template v-if="series.length"><div v-if="periods.length" ref="root" class="trend-chart" role="img" aria-label="多点位趋势对比图"></div><p v-else>所选范围暂无数据</p><table v-if="periods.length"><thead><tr><th>时间</th><th v-for="s in series" :key="s.code">{{ s.name }}（{{ s.code }}）{{ metric==='uv' ? (s.approximate?'近似 UV':'精确 UV') : 'PV' }}</th></tr></thead><tbody><tr v-for="period in periods" :key="period"><td>{{ new Date(period).toLocaleString('zh-CN',{timeZone:activeQuery.timezone}) }}</td><td v-for="s in series" :key="s.code">{{ value(s,period) ?? '—' }}</td></tr></tbody></table></template></article></template>

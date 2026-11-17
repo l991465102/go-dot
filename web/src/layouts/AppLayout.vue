@@ -12,6 +12,7 @@ const mobileOpen = ref(false)
 
 const navItems = computed(() => [
   { label: '项目概览', route: 'project-overview', marker: '概' },
+  { label: '埋点需求', route: 'requirements', marker: '需' },
   { label: '点位管理', route: 'points', marker: '点' },
   { label: '业务分类', route: 'categories', marker: '类' },
   { label: '统计分析', route: 'statistics', marker: '统' },

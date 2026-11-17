@@ -184,6 +184,7 @@ describe('CustomReportsView', () => {
     expect(wrapper.text()).toContain('deprecated_uv')
     expect(wrapper.text()).toContain('published_pv')
     expect(wrapper.text()).toContain('published_uv')
+    expect(wrapper.text()).toContain('UV 精确（EXACT）')
     expect(wrapper.text().indexOf('deprecated_pv')).toBeLessThan(wrapper.text().indexOf('published_pv'))
     expect(wrapper.text().indexOf('2026-07-21')).toBeLessThan(wrapper.text().indexOf('2026-07-20'))
     expect(wrapper.text()).toContain('12')

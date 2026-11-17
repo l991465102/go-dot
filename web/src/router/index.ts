@@ -24,7 +24,6 @@ export function createAppRouter(): Router {
         children: [
           { path: 'overview', name: 'project-overview', component: () => import('@/views/ProjectOverviewView.vue') },
           { path: 'points', name: 'points', component: PointWorkbenchView },
-          { path: 'requirements', name: 'requirements', component: () => import('@/views/RequirementsView.vue') },
           { path: 'points/:pointId', name: 'point-detail', component: PointDetailView, props: (route) => ({ projectId: Number(route.params.projectId), pointId: Number(route.params.pointId), canMutate: useProjectStore().canMutate }) },
           { path: 'categories', name: 'categories', component: CategoryManagementView },
           { path: 'statistics', name: 'statistics', component: () => import('@/views/StatisticsView.vue') },

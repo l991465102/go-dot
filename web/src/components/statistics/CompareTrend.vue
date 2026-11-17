@@ -11,6 +11,8 @@ import { getTrend, type StatisticsQuery, type TrendPoint } from '@/api/statistic
 const props=defineProps<{query:StatisticsQuery}>()
 type Series = { code:string; name:string; approximate:boolean; items:TrendPoint[] }
 const points=ref<Point[]>([]), selected=ref<string[]>([]), series=ref<Series[]>([]), metric=ref<'pv'|'uv'>('pv'), error=ref(''), loading=ref(false), root=ref<HTMLElement>()
+const pointSearch=ref('')
+const filteredPoints=computed(()=>{const q=pointSearch.value.trim().toLowerCase();return q ? points.value.filter(p=>`${p.name} ${p.code}`.toLowerCase().includes(q)) : points.value})
 const savedQuery=ref<StatisticsQuery>()
 const activeQuery=computed(()=>savedQuery.value ?? props.query)
 const chartConfig=computed<ChartConfig>(()=>({point_codes:[...selected.value],start:activeQuery.value.start,end:activeQuery.value.end,metric:metric.value,granularity:activeQuery.value.granularity,timezone:activeQuery.value.timezone,platform:activeQuery.value.platform||'',channel:activeQuery.value.channel||'',domain:activeQuery.value.domainCategoryCode||'',module:activeQuery.value.moduleCategoryCode||'',scene:activeQuery.value.sceneCategoryCode||''}))
@@ -27,4 +29,20 @@ watch(()=>props.query,()=>{controller?.abort();loading.value=false;series.value=
 watch([series,metric,root],draw,{deep:true,flush:'post'})
 onBeforeUnmount(()=>{loadVersion++;controller?.abort();observer?.disconnect();chart?.dispose()})
 </script>
-<template><article class="overview-card"><h2>多点位趋势对比</h2><p>使用上方时间范围、粒度、分类、平台和渠道筛选；每个点位独立计算 UV，缺失的时间桶显示为空。</p><p v-if="savedQuery">已加载保存时的固定时间和筛选；更改上方条件可恢复当前筛选。</p><SavedCharts :project-id="props.query.projectId" kind="TREND" :config="chartConfig" @load="applyChart" /><label>选择 2～5 个点位<select v-model="selected" multiple aria-label="对比点位"><option v-for="p in points" :key="p.id" :value="p.code">{{ p.name }}（{{ p.code }}）</option></select></label><label>指标<select v-model="metric"><option value="pv">PV</option><option value="uv">UV</option></select></label><button type="button" :disabled="loading" @click="query">{{ loading?'查询中':'查询对比' }}</button><p v-if="error" role="alert">{{ error }}</p><template v-if="series.length"><div v-if="periods.length" ref="root" class="trend-chart" role="img" aria-label="多点位趋势对比图"></div><p v-else>所选范围暂无数据</p><table v-if="periods.length"><thead><tr><th>时间</th><th v-for="s in series" :key="s.code">{{ s.name }}（{{ s.code }}）{{ metric==='uv' ? (s.approximate?'近似 UV':'精确 UV') : 'PV' }}</th></tr></thead><tbody><tr v-for="period in periods" :key="period"><td>{{ new Date(period).toLocaleString('zh-CN',{timeZone:activeQuery.timezone}) }}</td><td v-for="s in series" :key="s.code">{{ value(s,period) ?? '—' }}</td></tr></tbody></table></template></article></template>
+<template>
+  <article class="overview-card analytics-card">
+    <header class="analytics-card__header"><div><span class="analytics-card__eyebrow">TREND COMPARISON</span><h2>多点位趋势对比</h2><p>对比不同点位在同一时间范围内的表现。</p></div><span class="analytics-card__badge">{{ selected.length }} / 5 个点位</span></header>
+    <SavedCharts :project-id="props.query.projectId" kind="TREND" :config="chartConfig" @load="applyChart" />
+    <p v-if="savedQuery" class="analytics-notice">已加载保存时的固定时间和筛选；更改上方条件可恢复当前筛选。</p>
+    <div class="analytics-form">
+      <div class="analytics-field analytics-field--wide"><div class="analytics-field__heading"><label for="compare-search">选择点位 <span>至少 2 个，最多 5 个</span></label><input id="compare-search" v-model="pointSearch" class="analytics-search" placeholder="搜索点位名称或编码"></div>
+        <div class="point-choices" role="group" aria-label="对比点位"><label v-for="p in filteredPoints" :key="p.id" class="point-choice" :class="{'is-selected':selected.includes(p.code),'is-disabled':selected.length>=5&&!selected.includes(p.code)}"><input v-model="selected" type="checkbox" :value="p.code" :disabled="selected.length>=5&&!selected.includes(p.code)"><span class="point-choice__mark" aria-hidden="true">✓</span><span class="point-choice__name">{{ p.name }}<small>{{ p.code }}</small></span></label><p v-if="!filteredPoints.length" class="analytics-empty">没有匹配的点位</p></div>
+      </div>
+      <label class="analytics-field">统计指标<select v-model="metric" aria-label="统计指标"><option value="pv">PV · 事件次数</option><option value="uv">UV · 访问人数</option></select></label>
+      <div class="analytics-form__action"><button type="button" class="primary-button" :disabled="loading" @click="query">{{ loading ? '查询中…' : '查询对比' }}</button></div>
+    </div>
+    <p class="analytics-hint">沿用上方时间、分类、平台和渠道条件。UV 按点位独立计算；缺失的时间桶显示为空。</p>
+    <p v-if="error" class="analytics-error" role="alert">{{ error }}</p>
+    <template v-if="series.length"><div v-if="periods.length" ref="root" class="trend-chart" role="img" aria-label="多点位趋势对比图"></div><p v-else class="analytics-empty">所选范围暂无数据</p><div v-if="periods.length" class="analytics-table-wrap"><table class="analytics-table"><thead><tr><th>时间</th><th v-for="s in series" :key="s.code">{{ s.name }}（{{ s.code }}）{{ metric==='uv' ? (s.approximate?'近似 UV':'精确 UV') : 'PV' }}</th></tr></thead><tbody><tr v-for="period in periods" :key="period"><td>{{ new Date(period).toLocaleString('zh-CN',{timeZone:activeQuery.timezone}) }}</td><td v-for="s in series" :key="s.code">{{ value(s,period) ?? '—' }}</td></tr></tbody></table></div></template>
+  </article>
+</template>

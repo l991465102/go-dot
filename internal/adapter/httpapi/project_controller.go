@@ -7,9 +7,12 @@ import (
 
 	v1 "github.com/lzw7758/go-dot/api/projects/v1"
 	"github.com/lzw7758/go-dot/internal/auth"
+	"github.com/lzw7758/go-dot/internal/charts"
+	"github.com/lzw7758/go-dot/internal/funnel"
 	"github.com/lzw7758/go-dot/internal/overview"
 	"github.com/lzw7758/go-dot/internal/project"
 	"github.com/lzw7758/go-dot/internal/reporting"
+	"github.com/lzw7758/go-dot/internal/requirements"
 	"github.com/lzw7758/go-dot/internal/statistics"
 	"github.com/lzw7758/go-dot/internal/tracking"
 )
@@ -236,6 +239,22 @@ func NewHandler(authService *auth.Service, projectService *project.Service, secu
 		case *overview.Service:
 			if typed != nil {
 				NewOverviewController(typed).Register(mux)
+			}
+		case *TestEventsController:
+			if typed != nil {
+				typed.Register(mux)
+			}
+		case *charts.Service:
+			if typed != nil {
+				NewChartController(typed).Register(mux)
+			}
+		case *funnel.Service:
+			if typed != nil {
+				NewFunnelController(typed).Register(mux)
+			}
+		case *requirements.Service:
+			if typed != nil {
+				NewRequirementController(typed).Register(mux)
 			}
 		case *reporting.Service:
 			if typed != nil {

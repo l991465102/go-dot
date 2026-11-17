@@ -86,8 +86,8 @@ test('statistics supports dimensions and exact or approximate UV labels', async 
   await expect(page.getByLabel('范围')).toBeVisible()
   await expect(page.getByLabel('粒度')).toBeVisible()
   await expect(page.getByLabel('点位编码')).toBeVisible()
-  await expect(page.getByLabel('平台')).toBeVisible()
-  await expect(page.getByLabel('渠道')).toBeVisible()
+  await expect(page.getByLabel('平台', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('渠道', { exact: true })).toBeVisible()
   await expect(page.getByText(/精确|近似/).first()).toBeVisible()
 })
 
@@ -103,11 +103,11 @@ test('admin queries, saves, and downloads a two-point custom report', async ({ p
   await page.getByRole('option', { name: new RegExp(approximatePointName) }).click()
   await page.keyboard.press('Escape')
 
-  await page.locator('[data-test="report-name"] input').fill(`Playwright 验收 ${Date.now()}`)
+  await page.getByLabel('报表名称', { exact: true }).fill(`Playwright 验收 ${Date.now()}`)
   await page.locator('[data-test="query-report"]').click()
   await expect(page.getByText('统计时区：Asia/Shanghai').last()).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: 'PV' })).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: 'UV' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: /_pv$/i })).toHaveCount(2)
+  await expect(page.getByRole('columnheader', { name: /_uv$/i })).toHaveCount(2)
   await expect(page.getByText('EXACT').first()).toBeVisible()
   await expect(page.getByText('APPROXIMATE').first()).toBeVisible()
 

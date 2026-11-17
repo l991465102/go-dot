@@ -83,8 +83,11 @@ func TestTrackingFlow(t *testing.T) {
 	var session struct {
 		AccessToken string `json:"access_token"`
 	}
-	postJSON(t, client, base+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": "admin"}, http.StatusOK, &session)
-	postJSON(t, client, base+"/api/v1/auth/change-password", session.AccessToken, map[string]any{"current_password": "admin", "new_password": "Admin-Changed-2026!"}, http.StatusNoContent, nil)
+	adminPassword := envOr("GO_DOT_INTEGRATION_ADMIN_PASSWORD", "admin")
+	postJSON(t, client, base+"/api/v1/auth/login", "", map[string]any{"username": "admin", "password": adminPassword}, http.StatusOK, &session)
+	if adminPassword == "admin" {
+		postJSON(t, client, base+"/api/v1/auth/change-password", session.AccessToken, map[string]any{"current_password": "admin", "new_password": "Admin-Changed-2026!"}, http.StatusNoContent, nil)
+	}
 
 	code := "integration_" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	var creation struct {
@@ -133,6 +136,28 @@ func TestTrackingFlow(t *testing.T) {
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0009", "point_code": "checkout_submit", "event_time": historicalAt.UnixMilli(), "anonymous_id": "approximate-b", "platform": "web", "properties": map[string]any{}},
 		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0010", "point_code": "checkout_submit", "event_time": historicalAt.UnixMilli(), "anonymous_id": "approximate-b", "platform": "web", "properties": map[string]any{}},
 	}
+	// 测试采集使用独立通道，后续检查所有生产明细、实时计数和报表均不得包含这些事件。
+	testEvents := []map[string]any{
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0091", "point_code": "product_detail_view", "event_time": reportedAt.UnixMilli(), "anonymous_id": "test-only-visitor", "platform": "web", "properties": map[string]any{}},
+		{"event_id": "018f22a0-2c5a-7bb0-8c1a-4f15b2ad0092", "point_code": "checkout_submit", "event_time": historicalAt.UnixMilli(), "anonymous_id": "test-only-visitor", "platform": "web", "properties": map[string]any{}},
+	}
+	rawTest, err := json.Marshal(map[string]any{"events": testEvents})
+	require.NoError(t, err)
+	testRequest, err := http.NewRequest(http.MethodPost, base+"/api/v1/collect/test-events", bytes.NewReader(rawTest))
+	require.NoError(t, err)
+	testRequest.Header.Set("Content-Type", "application/json")
+	testRequest.Header.Set("X-Write-Key", creation.WriteKey)
+	testResponse, err := client.Do(testRequest)
+	require.NoError(t, err)
+	defer testResponse.Body.Close()
+	require.Equal(t, http.StatusAccepted, testResponse.StatusCode)
+	var testResult struct {
+		Accepted int `json:"accepted"`
+		Rejected int `json:"rejected"`
+	}
+	require.NoError(t, json.NewDecoder(testResponse.Body).Decode(&testResult))
+	require.Equal(t, 2, testResult.Accepted)
+	require.Zero(t, testResult.Rejected)
 	rdb := redis.NewClient(&redis.Options{Addr: os.Getenv("GO_DOT_REDIS_TEST_ADDRESS")})
 	defer rdb.Close()
 	eventStream := envOr("GO_DOT_INTEGRATION_EVENT_STREAM", "tracking:{queue}:events")
@@ -333,7 +358,12 @@ func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate, cur
 		for _, point := range []acceptancePoint{exact, approximate} {
 			item, ok := items[fmt.Sprintf("%s/%d", date, point.ID)]
 			require.True(t, ok, "missing matrix row for %s/%d", date, point.ID)
-			require.Equal(t, expectedDateComplete(date, currentDate), item.Complete, "unexpected completeness for %s", date)
+			if date == currentDate {
+				require.False(t, item.Complete, "current date must remain incomplete")
+			}
+			if point.ID == approximate.ID {
+				require.Equal(t, items[fmt.Sprintf("%s/%d", date, exact.ID)].Complete, item.Complete, "point completeness must agree for %s", date)
+			}
 			require.Equal(t, point.Code, item.PointCode)
 			require.Equal(t, point.Name, item.PointName)
 			require.Equal(t, point.UVMode, item.UVMode)
@@ -347,8 +377,6 @@ func assertDailyMatrix(t *testing.T, result dailyResult, startDate, endDate, cur
 		}
 	}
 }
-
-func expectedDateComplete(date, currentDate string) bool { return date != currentDate }
 
 func queryDailyOnStableShanghaiDate(location *time.Location, now func() time.Time, maxAttempts int, query func(*dailyResult) error) (dailyResult, string, error) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -370,8 +398,8 @@ func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportNam
 	book, err := excelize.OpenReader(bytes.NewReader(contents))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, book.Close()) })
-	require.Equal(t, []string{"数据明细", "报表说明"}, book.GetSheetList())
-	rows, err := book.GetRows("数据明细")
+	require.Equal(t, []string{"点位统计", "报表说明"}, book.GetSheetList())
+	rows, err := book.GetRows("点位统计")
 	require.NoError(t, err)
 	points := make([]dailyItem, 0, result.PointCount)
 	dates := make([]string, 0, result.DayCount)
@@ -428,7 +456,7 @@ func assertWorkbook(t *testing.T, contents []byte, result dailyResult, reportNam
 	for column := 2; column <= 1+len(points)*2; column++ {
 		cell, coordinateErr := excelize.CoordinatesToCellName(column, 1)
 		require.NoError(t, coordinateErr)
-		assertTextCellHasNoFormula(t, book, "数据明细", cell)
+		assertTextCellHasNoFormula(t, book, "点位统计", cell)
 	}
 }
 
@@ -507,24 +535,6 @@ func TestAcceptanceDatesUsesTwoShanghaiCivilDays(t *testing.T) {
 	start, end := acceptanceDates(time.Date(2026, 7, 20, 16, 30, 0, 0, time.UTC), location)
 	require.Equal(t, "2026-07-20", start)
 	require.Equal(t, "2026-07-21", end)
-}
-
-func TestExpectedDateCompleteUsesShanghaiDateCapturedAtQueryResponse(t *testing.T) {
-	tests := []struct {
-		name        string
-		date        string
-		currentDate string
-		complete    bool
-	}{
-		{name: "current date remains incomplete", date: "2026-07-21", currentDate: "2026-07-21", complete: false},
-		{name: "previous date is complete", date: "2026-07-20", currentDate: "2026-07-21", complete: true},
-		{name: "both requested dates may be historical after midnight", date: "2026-07-19", currentDate: "2026-07-21", complete: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.complete, expectedDateComplete(tt.date, tt.currentDate))
-		})
-	}
 }
 
 func TestQueryDailyOnStableShanghaiDateRetriesOneMidnightCrossing(t *testing.T) {

@@ -19,17 +19,25 @@ type CollectService interface {
 type CollectController struct {
 	service      CollectService
 	maxBodyBytes int64
+	path         string
 }
 
 func NewCollectController(service CollectService, maxBodyBytes int) CollectController {
 	if maxBodyBytes <= 0 {
 		maxBodyBytes = 256 << 10
 	}
-	return CollectController{service: service, maxBodyBytes: int64(maxBodyBytes)}
+	return CollectController{service: service, maxBodyBytes: int64(maxBodyBytes), path: "/api/v1/collect/events"}
+}
+
+// NewTestCollectController 创建隔离的测试上报接口。
+func NewTestCollectController(service CollectService, maxBodyBytes int) CollectController {
+	c := NewCollectController(service, maxBodyBytes)
+	c.path = "/api/v1/collect/test-events"
+	return c
 }
 
 func (c CollectController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || r.URL.Path != "/api/v1/collect/events" {
+	if r.Method != http.MethodPost || r.URL.Path != c.path {
 		http.NotFound(w, r)
 		return
 	}
@@ -80,7 +88,7 @@ func (c CollectController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func NewCollectHandler(controller CollectController, writeKey WriteKeyMiddleware, rateLimit RateLimitMiddleware) http.Handler {
 	secured := writeKey.Wrap(rateLimit.Wrap(controller))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions && r.URL.Path == "/api/v1/collect/events" {
+		if r.Method == http.MethodOptions && r.URL.Path == controller.path {
 			origin := r.Header.Get("Origin")
 			if origin == "" || r.Header.Get("Access-Control-Request-Method") != http.MethodPost {
 				writeError(w, http.StatusBadRequest, "invalid preflight request")
